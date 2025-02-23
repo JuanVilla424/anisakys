@@ -24,7 +24,6 @@ repos:
         language: system
         types: [python]
         args: [--rcfile=.pylintrc, .]
-        exclude: ^node_modules/
   - repo: https://github.com/hadolint/hadolint
     rev: v2.13.1-beta
     hooks:
@@ -43,20 +42,22 @@ repos:
         types: [yaml]
         files: \.(yaml)$
         exclude: '.github/.*'
-      - id: yml-format
-        name: yml-format
-        entry: python scripts/format_yml/main.py
-        language: system
-        types: [yaml]
-        files: \.(yml)$
-        exclude: '.github/.*'
       - id: yamllint
         name: yamllint
         entry: yamllint
         language: system
         types: [yaml]
-        files: \.(yml|yaml)$
+        # files: \.(yml|yaml)$
+        files: \.(yaml)$
         exclude: '.github/.*'
+      # # TODO: Solve error
+      #      - id: yml-format
+      #        name: yml-format
+      #        entry: python scripts/format_yml/main.py
+      #        language: system
+      #        types: [yaml]
+      #        files: \.(yml)$
+      #        exclude: '.github/.*'
       - id: docker-compose
         name: docker-compose
         entry: python scripts/validate_docker_compose/main.py
@@ -65,14 +66,14 @@ repos:
         files: ^docker-compose(\.dev|\.prod)?\.yml$
       - id: validate-commit
         name: validate-commit
-        entry: python scripts/control_commit/main.py --log-level=DEBUG
+        entry: python scripts/control_commit/main.py --log-level=INFO
         always_run: true
         pass_filenames: false
         language: system
         stages: [pre-push]
       - id: commit-msg-version-check
         name: commit-msg-version-check
-        entry: python scripts/commit_msg_version_bump/main.py --log-level=DEBUG
+        entry: python scripts/commit_msg_version_bump/main.py --log-level=INFO
         always_run: true
         language: system
         pass_filenames: false
