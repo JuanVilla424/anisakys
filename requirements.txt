@@ -4,6 +4,9 @@ pre-commit>=4.0.0
 # Pylint for python lint
 pylint>=3.3.1
 
+# YamlLint for YAML lint
+yamllint>=1.35.1
+
 # Poetry for package management alternative
 poetry>=1.8.4
 
