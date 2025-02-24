@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     SCAN_INTERVAL: int = 300
     KEYWORDS: str = Field()
     DOMAINS: str = Field()
+    ALLOWED_SITES: str = Field()
 
     model_config = {"env_file": ".env"}
 
