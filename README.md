@@ -1,8 +1,8 @@
-# Anisakys 🔍
+# 🔍 Anisakys
 
 ![Security](https://img.shields.io/badge/Security-RedTeam-blueviolet)
 ![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=fff)
-![Python3](https://img.shields.io/badge/Python-3.9%2B-blue.svg)
+![Python3](https://img.shields.io/badge/Python-3.10%2B-blue.svg)
 ![Status](https://img.shields.io/badge/Status-Development-blue.svg)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0.en.html)
 
