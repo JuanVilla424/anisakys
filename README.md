@@ -1,6 +1,6 @@
 # 🔍 Anisakys
 
-![Security](https://img.shields.io/badge/Security-RedTeam-blueviolet)
+![Security](https://img.shields.io/badge/Security-BlueTeam-blue)
 ![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=fff)
 ![Python3](https://img.shields.io/badge/Python-3.10%2B-blue.svg)
 ![Status](https://img.shields.io/badge/Status-Development-blue.svg)
