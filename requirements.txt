@@ -25,3 +25,12 @@ pytest-cov>=4.0.0
 
 # Coverage Reporting
 coverage>=7.2.5
+
+requests~=2.32.3
+cryptography~=44.0.1
+
+beautifulsoup4>=4.13.2
+
+# PyDantic
+pydantic>=2.9.1
+pydantic-settings>=2.0.0
