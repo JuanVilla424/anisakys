@@ -1,7 +1,5 @@
 # Anisakys 🔍
 
-Advanced Phishing Domain Detection System
-
 ![Security](https://img.shields.io/badge/Security-RedTeam-blueviolet)
 ![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=fff)
 ![Python3](https://img.shields.io/badge/Python-3.9%2B-blue.svg)
