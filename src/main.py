@@ -1,42 +1,13 @@
 #!/usr/bin/env python3
 import os
 import time
-import logging
 import argparse
 import requests
 from itertools import permutations
-from logging.handlers import RotatingFileHandler
 import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from config import settings
-
-# Configure logger
-logger = logging.getLogger("__main__")
-
-
-def configure_logger(log_level: str = "INFO") -> None:
-    """
-    Configures the logger with a rotating file handler and console handler.
-    Only adds handlers if they are not already added.
-    """
-    numeric_level = getattr(logging, log_level.upper(), None)
-    if not isinstance(numeric_level, int):
-        raise ValueError(f"Invalid log level: {log_level}")
-
-    logger.setLevel(numeric_level)
-    os.makedirs("logs", exist_ok=True)
-
-    # Clear existing handlers to avoid duplicates
-    logger.handlers.clear()
-    file_handler = RotatingFileHandler("logs/anisakys.log", maxBytes=5 * 1024 * 1024, backupCount=5)
-    console_handler = logging.StreamHandler()
-
-    formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
-    file_handler.setFormatter(formatter)
-    console_handler.setFormatter(formatter)
-
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
+from src.config import settings
+from src.logger import logger
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -217,7 +188,6 @@ def scan_site(domain: str, keywords: list[str]):
 
 def main():
     args = parse_arguments()
-    configure_logger(args.log_level)
 
     # Override settings.TIMEOUT if provided via command-line.
     if args.timeout:
