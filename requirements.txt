@@ -36,3 +36,5 @@ pydantic>=2.9.1
 pydantic-settings>=2.0.0
 python-whois>=0.9.4
 jinja2>=3.1.4
+tld>=0.12.7
+email-verifier>=1.0.0
