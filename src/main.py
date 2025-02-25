@@ -3,9 +3,12 @@
 Anisakys Phishing Detection Engine with Basic WHOIS Lookup and Registrar Abuse Caching
 
 This script scans and processes phishing sites. It retrieves WHOIS information using the
-python-whois library and then determines the appropriate abuse email address solely based on
+python-whois library and then determines the appropriate abuse email addresses solely based on
 the WHOIS data and a cached registrar_abuse table. When WHOIS data indicates a registrar that is known,
-the cached abuse email is used. Otherwise, the system attempts to extract an abuse email using regex.
+the cached abuse email is used. Otherwise, the system attempts to extract all abuse-related email addresses using regex,
+and sends the abuse report individually to each detected address.
+If any extracted email contains "abuse-tracker" and a better candidate is available, the "abuse-tracker"
+address is demoted to CC.
 
 Usage examples:
   ./anisakys.py --timeout 30 --log-level DEBUG
@@ -22,7 +25,7 @@ from itertools import permutations
 import datetime
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Set, Optional
+from typing import List, Optional, Set
 import threading
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -77,8 +80,9 @@ def init_db(db_file: str = "scan_results.db") -> None:
 
 def init_phishing_db(db_file: str = "scan_results.db") -> None:
     """
-    Initialize the phishing_sites table. This table stores flagged phishing URLs, WHOIS data,
-    an optionally provided abuse email, and flags for reporting.
+    Initialize the phishing_sites table.
+    This table stores flagged phishing URLs, WHOIS data, an optionally provided abuse email,
+    and flags for reporting.
     """
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
@@ -103,7 +107,7 @@ def init_phishing_db(db_file: str = "scan_results.db") -> None:
 
 def init_registrar_abuse_db(db_file: str = "scan_results.db") -> None:
     """
-    Initialize the registrar_abuse table, which caches known abuse emails for registrars.
+    Initialize the registrar_abuse table, which caches known abuse email addresses for registrars.
     """
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
@@ -357,43 +361,45 @@ def get_abuse_email_by_registrar(registrar: str, db_file: str = "scan_results.db
     return None
 
 
-def extract_abuse_email(whois_data, domain: str) -> Optional[str]:
+def extract_abuse_emails(whois_data, domain: str) -> List[str]:
     """
-    Extract an abuse email from WHOIS data using regex; if none is found, use the registrar cache.
+    Extract all abuse-related email addresses from WHOIS data using regex.
+    If a cached abuse email exists for the registrar, that email is used exclusively.
     """
-    whois_str = str(whois_data)
-    emails = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", whois_str)
-    abuse_emails = [email for email in emails if "abuse" in email.lower()]
-    if abuse_emails:
-        logger.debug(f"Found abuse email via regex: {abuse_emails[0]}")
-        return abuse_emails[0]
     registrar = extract_registrar(whois_data) or ""
     abuse_from_registrar = get_abuse_email_by_registrar(registrar, db_file="scan_results.db")
     if abuse_from_registrar:
         logger.debug(f"Using abuse email from registrar cache: {abuse_from_registrar}")
-        return abuse_from_registrar
-    logger.debug("No abuse email found via registrar cache; returning None")
-    return None
+        return [abuse_from_registrar]
+    whois_str = str(whois_data)
+    emails = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", whois_str)
+    abuse_emails = [email for email in emails if "abuse" in email.lower()]
+    if abuse_emails:
+        logger.debug(f"Found abuse emails via regex: {abuse_emails}")
+        return abuse_emails
+    logger.debug("No abuse email found via registrar cache or regex; returning empty list")
+    return []
 
 
 def send_abuse_report(
-    abuse_email: str,
+    abuse_emails: List[str],
     site_url: str,
     whois_str: str,
     attachment_path: Optional[str] = None,
     cc_emails: Optional[List[str]] = None,
 ) -> None:
     """
-    Send an abuse report email using SMTP.
-    A CC is added from the command-line argument if provided.
-    Debug logging is added to verify the rendered content.
+    Send the same abuse report individually to each abuse email using SMTP.
+    If a cached (stored) abuse email is available, it is used as the primary recipient.
+    Any extracted email containing "abuse-tracker" is demoted to CC.
+    Additional CC addresses provided via the --cc argument are merged.
     """
     smtp_host = settings.SMTP_HOST
     smtp_port = settings.SMTP_PORT
     smtp_user = os.environ.get("SMTP_USER", "")
     smtp_pass = os.environ.get("SMTP_PASS", "")
     sender_email = settings.ABUSE_EMAIL_SENDER
-    subject = f"{settings.ABUSE_EMAIL_SUBJECT} {site_url}"
+    subject = f"{settings.ABUSE_EMAIL_SUBJECT} for {site_url}"
     attachment_filename = os.path.basename(attachment_path) if attachment_path else None
 
     env_jinja = Environment(
@@ -411,38 +417,47 @@ def send_abuse_report(
         logger.error(f"Template rendering failed: {render_err}")
         raise
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = sender_email
-    msg["To"] = abuse_email
-    # Set CC header if provided.
-    if cc_emails:
-        msg["Cc"] = ", ".join(cc_emails)
-        recipients = [abuse_email] + cc_emails
-    else:
-        recipients = [abuse_email]
-    msg.attach(MIMEText(html_content, "html"))
+    # Demote any extracted email containing "abuse-tracker" if there exists a primary candidate without it.
+    primary_candidates = [email for email in abuse_emails if "abuse-tracker" not in email.lower()]
+    if primary_candidates:
+        abuse_emails = primary_candidates
 
-    if attachment_path:
+    # Merge any CC provided via argument.
+    final_cc = cc_emails[:] if cc_emails else []
+
+    # Send the same message individually to each primary abuse email.
+    for primary in abuse_emails:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = sender_email
+        msg["To"] = primary
+        if final_cc:
+            msg["Cc"] = ", ".join(final_cc)
+            recipients = [primary] + final_cc
+        else:
+            recipients = [primary]
+        msg.attach(MIMEText(html_content, "html"))
+
+        if attachment_path:
+            try:
+                with open(attachment_path, "rb") as f:
+                    part = MIMEApplication(f.read(), Name=attachment_filename)
+                part["Content-Disposition"] = f'attachment; filename="{attachment_filename}"'
+                msg.attach(part)
+                logger.info(f"Attached file {attachment_filename} to email for {site_url}")
+            except Exception as e:
+                logger.error(f"Failed to attach file {attachment_path}: {e}")
+
         try:
-            with open(attachment_path, "rb") as f:
-                part = MIMEApplication(f.read(), Name=attachment_filename)
-            part["Content-Disposition"] = f'attachment; filename="{attachment_filename}"'
-            msg.attach(part)
-            logger.info(f"Attached file {attachment_filename} to email for {site_url}")
+            with smtplib.SMTP(smtp_host, smtp_port) as server:
+                if smtp_user and smtp_pass:
+                    server.login(smtp_user, smtp_pass)
+                server.sendmail(sender_email, recipients, msg.as_string())
+            logger.info(
+                f"Abuse report sent to {primary} for site {site_url}; CC: {final_cc if final_cc else 'None'}"
+            )
         except Exception as e:
-            logger.error(f"Failed to attach file {attachment_path}: {e}")
-
-    try:
-        with smtplib.SMTP(smtp_host, smtp_port) as server:
-            if smtp_user and smtp_pass:
-                server.login(smtp_user, smtp_pass)
-            server.sendmail(sender_email, recipients, msg.as_string())
-        logger.info(
-            f"Abuse report sent to {abuse_email} for site {site_url}; CC: {cc_emails if cc_emails else 'None'}"
-        )
-    except Exception as e:
-        logger.error(f"Failed to send abuse report to {abuse_email}: {e}")
+            logger.error(f"Failed to send abuse report to {primary}: {e}")
 
 
 def report_phishing_sites(
@@ -450,7 +465,7 @@ def report_phishing_sites(
 ) -> None:
     """
     Continuously process flagged phishing sites:
-    Retrieve WHOIS data, determine the abuse email (via registrar cache or regex), and send the report.
+    Retrieve WHOIS data, determine the abuse emails (via registrar cache or regex), and send the report.
     """
     while True:
         try:
@@ -475,11 +490,12 @@ def report_phishing_sites(
                     )
                     logger.info(f"WHOIS data enriched for {url}")
                     domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
-                    abuse_email = (
-                        stored_abuse if stored_abuse else extract_abuse_email(whois_data, domain)
-                    )
-                    if abuse_email and abuse_report_sent == 0:
-                        send_abuse_report(abuse_email, url, whois_str, cc_emails=cc_emails)
+                    if stored_abuse:
+                        abuse_list = [stored_abuse]
+                    else:
+                        abuse_list = extract_abuse_emails(whois_data, domain)
+                    if abuse_list and abuse_report_sent == 0:
+                        send_abuse_report(abuse_list, url, whois_str, cc_emails=cc_emails)
                         cursor.execute(
                             "UPDATE phishing_sites SET abuse_report_sent = 1 WHERE url = ?", (url,)
                         )
@@ -523,12 +539,13 @@ def process_manual_reports(
                 )
                 logger.info(f"Manually processed WHOIS data for {url}")
                 domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
-                abuse_email = (
-                    stored_abuse if stored_abuse else extract_abuse_email(whois_data, domain)
-                )
-                if abuse_email and abuse_report_sent == 0:
+                if stored_abuse:
+                    abuse_list = [stored_abuse]
+                else:
+                    abuse_list = extract_abuse_emails(whois_data, domain)
+                if abuse_list and abuse_report_sent == 0:
                     send_abuse_report(
-                        abuse_email, url, whois_str, attachment_path, cc_emails=cc_emails
+                        abuse_list, url, whois_str, attachment_path, cc_emails=cc_emails
                     )
                     cursor.execute(
                         "UPDATE phishing_sites SET abuse_report_sent = 1 WHERE url = ?", (url,)
@@ -631,7 +648,7 @@ def main() -> None:
     Main execution flow.
     Initializes databases (including registrar abuse table), starts the reporting thread,
     and continuously scans target sites. Supports manual flagging via --report and
-    manual report processing via --process-reports with an optional attachment and CC list.
+    manual report processing via --process-reports with optional attachment and CC list.
     """
     args = parse_arguments()
     logger.setLevel(args.log_level)
