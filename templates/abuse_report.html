@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Abuse Report for {{ site_url }}</title>
+  </head>
+  <body>
+    <h2>Abuse Report for {{ site_url }}</h2>
+    <p>Dear Abuse Team,</p>
+    <p>This is an automated abuse report regarding a suspected phishing site.</p>
+    <p><strong>Site URL:</strong> {{ site_url }}</p>
+    <p><strong>WHOIS Information:</strong></p>
+    <pre>{{ whois_info }}</pre>
+    <p>Please investigate and take the necessary actions.</p>
+    <p>Best Regards,<br>Your Phishing Detection System, Anisakys</p>
+  </body>
+</html>
