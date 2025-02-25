@@ -1,4 +1,18 @@
 #!/usr/bin/env python3
+"""
+Anisakys Phishing Detection Engine with Basic WHOIS Lookup and Registrar Abuse Caching
+
+This script scans and processes phishing sites. It retrieves WHOIS information using the
+python-whois library and then determines the appropriate abuse email address solely based on
+the WHOIS data and a cached registrar_abuse table. When WHOIS data indicates a registrar that is known,
+the cached abuse email is used. Otherwise, the system attempts to extract an abuse email using regex.
+
+Usage examples:
+  ./anisakys.py --timeout 30 --log-level DEBUG
+  ./anisakys.py --report "https://resuelve-tucomp.online" --abuse-email abuse@hostinger.com
+  ./anisakys.py --process-reports --attachment /path/to/file.pdf --cc "cc1@example.com, cc2@example.com"
+"""
+
 import os
 import re
 import time
@@ -10,18 +24,16 @@ import sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Set, Optional
 import threading
-import whois  # pip install python-whois
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
 from jinja2 import Environment, FileSystemLoader, select_autoescape
-from dotenv import load_dotenv
+
+import whois  # pip install python-whois
 
 from src.config import settings
 from src.logger import logger
-
-# Load environment variables from .env file.
-load_dotenv()
 
 # Define which HEAD response codes are acceptable.
 ALLOWED_HEAD_STATUS = {200, 201, 202, 203, 204, 205, 206, 301, 302, 403, 405, 503, 504}
@@ -43,9 +55,6 @@ DNS_ERROR_KEY_PHRASES = {
 def init_db(db_file: str = "scan_results.db") -> None:
     """
     Initialize the SQLite database and create the scan_results table if it does not exist.
-
-    Args:
-        db_file (str): Path to the SQLite database file.
     """
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
@@ -68,13 +77,8 @@ def init_db(db_file: str = "scan_results.db") -> None:
 
 def init_phishing_db(db_file: str = "scan_results.db") -> None:
     """
-    Initialize the SQLite database by creating the phishing_sites table if it does not exist.
-
-    The phishing_sites table stores manually flagged phishing URLs along with enriched WHOIS data,
-    and tracks whether an abuse report email has been sent.
-
-    Args:
-        db_file (str): Path to the SQLite database file.
+    Initialize the phishing_sites table. This table stores flagged phishing URLs, WHOIS data,
+    an optionally provided abuse email, and flags for reporting.
     """
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
@@ -87,6 +91,7 @@ def init_phishing_db(db_file: str = "scan_results.db") -> None:
             first_seen TEXT,
             last_seen TEXT,
             whois_info TEXT,
+            abuse_email TEXT,
             reported INTEGER DEFAULT 0,
             abuse_report_sent INTEGER DEFAULT 0
         )
@@ -96,20 +101,49 @@ def init_phishing_db(db_file: str = "scan_results.db") -> None:
     conn.close()
 
 
+def init_registrar_abuse_db(db_file: str = "scan_results.db") -> None:
+    """
+    Initialize the registrar_abuse table, which caches known abuse emails for registrars.
+    """
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS registrar_abuse (
+            registrar TEXT PRIMARY KEY,
+            abuse_email TEXT
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_abuse_email_by_registrar(registrar: str, db_file: str = "scan_results.db") -> Optional[str]:
+    """
+    Look up a known abuse email in the registrar_abuse table using a fuzzy match.
+    """
+    logger.debug(f"Looking up abuse email for registrar: '{registrar}'")
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    query = "SELECT abuse_email FROM registrar_abuse WHERE LOWER(registrar) LIKE ?"
+    param = "%" + registrar.lower() + "%"
+    logger.debug(f"Query parameter: '{param}'")
+    cursor.execute(query, (param,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        logger.info(f"Found cached abuse email for registrar '{registrar}': {row[0]}")
+        return row[0]
+    logger.debug("No cached abuse email found for registrar")
+    return None
+
+
 def store_scan_result(
     url: str, response_code: int, found_keywords: List[str], db_file: str = "scan_results.db"
 ) -> None:
     """
     Store or update the scan result in the database.
-
-    If the URL already exists, update the last_seen timestamp and increment the count.
-    Otherwise, insert a new record with current timestamps.
-
-    Args:
-        url (str): The URL that was scanned.
-        response_code (int): The HTTP response code obtained.
-        found_keywords (List[str]): List of keywords found on the page.
-        db_file (str): Path to the SQLite database file.
     """
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
@@ -141,11 +175,7 @@ def store_scan_result(
 
 def log_positive_result(url: str, found_keywords: List[str]) -> None:
     """
-    Append a positive scan result to a report file with the current date and time, avoiding duplicates.
-
-    Args:
-        url (str): The URL that yielded positive keyword matches.
-        found_keywords (List[str]): The list of keywords found on the URL.
+    Append a positive scan result to a log file.
     """
     log_file = "positive_report.txt"
     entry = f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} - {url}: {', '.join(found_keywords)}\n"
@@ -163,13 +193,7 @@ def log_positive_result(url: str, found_keywords: List[str]) -> None:
 
 def augment_with_www(domain: str) -> List[str]:
     """
-    Generate candidate domain variations by including the 'www.' prefix if applicable.
-
-    Args:
-        domain (str): The original domain name.
-
-    Returns:
-        List[str]: A list containing the original domain and its 'www.' variant (if applicable).
+    Generate domain variations including 'www.' if applicable.
     """
     parts = domain.split(".")
     return [domain, f"www.{domain}"] if len(parts) == 2 else [domain]
@@ -177,15 +201,7 @@ def augment_with_www(domain: str) -> List[str]:
 
 def get_candidate_urls(domain: str, timeout: int) -> List[str]:
     """
-    Generate candidate URLs for scanning by considering both HTTPS and HTTP variants.
-    Includes 'www.' variant if applicable.
-
-    Args:
-        domain (str): The domain to generate candidate URLs for.
-        timeout (int): Timeout for the HEAD request (in seconds).
-
-    Returns:
-        List[str]: List of reachable candidate URLs.
+    Generate candidate URLs for a given domain.
     """
     candidate_domains = augment_with_www(domain)
     candidate_urls = []
@@ -220,15 +236,7 @@ def get_candidate_urls(domain: str, timeout: int) -> List[str]:
 
 def generate_search_queries(keywords: List[str], domains: List[str]) -> List[str]:
     """
-    Generate search queries by creating permutations of keywords (hyphenated and non-hyphenated)
-    and appending each domain extension.
-
-    Args:
-        keywords (List[str]): List of keywords.
-        domains (List[str]): List of domain extensions.
-
-    Returns:
-        List[str]: List of extended search queries.
+    Generate search queries from keywords and domain extensions.
     """
     base_queries_with_hyphen: Set[str] = set()
     base_queries_without_hyphen: Set[str] = set()
@@ -244,29 +252,14 @@ def generate_search_queries(keywords: List[str], domains: List[str]) -> List[str
 
 def get_dynamic_target_sites(keywords: List[str], domains: List[str]) -> List[str]:
     """
-    Generate and deduplicate dynamic target sites from search queries.
-
-    Args:
-        keywords (List[str]): List of keywords.
-        domains (List[str]): List of domain extensions.
-
-    Returns:
-        List[str]: Deduplicated list of target sites.
+    Generate deduplicated target sites.
     """
     return list(set(generate_search_queries(keywords, domains)))
 
 
 def scan_site(domain: str, keywords: List[str], timeout: int) -> None:
     """
-    Scan a given domain for the presence of specified keywords.
-
-    For each candidate URL generated, perform a GET request, search for keywords in the response,
-    store the scan result, and log positive matches.
-
-    Args:
-        domain (str): The domain to scan.
-        keywords (List[str]): Keywords to search for.
-        timeout (int): Request timeout in seconds.
+    Scan a given domain for specified keywords.
     """
     for url in get_candidate_urls(domain, timeout) or []:
         logger.info(f"Scanning {url} for keywords: {keywords}")
@@ -283,8 +276,7 @@ def scan_site(domain: str, keywords: List[str], timeout: int) -> None:
                 log_positive_result(url, matches)
             else:
                 logger.debug(f"No keywords found in {url}")
-            # Stop after first successful candidate.
-            break
+            break  # Stop after first successful candidate.
         except requests.exceptions.Timeout:
             logger.warning(f"Timeout scanning {url}")
         except requests.exceptions.ConnectionError as e:
@@ -299,13 +291,6 @@ def scan_site(domain: str, keywords: List[str], timeout: int) -> None:
 def filter_allowed_targets(targets: List[str], allowed_sites: List[str]) -> List[str]:
     """
     Filter out targets that are in the allowed (whitelist) list.
-
-    Args:
-        targets (List[str]): List of target sites.
-        allowed_sites (List[str]): List of allowed sites.
-
-    Returns:
-        List[str]: Filtered list of target sites.
     """
     allowed_set = {site.lower().strip() for site in allowed_sites}
     filtered = [target for target in targets if target.lower().strip() not in allowed_set]
@@ -315,118 +300,170 @@ def filter_allowed_targets(targets: List[str], allowed_sites: List[str]) -> List
     return filtered
 
 
-def extended_whois_lookup(url: str) -> str:
+def basic_whois_lookup(url: str) -> dict:
     """
-    Perform an extended WHOIS lookup for the given domain.
-
-    This function calls the standard whois lookup and then formats the output,
-    including key fields if available. If the whois lookup fails or returns incomplete data,
-    a fallback message is returned.
-
-    Args:
-        url (str): The domain to perform WHOIS lookup for.
-
-    Returns:
-        str: A formatted string containing extended WHOIS information.
+    Perform a basic WHOIS lookup using python-whois.
     """
     try:
-        whois_data = whois.whois(url)
-        extended_info = {}
-        if isinstance(whois_data, dict):
-            for key, value in whois_data.items():
-                if value:
-                    if isinstance(value, list):
-                        extended_info[key] = ", ".join(map(str, value))
-                    else:
-                        extended_info[key] = str(value)
-        else:
-            extended_info = {"raw": str(whois_data)}
-        # Format the extended information.
-        extended_str = "\n".join(f"{k}: {v}" for k, v in extended_info.items())
-        return extended_str
+        domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+        logger.debug(f"Performing WHOIS lookup for: {domain}")
+        data = whois.whois(domain)
+        return data
     except Exception as e:
-        logger.error(f"Extended WHOIS lookup failed for {url}: {e}")
-        return "Extended WHOIS lookup failed."
+        logger.error(f"Basic WHOIS lookup failed for {url}: {e}")
+        return {}
 
 
-def extract_abuse_email(whois_data) -> Optional[str]:
+def extract_registrar(whois_data) -> Optional[str]:
     """
-    Extract an abuse email address from the raw WHOIS data using regex.
-    The function searches for all email addresses in the WHOIS output and then selects
-    one containing 'abuse' (case-insensitive). If none contain "abuse", it returns the first found email.
-
-    Args:
-        whois_data: WHOIS result (dict or object).
-
-    Returns:
-        Optional[str]: The abuse email if found, otherwise None.
+    Extract the registrar from WHOIS data.
     """
-    raw_data = str(whois_data)
-    emails = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", raw_data)
-    if not emails:
-        return None
+    if isinstance(whois_data, dict):
+        registrar = whois_data.get("registrar")
+        if registrar:
+            if isinstance(registrar, list):
+                extracted = registrar[0].strip()
+            else:
+                extracted = str(registrar).strip()
+            logger.debug(f"Extracted registrar from dict: '{extracted}'")
+            return extracted
+    whois_str = str(whois_data)
+    match = re.search(r"Registrar:\s*(.+)", whois_str, re.IGNORECASE)
+    if match:
+        extracted = match.group(1).strip()
+        logger.debug(f"Extracted registrar via regex: '{extracted}'")
+        return extracted
+    logger.debug("No registrar found in WHOIS data")
+    return None
+
+
+def get_abuse_email_by_registrar(registrar: str, db_file: str = "scan_results.db") -> Optional[str]:
+    """
+    Look up a known abuse email address from the registrar_abuse table.
+    """
+    logger.debug(f"Looking up abuse email for registrar: '{registrar}'")
+    conn = sqlite3.connect(db_file)
+    cursor = conn.cursor()
+    query = "SELECT abuse_email FROM registrar_abuse WHERE LOWER(registrar) LIKE ?"
+    param = "%" + registrar.lower() + "%"
+    logger.debug(f"Query parameter: '{param}'")
+    cursor.execute(query, (param,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        logger.info(f"Found cached abuse email for registrar '{registrar}': {row[0]}")
+        return row[0]
+    logger.debug("No cached abuse email found for registrar")
+    return None
+
+
+def extract_abuse_email(whois_data, domain: str) -> Optional[str]:
+    """
+    Extract an abuse email from WHOIS data using regex; if none is found, use the registrar cache.
+    """
+    whois_str = str(whois_data)
+    emails = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", whois_str)
     abuse_emails = [email for email in emails if "abuse" in email.lower()]
-    return abuse_emails[0] if abuse_emails else emails[0]
+    if abuse_emails:
+        logger.debug(f"Found abuse email via regex: {abuse_emails[0]}")
+        return abuse_emails[0]
+    registrar = extract_registrar(whois_data) or ""
+    abuse_from_registrar = get_abuse_email_by_registrar(registrar, db_file="scan_results.db")
+    if abuse_from_registrar:
+        logger.debug(f"Using abuse email from registrar cache: {abuse_from_registrar}")
+        return abuse_from_registrar
+    logger.debug("No abuse email found via registrar cache; returning None")
+    return None
 
 
-def send_abuse_report(abuse_email: str, site_url: str, whois_str: str) -> None:
+def send_abuse_report(
+    abuse_email: str,
+    site_url: str,
+    whois_str: str,
+    attachment_path: Optional[str] = None,
+    cc_emails: Optional[List[str]] = None,
+) -> None:
     """
-    Send an abuse report email to the given abuse email address using an SMTP relay.
-    The email content is rendered from an HTML Jinja2 template.
-
-    Args:
-        abuse_email (str): Recipient abuse email address.
-        site_url (str): Phishing site URL.
-        whois_str (str): WHOIS information to include in the report.
+    Send an abuse report email using SMTP.
+    A CC is added from the command-line argument if provided.
+    Debug logging is added to verify the rendered content.
     """
-    smtp_host = os.environ.get("SMTP_HOST", "localhost")
-    smtp_port = int(os.environ.get("SMTP_PORT", 1125))
+    smtp_host = settings.SMTP_HOST
+    smtp_port = settings.SMTP_PORT
     smtp_user = os.environ.get("SMTP_USER", "")
     smtp_pass = os.environ.get("SMTP_PASS", "")
-    sender_email = os.environ.get("ABUSE_EMAIL_SENDER", "noreply@example.com")
-    subject = os.environ.get("ABUSE_EMAIL_SUBJECT", "Abuse Report for Phishing Site")
+    sender_email = settings.ABUSE_EMAIL_SENDER
+    subject = f"{settings.ABUSE_EMAIL_SUBJECT} {site_url}"
+    attachment_filename = os.path.basename(attachment_path) if attachment_path else None
 
     env_jinja = Environment(
         loader=FileSystemLoader("templates"), autoescape=select_autoescape(["html", "xml"])
     )
-    template = env_jinja.get_template("abuse_report.html")
-    html_content = template.render(site_url=site_url, whois_info=whois_str)
+    try:
+        html_content = env_jinja.get_template("abuse_report.html").render(
+            site_url=site_url,
+            whois_info=whois_str,
+            attachment_filename=attachment_filename,
+            cc_emails=cc_emails,
+        )
+        logger.debug("Rendered email content (first 300 chars): " + html_content[:300])
+    except Exception as render_err:
+        logger.error(f"Template rendering failed: {render_err}")
+        raise
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = sender_email
     msg["To"] = abuse_email
+    # Set CC header if provided.
+    if cc_emails:
+        msg["Cc"] = ", ".join(cc_emails)
+        recipients = [abuse_email] + cc_emails
+    else:
+        recipients = [abuse_email]
     msg.attach(MIMEText(html_content, "html"))
+
+    if attachment_path:
+        try:
+            with open(attachment_path, "rb") as f:
+                part = MIMEApplication(f.read(), Name=attachment_filename)
+            part["Content-Disposition"] = f'attachment; filename="{attachment_filename}"'
+            msg.attach(part)
+            logger.info(f"Attached file {attachment_filename} to email for {site_url}")
+        except Exception as e:
+            logger.error(f"Failed to attach file {attachment_path}: {e}")
+
     try:
         with smtplib.SMTP(smtp_host, smtp_port) as server:
             if smtp_user and smtp_pass:
                 server.login(smtp_user, smtp_pass)
-            server.sendmail(sender_email, abuse_email, msg.as_string())
-        logger.info(f"Abuse report sent to {abuse_email} for site {site_url}")
+            server.sendmail(sender_email, recipients, msg.as_string())
+        logger.info(
+            f"Abuse report sent to {abuse_email} for site {site_url}; CC: {cc_emails if cc_emails else 'None'}"
+        )
     except Exception as e:
         logger.error(f"Failed to send abuse report to {abuse_email}: {e}")
 
 
-def report_phishing_sites(db_file: str = "scan_results.db") -> None:
+def report_phishing_sites(
+    db_file: str = "scan_results.db", cc_emails: Optional[List[str]] = None
+) -> None:
     """
-    Continuously enrich manually flagged phishing sites with extended WHOIS data,
-    extract abuse emails, send abuse reports via SMTP, and update records.
-    This function runs in a separate thread.
-
-    Args:
-        db_file (str): Path to the SQLite database file.
+    Continuously process flagged phishing sites:
+    Retrieve WHOIS data, determine the abuse email (via registrar cache or regex), and send the report.
     """
     while True:
         try:
             conn = sqlite3.connect(db_file)
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT url, reported, abuse_report_sent FROM phishing_sites WHERE manual_flag = 1 AND reported = 0"
+                "SELECT url, reported, abuse_report_sent, abuse_email FROM phishing_sites WHERE manual_flag = 1 AND reported = 0"
             )
             sites = cursor.fetchall()
-            for url, reported, abuse_report_sent in sites:
+            for url, reported, abuse_report_sent, stored_abuse in sites:
                 try:
-                    whois_str = extended_whois_lookup(url)
+                    whois_data = basic_whois_lookup(url)
+                    whois_str = str(whois_data)
                     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     cursor.execute(
                         """
@@ -437,9 +474,12 @@ def report_phishing_sites(db_file: str = "scan_results.db") -> None:
                         (whois_str, timestamp, url),
                     )
                     logger.info(f"WHOIS data enriched for {url}")
-                    abuse_email = extract_abuse_email(whois_str)
+                    domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+                    abuse_email = (
+                        stored_abuse if stored_abuse else extract_abuse_email(whois_data, domain)
+                    )
                     if abuse_email and abuse_report_sent == 0:
-                        send_abuse_report(abuse_email, url, whois_str)
+                        send_abuse_report(abuse_email, url, whois_str, cc_emails=cc_emails)
                         cursor.execute(
                             "UPDATE phishing_sites SET abuse_report_sent = 1 WHERE url = ?", (url,)
                         )
@@ -453,23 +493,25 @@ def report_phishing_sites(db_file: str = "scan_results.db") -> None:
         time.sleep(settings.REPORT_INTERVAL)
 
 
-def process_manual_reports(db_file: str = "scan_results.db") -> None:
+def process_manual_reports(
+    db_file: str = "scan_results.db",
+    attachment_path: Optional[str] = None,
+    cc_emails: Optional[List[str]] = None,
+) -> None:
     """
-    Process manually flagged phishing sites one time for extended WHOIS enrichment and abuse reporting.
-
-    Args:
-        db_file (str): Path to the SQLite database file.
+    Process flagged phishing sites once for WHOIS enrichment and abuse reporting.
     """
     try:
         conn = sqlite3.connect(db_file)
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT url, reported, abuse_report_sent FROM phishing_sites WHERE manual_flag = 1 AND reported = 0"
+            "SELECT url, reported, abuse_report_sent, abuse_email FROM phishing_sites WHERE manual_flag = 1 AND reported = 0"
         )
         sites = cursor.fetchall()
-        for url, reported, abuse_report_sent in sites:
+        for url, reported, abuse_report_sent, stored_abuse in sites:
             try:
-                whois_str = extended_whois_lookup(url)
+                whois_data = basic_whois_lookup(url)
+                whois_str = str(whois_data)
                 timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 cursor.execute(
                     """
@@ -480,9 +522,14 @@ def process_manual_reports(db_file: str = "scan_results.db") -> None:
                     (whois_str, timestamp, url),
                 )
                 logger.info(f"Manually processed WHOIS data for {url}")
-                abuse_email = extract_abuse_email(whois_str)
+                domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+                abuse_email = (
+                    stored_abuse if stored_abuse else extract_abuse_email(whois_data, domain)
+                )
                 if abuse_email and abuse_report_sent == 0:
-                    send_abuse_report(abuse_email, url, whois_str)
+                    send_abuse_report(
+                        abuse_email, url, whois_str, attachment_path, cc_emails=cc_emails
+                    )
                     cursor.execute(
                         "UPDATE phishing_sites SET abuse_report_sent = 1 WHERE url = ?", (url,)
                     )
@@ -495,13 +542,11 @@ def process_manual_reports(db_file: str = "scan_results.db") -> None:
         conn.close()
 
 
-def mark_site_as_phishing(url: str, db_file: str = "scan_results.db") -> None:
+def mark_site_as_phishing(
+    url: str, abuse_email: Optional[str] = None, db_file: str = "scan_results.db"
+) -> None:
     """
-    Manually flag a given URL as phishing in the phishing_sites table.
-
-    Args:
-        url (str): The URL to mark as phishing.
-        db_file (str): Path to the SQLite database file.
+    Manually flag a URL as phishing in the phishing_sites table.
     """
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
@@ -512,38 +557,32 @@ def mark_site_as_phishing(url: str, db_file: str = "scan_results.db") -> None:
         cursor.execute(
             """
             UPDATE phishing_sites
-            SET manual_flag = 1, last_seen = ?, reported = 0, abuse_report_sent = 0
+            SET manual_flag = 1, last_seen = ?, reported = 0, abuse_report_sent = 0, abuse_email = ?
             WHERE url = ?
             """,
-            (timestamp, url),
+            (timestamp, abuse_email, url),
         )
-        logger.info(f"Updated phishing flag for {url}")
+        logger.info(f"Updated phishing flag for {url} with abuse email {abuse_email}")
     else:
         cursor.execute(
             """
-            INSERT INTO phishing_sites (url, manual_flag, first_seen, last_seen, reported, abuse_report_sent)
-            VALUES (?, 1, ?, ?, 0, 0)
+            INSERT INTO phishing_sites (url, manual_flag, first_seen, last_seen, abuse_email, reported, abuse_report_sent)
+            VALUES (?, 1, ?, ?, ?, 0, 0)
             """,
-            (url, timestamp, timestamp),
+            (url, timestamp, timestamp, abuse_email),
         )
-        logger.info(f"Marked {url} as phishing")
+        logger.info(f"Marked {url} as phishing with abuse email {abuse_email}")
     conn.commit()
     conn.close()
 
 
 def parse_arguments() -> argparse.Namespace:
     """
-    Parse and validate command-line arguments.
-
-    Returns:
-        argparse.Namespace: Parsed arguments.
+    Parse command-line arguments.
     """
     parser = argparse.ArgumentParser(
         description="Anisakys Phishing Detection Engine",
-        epilog="Example usages:\n"
-        "  ./anisakys.py --timeout 30 --log-level DEBUG\n"
-        "  ./anisakys.py --report example.com\n"
-        "  ./anisakys.py --process-reports",
+        epilog='Example usages:\n  ./anisakys.py --timeout 30 --log-level DEBUG\n  ./anisakys.py --report https://resuelve-tucomp.online --abuse-email abuse@hostinger.com\n  ./anisakys.py --process-reports --attachment /path/to/file.pdf --cc "cc1@example.com, cc2@example.com"',
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(
@@ -562,42 +601,66 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--report",
         type=str,
-        help="Manually flag a URL as phishing. The URL will be added to the phishing_sites table.",
+        help="Manually flag a URL as phishing.",
+    )
+    parser.add_argument(
+        "--abuse-email",
+        type=str,
+        help="(Optional) Provide a known abuse email address for the domain.",
     )
     parser.add_argument(
         "--process-reports",
         action="store_true",
-        help="Manually trigger processing of flagged phishing sites for extended WHOIS enrichment and abuse reporting.",
+        help="Manually trigger processing of flagged phishing sites.",
+    )
+    parser.add_argument(
+        "--attachment",
+        type=str,
+        help="Optional file path to attach to the abuse report (only used with --process-reports).",
+    )
+    parser.add_argument(
+        "--cc",
+        type=str,
+        help="Optional comma-separated list of email addresses to CC on the abuse report.",
     )
     return parser.parse_args()
 
 
 def main() -> None:
     """
-    Main execution flow for the Anisakys Phishing Detection Engine.
-
-    Initializes databases, starts the reporting thread, and continuously scans target sites.
-    Supports manual flagging via '--report' and manual abuse report processing via '--process-reports'.
+    Main execution flow.
+    Initializes databases (including registrar abuse table), starts the reporting thread,
+    and continuously scans target sites. Supports manual flagging via --report and
+    manual report processing via --process-reports with an optional attachment and CC list.
     """
     args = parse_arguments()
     logger.setLevel(args.log_level)
 
+    # Parse CC emails if provided.
+    cc_emails: Optional[List[str]] = None
+    if args.cc:
+        cc_emails = [email.strip() for email in args.cc.split(",") if email.strip()]
+        logger.debug(f"CC emails provided: {cc_emails}")
+
     # Initialize databases.
     init_db()
     init_phishing_db()
+    init_registrar_abuse_db()
 
     if args.report:
-        mark_site_as_phishing(args.report)
+        mark_site_as_phishing(args.report, abuse_email=args.abuse_email)
         logger.info(f"URL {args.report} flagged as phishing. Exiting after manual report.")
         return
 
     if args.process_reports:
-        process_manual_reports()
+        process_manual_reports(attachment_path=args.attachment, cc_emails=cc_emails)
         logger.info("Manually processed flagged phishing reports. Exiting.")
         return
 
-    # Start background reporting thread.
-    reporting_thread = threading.Thread(target=report_phishing_sites, daemon=True)
+    # Start background reporting thread with CC emails.
+    reporting_thread = threading.Thread(
+        target=report_phishing_sites, args=("scan_results.db", cc_emails), daemon=True
+    )
     reporting_thread.start()
 
     transform_to_list = lambda s: (
@@ -616,7 +679,6 @@ def main() -> None:
         if allowed_sites:
             targets = filter_allowed_targets(targets, allowed_sites)
         logger.info(f"Beginning scan cycle for {len(targets)} targets")
-
         with ThreadPoolExecutor(max_workers=30) as executor:
             futures = {
                 executor.submit(scan_site, target, keywords, args.timeout): target
@@ -629,7 +691,6 @@ def main() -> None:
                     logger.error(f"Thread error for {futures[future]}: {repr(e)}")
                 if i % 10 == 0:
                     logger.info(f"Progress: {i}/{len(targets)} ({i / len(targets):.1%})")
-
         logger.info(f"Scan cycle completed. Next cycle in {settings.SCAN_INTERVAL}s")
         time.sleep(settings.SCAN_INTERVAL)
 
