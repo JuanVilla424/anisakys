@@ -4,7 +4,7 @@ Take Note About This... **Take Note...**
 
 ## 🤝 Our Commitment
 
-We are committed to fostering an open and welcoming environment for all contributors. As such, everyone who participates in **GitHub CICD Template** is expected to adhere to the following code of conduct.
+We are committed to fostering an open and welcoming environment for all contributors. As such, everyone who participates in **Anisakys** is expected to adhere to the following code of conduct.
 
 ## 🌟 Expected Behavior
 

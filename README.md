@@ -108,6 +108,26 @@ Anisakys is an automated phishing detection engine that identifies suspicious do
   python anisakys.py --timeput 20 --log-level INFO
   ```
 
+### 🕸️ **Select Site as Phishing**
+
+- Report Thread can be managed externally from scan by invoke main script again using --report
+
+  ```bash
+  cd anisakys
+  python anisakys.py --report "https://sub.domain.com"
+  ```
+
+**Make Sure the Site is 100% a Phishing Site**
+
+### 👾 **Report Selected Phishing Sites**
+
+- as --report, --process-reports run detached from scan.
+
+```bash
+  cd anisakys
+  python anisakys.py --process-reports --attachment attachments/law_file.pdf --cc="email@domain.com,email2@domain.com"
+```
+
 ## 🤝 Contributing
 
 **Contributions are welcome! To contribute to this repository, please follow these steps**:
