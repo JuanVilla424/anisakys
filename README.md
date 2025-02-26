@@ -105,7 +105,7 @@ Anisakys is an automated phishing detection engine that identifies suspicious do
 
   ```bash
   cd anisakys
-  python anisakys.py --timeput 20 --log-level INFO
+  python anisakys.py --timeout 20 --log-level INFO
   ```
 
 ### 🕸️ **Select Site as Phishing**
