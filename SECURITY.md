@@ -8,7 +8,7 @@ We provide security updates for the following versions of our project:
 
 | Version | Status    | Secure |
 | ------- | --------- | ------ |
-| >1.0.6  | Supported | Yes    |
+| +1.0.10 | Supported | Yes    |
 
 ## 🛡️ Security Practices
 
