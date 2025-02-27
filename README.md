@@ -8,7 +8,7 @@
 
 ## Overview
 
-Anisakys is an automated phishing detection engine that identifies suspicious domains through combinatorial analysis and content pattern matching. Designed for red teams and security analysts, it generates domain permutations from keyword lists and scans for phishing indicators.
+Anisakys is an automated phishing detection engine that identifies suspicious domains through combinatorial analysis and content pattern matching. Designed for blue teams and security analysts, it generates domain permutations from keyword lists and scans for phishing indicators.
 
 ## 📚 Table of Contents
 
@@ -127,6 +127,15 @@ Anisakys is an automated phishing detection engine that identifies suspicious do
   cd anisakys
   python anisakys.py --process-reports --attachment attachments/law_file.pdf --cc="email@domain.com,email2@domain.com"
 ```
+
+### ➿ **Continuous Subsequently Reports**
+
+- System has ability to run without scans just doing manual reporting by --report and perform continuous reports on critical sites needing attention by resend reports auto.
+
+  ```bash
+  cd anisakys
+  python anisakys.py --threads-only
+  ```
 
 ## 🤝 Contributing
 
