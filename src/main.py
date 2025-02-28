@@ -31,7 +31,7 @@ from itertools import permutations
 import datetime
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import List, Optional
+from typing import List, Optional, Iterator
 import threading
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -62,23 +62,26 @@ DNS_ERROR_KEY_PHRASES = {
     "Max retries exceeded",
 }
 
-# Cloudflare IPv4 ranges
-CLOUDFLARE_IP_RANGES = [
-    ipaddress.ip_network("173.245.48.0/20"),
-    ipaddress.ip_network("103.21.244.0/22"),
-    ipaddress.ip_network("103.22.200.0/22"),
-    ipaddress.ip_network("103.31.4.0/22"),
-    ipaddress.ip_network("141.101.64.0/18"),
-    ipaddress.ip_network("108.162.192.0/18"),
-    ipaddress.ip_network("190.93.240.0/20"),
-    ipaddress.ip_network("188.114.96.0/20"),
-    ipaddress.ip_network("197.234.240.0/22"),
-    ipaddress.ip_network("198.41.128.0/17"),
-    ipaddress.ip_network("162.158.0.0/15"),
-    ipaddress.ip_network("104.16.0.0/12"),
-    ipaddress.ip_network("172.64.0.0/13"),
-    ipaddress.ip_network("131.0.72.0/22"),
-]
+# Use CLOUDFLARE_IP_RANGES from settings if available, otherwise local.
+try:
+    CLOUDFLARE_IP_RANGES = settings.CLOUDFLARE_IP_RANGES
+except AttributeError:
+    CLOUDFLARE_IP_RANGES = [
+        ipaddress.ip_network("173.245.48.0/20"),
+        ipaddress.ip_network("103.21.244.0/22"),
+        ipaddress.ip_network("103.22.200.0/22"),
+        ipaddress.ip_network("103.31.4.0/22"),
+        ipaddress.ip_network("141.101.64.0/18"),
+        ipaddress.ip_network("108.162.192.0/18"),
+        ipaddress.ip_network("190.93.240.0/20"),
+        ipaddress.ip_network("188.114.96.0/20"),
+        ipaddress.ip_network("197.234.240.0/22"),
+        ipaddress.ip_network("198.41.128.0/17"),
+        ipaddress.ip_network("162.158.0.0/15"),
+        ipaddress.ip_network("104.16.0.0/12"),
+        ipaddress.ip_network("172.64.0.0/13"),
+        ipaddress.ip_network("131.0.72.0/22"),
+    ]
 
 
 def get_ip_info(domain: str) -> (Optional[str], Optional[str]):
@@ -192,7 +195,6 @@ class DatabaseManager:
     def init_phishing_db(self):
         conn = self._connect()
         cursor = conn.cursor()
-        # Create the phishing_sites table with the new columns
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS phishing_sites (
@@ -272,7 +274,6 @@ def basic_whois_lookup(url: str) -> dict:
 class AbuseReportManager:
     def __init__(self, db_manager: DatabaseManager, cc_emails: Optional[List[str]], timeout: int):
         self.db_manager = db_manager
-        # If no CC emails are provided via command line, load defaults from the environment variable DEFAULT_CC_EMAILS.
         if cc_emails is None:
             default_cc = os.getenv("DEFAULT_CC_EMAILS", "")
             self.cc_emails = (
@@ -340,12 +341,9 @@ class AbuseReportManager:
         env_jinja = Environment(
             loader=FileSystemLoader("templates"), autoescape=select_autoescape(["html", "xml"])
         )
-        # Start with the configured CC list.
         final_cc = self.cc_emails[:] if self.cc_emails else []
-        # Always include the sender email.
         if sender_email not in final_cc:
             final_cc.insert(0, sender_email)
-        # Now load escalation CC lists from environment variables.
         escalation2 = os.getenv("DEFAULT_CC_ESCALATION_LEVEL2", "")
         escalation3 = os.getenv("DEFAULT_CC_ESCALATION_LEVEL3", "")
         for var in [escalation2, escalation3]:
@@ -354,7 +352,6 @@ class AbuseReportManager:
                     email = email.strip()
                     if email and email not in final_cc:
                         final_cc.append(email)
-
         try:
             html_content = env_jinja.get_template("abuse_report.html").render(
                 site_url=site_url,
@@ -366,13 +363,11 @@ class AbuseReportManager:
         except Exception as render_err:
             logger.error(f"Template rendering failed: {render_err}")
             raise
-
         primary_candidates = [
             email for email in abuse_emails if "abuse-tracker" not in email.lower()
         ]
         if primary_candidates:
             abuse_emails = primary_candidates
-
         for primary in abuse_emails:
             msg = MIMEMultipart("alternative")
             msg["Subject"] = subject
@@ -427,24 +422,20 @@ class AbuseReportManager:
                             and (current_time - last_report_time).total_seconds() < 172800
                         ):
                             continue
-                        # Get WHOIS data
                         whois_data = basic_whois_lookup(url)
                         whois_str = str(whois_data)
                         timestamp = current_time.strftime("%Y-%m-%d %H:%M:%S")
-                        # Resolve IP, get ASN, and detect Cloudflare.
                         domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
                         resolved_ip, asn_provider = get_ip_info(domain)
                         cloudflare_detected = False
                         if resolved_ip:
                             cloudflare_detected = is_cloudflare_ip(resolved_ip)
-                        # Override abuse email if Cloudflare is detected.
                         abuse_list = self.extract_abuse_emails(whois_data)
                         if cloudflare_detected:
                             logger.info(
                                 f"Cloudflare detected for {url}. Using abuse@cloudflare.com"
                             )
                             abuse_list = ["abuse@cloudflare.com"]
-                        # Update the phishing_sites record with new info.
                         cursor.execute(
                             """
                             UPDATE phishing_sites
@@ -493,7 +484,6 @@ class AbuseReportManager:
                     whois_data = basic_whois_lookup(url)
                     whois_str = str(whois_data)
                     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    # Resolve IP info and check for Cloudflare.
                     domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
                     resolved_ip, asn_provider = get_ip_info(domain)
                     cloudflare_detected = False
@@ -606,30 +596,47 @@ class PhishingScanner:
         self.keywords = keywords
         self.domains = domains
         self.allowed_sites = allowed_sites
+        # Stateful offset and batch size to iterate through all possibilities
+        self.query_offset = 0
+        self.batch_size = 10000
 
-    @staticmethod
-    def generate_search_queries(keywords: List[str], domains: List[str]) -> List[str]:
-        all_queries = set()
-        n = len(keywords)
-        counter = 0
+    def all_search_queries(self) -> Iterator[str]:
+        # Do NOT attempt deduplication if not needed; assuming keywords are unique.
+        n = len(self.keywords)
         for i in range(1, n + 1):
-            for p in permutations(keywords, i):
-                hyphenated = "-".join(p)
-                concatenated = "".join(p)
-                all_queries.add(hyphenated)
-                all_queries.add(concatenated)
-                counter += 1
-                if counter % 10000 == 0:
-                    gc.collect()
-        return [f"{q}{d}" for q in all_queries for d in domains]
+            for p in permutations(self.keywords, i):
+                for q in ["-".join(p), "".join(p)]:
+                    for d in self.domains:
+                        yield f"{q}{d}"
+
+    def get_dynamic_target_sites(self) -> List[str]:
+        from itertools import islice
+
+        # Get a batch from the overall generator based on the current offset.
+        batch = list(
+            islice(
+                self.all_search_queries(), self.query_offset, self.query_offset + self.batch_size
+            )
+        )
+        if not batch:
+            # If reached the end, reset the offset and try again.
+            self.query_offset = 0
+            batch = list(
+                islice(
+                    self.all_search_queries(),
+                    self.query_offset,
+                    self.query_offset + self.batch_size,
+                )
+            )
+        else:
+            self.query_offset += len(batch)
+        gc.collect()
+        return batch
 
     @staticmethod
     def augment_with_www(domain: str) -> List[str]:
         parts = domain.split(".")
         return [domain, f"www.{domain}"] if len(parts) == 2 else [domain]
-
-    def get_dynamic_target_sites(self) -> List[str]:
-        return list(set(self.generate_search_queries(self.keywords, self.domains)))
 
     def filter_allowed_targets(self, targets: List[str]) -> List[str]:
         allowed_set = {site.lower().strip() for site in self.allowed_sites}
@@ -688,7 +695,7 @@ class PhishingScanner:
                     PhishingUtils.log_positive_result(url, matches)
                 else:
                     logger.debug(f"No keywords found in {url}")
-                break  # Stop after first successful candidate.
+                break
             except requests.exceptions.Timeout:
                 logger.warning(f"Timeout scanning {url}")
             except requests.exceptions.ConnectionError as e:
