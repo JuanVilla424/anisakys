@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Anisakys Phishing Detection Engine with Basic WHOIS Lookup and Registrar Abuse Caching
+Anisakys Phishing Detection Engine with Basic WHOIS Lookup, Registrar Abuse Caching,
+Cloudflare detection, and IP/ASN resolution.
 
 This script scans and processes phishing sites. It retrieves WHOIS information using the
 python-whois library and then determines the appropriate abuse email addresses solely based on
@@ -9,6 +10,9 @@ the cached abuse email is used. Otherwise, the system attempts to extract all ab
 and sends the abuse report individually to each detected address.
 If any extracted email contains "abuse-tracker" and a better candidate is available, the "abuse-tracker"
 address is demoted to CC.
+
+Additionally, the system now resolves the target's IP address, retrieves its ASN/provider via IPWhois,
+and checks if the site is behind Cloudflare. If Cloudflare is detected the abuse report is sent to abuse@cloudflare.com.
 
 Usage examples:
   ./anisakys.py --timeout 30 --log-level DEBUG
@@ -34,8 +38,10 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
 from jinja2 import Environment, FileSystemLoader, select_autoescape
-
-import whois  # pip install python-whois
+import whois
+import socket
+import ipaddress
+from ipwhois import IPWhois
 
 from src.config import settings
 from src.logger import logger
@@ -55,6 +61,50 @@ DNS_ERROR_KEY_PHRASES = {
     "Failed to resolve",
     "Max retries exceeded",
 }
+
+# Cloudflare IPv4 ranges
+CLOUDFLARE_IP_RANGES = [
+    ipaddress.ip_network("173.245.48.0/20"),
+    ipaddress.ip_network("103.21.244.0/22"),
+    ipaddress.ip_network("103.22.200.0/22"),
+    ipaddress.ip_network("103.31.4.0/22"),
+    ipaddress.ip_network("141.101.64.0/18"),
+    ipaddress.ip_network("108.162.192.0/18"),
+    ipaddress.ip_network("190.93.240.0/20"),
+    ipaddress.ip_network("188.114.96.0/20"),
+    ipaddress.ip_network("197.234.240.0/22"),
+    ipaddress.ip_network("198.41.128.0/17"),
+    ipaddress.ip_network("162.158.0.0/15"),
+    ipaddress.ip_network("104.16.0.0/12"),
+    ipaddress.ip_network("172.64.0.0/13"),
+    ipaddress.ip_network("131.0.72.0/22"),
+]
+
+
+def get_ip_info(domain: str) -> (Optional[str], Optional[str]):
+    """Resolve the IP for the given domain and lookup ASN provider using IPWhois."""
+    try:
+        resolved_ip = socket.gethostbyname(domain)
+        obj = IPWhois(resolved_ip)
+        res = obj.lookup_rdap(depth=1)
+        asn_provider = res.get("network", {}).get("name", "")
+        return resolved_ip, asn_provider
+    except Exception as e:
+        logger.error(f"Failed to get IP info for {domain}: {e}")
+        return None, None
+
+
+def is_cloudflare_ip(ip: str) -> bool:
+    """Check if the provided IP address is within known Cloudflare ranges."""
+    try:
+        ip_obj = ipaddress.ip_address(ip)
+        for net in CLOUDFLARE_IP_RANGES:
+            if ip_obj in net:
+                return True
+        return False
+    except Exception as e:
+        logger.error(f"Error checking Cloudflare IP: {e}")
+        return False
 
 
 ###############################################################################
@@ -142,6 +192,7 @@ class DatabaseManager:
     def init_phishing_db(self):
         conn = self._connect()
         cursor = conn.cursor()
+        # Create the phishing_sites table with the new columns
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS phishing_sites (
@@ -156,7 +207,10 @@ class DatabaseManager:
                 abuse_report_sent INTEGER DEFAULT 0,
                 site_status TEXT DEFAULT 'up',
                 takedown_date TEXT,
-                last_report_sent TEXT
+                last_report_sent TEXT,
+                resolved_ip TEXT,
+                asn_provider TEXT,
+                is_cloudflare INTEGER
             )
             """
         )
@@ -171,6 +225,18 @@ class DatabaseManager:
         if "last_report_sent" not in columns:
             logger.info("Upgrading phishing_sites table: adding 'last_report_sent' column.")
             cursor.execute("ALTER TABLE phishing_sites ADD COLUMN last_report_sent TEXT")
+            conn.commit()
+        if "resolved_ip" not in columns:
+            logger.info("Upgrading phishing_sites table: adding 'resolved_ip' column.")
+            cursor.execute("ALTER TABLE phishing_sites ADD COLUMN resolved_ip TEXT")
+            conn.commit()
+        if "asn_provider" not in columns:
+            logger.info("Upgrading phishing_sites table: adding 'asn_provider' column.")
+            cursor.execute("ALTER TABLE phishing_sites ADD COLUMN asn_provider TEXT")
+            conn.commit()
+        if "is_cloudflare" not in columns:
+            logger.info("Upgrading phishing_sites table: adding 'is_cloudflare' column.")
+            cursor.execute("ALTER TABLE phishing_sites ADD COLUMN is_cloudflare INTEGER")
             conn.commit()
         conn.close()
 
@@ -361,24 +427,47 @@ class AbuseReportManager:
                             and (current_time - last_report_time).total_seconds() < 172800
                         ):
                             continue
+                        # Get WHOIS data
                         whois_data = basic_whois_lookup(url)
                         whois_str = str(whois_data)
                         timestamp = current_time.strftime("%Y-%m-%d %H:%M:%S")
+                        # Resolve IP, get ASN, and detect Cloudflare.
+                        domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+                        resolved_ip, asn_provider = get_ip_info(domain)
+                        cloudflare_detected = False
+                        if resolved_ip:
+                            cloudflare_detected = is_cloudflare_ip(resolved_ip)
+                        # Override abuse email if Cloudflare is detected.
+                        abuse_list = self.extract_abuse_emails(whois_data)
+                        if cloudflare_detected:
+                            logger.info(
+                                f"Cloudflare detected for {url}. Using abuse@cloudflare.com"
+                            )
+                            abuse_list = ["abuse@cloudflare.com"]
+                        # Update the phishing_sites record with new info.
                         cursor.execute(
                             """
                             UPDATE phishing_sites
-                            SET whois_info = ?, last_seen = ?, reported = 1, last_report_sent = ?
+                            SET whois_info = ?, last_seen = ?, reported = 1, last_report_sent = ?,
+                                resolved_ip = ?, asn_provider = ?, is_cloudflare = ?
                             WHERE url = ?
                             """,
-                            (whois_str, timestamp, timestamp, url),
+                            (
+                                whois_str,
+                                timestamp,
+                                timestamp,
+                                resolved_ip,
+                                asn_provider,
+                                1 if cloudflare_detected else 0,
+                                url,
+                            ),
                         )
                         logger.info(f"WHOIS data enriched for {url}")
-                        abuse_list = self.extract_abuse_emails(whois_data)
                         if abuse_list:
                             self.send_abuse_report(abuse_list, url, whois_str)
                             cursor.execute(
-                                "UPDATE phishing_sites SET abuse_report_sent = 1, abuse_email = ? WHERE url = ?",
-                                (abuse_list[0], url),
+                                "UPDATE phishing_sites SET abuse_report_sent = 1, abuse_email = ?, last_report_sent = ? WHERE url = ?",
+                                (abuse_list[0], timestamp, url),
                             )
                     except Exception as e:
                         logger.error(f"WHOIS query failed for {url}: {e}")
@@ -404,22 +493,40 @@ class AbuseReportManager:
                     whois_data = basic_whois_lookup(url)
                     whois_str = str(whois_data)
                     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    # Resolve IP info and check for Cloudflare.
+                    domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+                    resolved_ip, asn_provider = get_ip_info(domain)
+                    cloudflare_detected = False
+                    if resolved_ip:
+                        cloudflare_detected = is_cloudflare_ip(resolved_ip)
                     cursor.execute(
                         """
                         UPDATE phishing_sites
-                        SET whois_info = ?, last_seen = ?, reported = 1
+                        SET whois_info = ?, last_seen = ?, reported = 1,
+                            resolved_ip = ?, asn_provider = ?, is_cloudflare = ?
                         WHERE url = ?
                         """,
-                        (whois_str, timestamp, url),
+                        (
+                            whois_str,
+                            timestamp,
+                            resolved_ip,
+                            asn_provider,
+                            1 if cloudflare_detected else 0,
+                            url,
+                        ),
                     )
                     logger.info(f"Manually processed WHOIS data for {url}")
                     abuse_list = (
                         [stored_abuse] if stored_abuse else self.extract_abuse_emails(whois_data)
                     )
+                    if cloudflare_detected:
+                        logger.info(f"Cloudflare detected for {url}. Using abuse@cloudflare.com")
+                        abuse_list = ["abuse@cloudflare.com"]
                     if abuse_list and abuse_report_sent == 0:
                         self.send_abuse_report(abuse_list, url, whois_str, attachment_path)
                         cursor.execute(
-                            "UPDATE phishing_sites SET abuse_report_sent = 1 WHERE url = ?", (url,)
+                            "UPDATE phishing_sites SET abuse_report_sent = 1, abuse_email = ?, last_report_sent = ? WHERE url = ?",
+                            (abuse_list[0], timestamp, url),
                         )
                 except Exception as e:
                     logger.error(f"WHOIS query failed for {url}: {e}")
@@ -446,7 +553,9 @@ class TakedownMonitor:
             try:
                 conn = sqlite3.connect(self.db_manager.db_file)
                 cursor = conn.cursor()
-                cursor.execute("SELECT url, site_status, takedown_date FROM phishing_sites")
+                cursor.execute(
+                    "SELECT url, site_status, takedown_date FROM phishing_sites WHERE site_status = 'up'"
+                )
                 sites = cursor.fetchall()
                 for url, current_status, current_takedown in sites:
                     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
