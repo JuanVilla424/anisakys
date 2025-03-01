@@ -134,5 +134,7 @@ $RECYCLE.BIN/
 *.sw?
 
 positive_report.txt
-scan_results.db
+scan_results.db*
 attachments
+offset.txt
+queries.txt
