@@ -14,6 +14,7 @@ Usage examples:
   ./anisakys.py --process-reports --attachment /path/to/file.pdf --cc "cc1@example.com, cc2@example.com"
   ./anisakys.py --threads-only --log-level DEBUG
   ./anisakys.py --regen-queries  # Forces regeneration of the queries file if needed
+  ./anisakys.py --test-report --abuse-email your-test@example.com  # Sends a test report and exits
 """
 
 import gc
@@ -29,6 +30,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional
 import threading
 import smtplib
+import psutil
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
@@ -38,15 +40,11 @@ import socket
 import ipaddress
 from ipwhois import IPWhois
 
-# Import configuration settings and logging from external modules.
-# Ensure these modules are available in your environment.
 from src.config import settings, CLOUDFLARE_IP_RANGES
 from src.logger import logger
 
-# Define acceptable HTTP HEAD status codes.
 ALLOWED_HEAD_STATUS = {200, 201, 202, 203, 204, 205, 206, 301, 302, 403, 405, 503, 504}
 
-# Constants.
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -59,27 +57,54 @@ DNS_ERROR_KEY_PHRASES = {
     "Max retries exceeded",
 }
 
-# File and batching settings.
+
+class DynamicBatchConfig:
+    @staticmethod
+    def get_batch_size() -> int:
+        try:
+            cpus = os.cpu_count() or 1
+            return 1000 * cpus
+        except Exception as e:
+            logger.debug(f"Can't get batch size: {e}")
+            mem = psutil.virtual_memory()
+            batch = int(mem.available / (10 * 1024 * 1024))
+            return max(100, batch)
+
+
+class AttachmentConfig:
+    @staticmethod
+    def get_attachment() -> Optional[str]:
+        path = getattr(settings, "DEFAULT_ATTACHMENT", None)
+        if path:
+            if os.path.exists(path):
+                abs_path = os.path.abspath(path)
+                logger.info(f"Using default attachment from settings: {abs_path}")
+                return path
+            else:
+                logger.error(f"DEFAULT_ATTACHMENT file '{path}' does not exist.")
+        return None
+
+
+class EngineMode:
+    def __init__(self, args):
+        self.report_mode = args.report is not None
+        self.process_reports_mode = args.process_reports
+        self.threads_only_mode = args.threads_only
+        self.scanning_mode = not (
+            self.report_mode
+            or self.process_reports_mode
+            or self.threads_only_mode
+            or args.test_report
+        )
+
+
 QUERIES_FILE = "queries.txt"
 OFFSET_FILE = "offset.txt"
 DB_FILE = "scan_results.db"
-BATCH_SIZE = 1000  # Number of queries to process in each scan cycle.
+BATCH_SIZE = DynamicBatchConfig.get_batch_size()
 
 
-###############################################################################
-# Full List Generation (if needed)
-###############################################################################
 def generate_queries_file(keywords: List[str], domains: List[str]) -> None:
-    """
-    Generate and save the full list of queries to the QUERIES_FILE.
-
-    For every permutation (in both hyphenated and concatenated forms) of the keywords
-    and for each domain in the provided list, a query line is generated.
-
-    Args:
-        keywords (List[str]): List of keywords.
-        domains (List[str]): List of domain extensions.
-    """
     total = 0
     with open(QUERIES_FILE, "w") as f:
         for i in range(1, len(keywords) + 1):
@@ -91,19 +116,7 @@ def generate_queries_file(keywords: List[str], domains: List[str]) -> None:
     logger.info(f"Generated full query list with {total} lines.")
 
 
-###############################################################################
-# IP & Cloudflare Helpers
-###############################################################################
 def get_ip_info(domain: str) -> (Optional[str], Optional[str]):
-    """
-    Resolve a domain to its IP and get ASN/provider information.
-
-    Args:
-        domain (str): Domain to resolve.
-
-    Returns:
-        Tuple containing the resolved IP and ASN provider (or (None, None) on failure).
-    """
     try:
         resolved_ip = socket.gethostbyname(domain)
         obj = IPWhois(resolved_ip)
@@ -116,15 +129,6 @@ def get_ip_info(domain: str) -> (Optional[str], Optional[str]):
 
 
 def is_cloudflare_ip(ip: str) -> bool:
-    """
-    Check if the given IP address is within known Cloudflare IP ranges.
-
-    Args:
-        ip (str): IP address as a string.
-
-    Returns:
-        bool: True if IP is in Cloudflare ranges, False otherwise.
-    """
     try:
         ip_obj = ipaddress.ip_address(ip)
         for net in CLOUDFLARE_IP_RANGES:
@@ -136,19 +140,14 @@ def is_cloudflare_ip(ip: str) -> bool:
         return False
 
 
-###############################################################################
-# Utility Functions for Scan Results Logging and Storage
-###############################################################################
 class PhishingUtils:
     @staticmethod
     def store_scan_result(
         url: str, response_code: int, found_keywords: List[str], db_file: str = DB_FILE
     ) -> None:
-        """
-        Store or update the scan result for a given URL in the database.
-
-        If the URL already exists, update its record; otherwise, insert a new record.
-        """
+        if response_code not in ALLOWED_HEAD_STATUS:
+            logger.debug(f"Response code {response_code} not allowed for {url}, skipping save.")
+            return
         conn = sqlite3.connect(db_file)
         cursor = conn.cursor()
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -156,10 +155,10 @@ class PhishingUtils:
         cursor.execute("SELECT id, first_seen, count FROM scan_results WHERE url=?", (url,))
         row = cursor.fetchone()
         if row:
-            count = row[2] + 1
+            new_count = row[2] + 1
             cursor.execute(
                 "UPDATE scan_results SET last_seen = ?, response_code = ?, found_keywords = ?, count = ? WHERE url = ?",
-                (timestamp, response_code, keywords_str, count, url),
+                (timestamp, response_code, keywords_str, new_count, url),
             )
         else:
             cursor.execute(
@@ -170,12 +169,31 @@ class PhishingUtils:
         conn.close()
 
     @staticmethod
-    def log_positive_result(url: str, found_keywords: List[str]) -> None:
-        """
-        Log URLs that have positive matches (i.e. found keywords) to a log file.
+    def update_scan_result_response_code(url: str, response_code: int) -> None:
+        if response_code not in ALLOWED_HEAD_STATUS:
+            logger.debug(f"Response code {response_code} not allowed for {url}, skipping update.")
+            return
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        cursor.execute("SELECT id, count FROM scan_results WHERE url=?", (url,))
+        row = cursor.fetchone()
+        if row:
+            new_count = row[1] + 1
+            cursor.execute(
+                "UPDATE scan_results SET last_seen = ?, response_code = ?, count = ? WHERE url = ?",
+                (timestamp, response_code, new_count, url),
+            )
+        else:
+            cursor.execute(
+                "INSERT INTO scan_results (url, first_seen, last_seen, response_code, found_keywords, count) VALUES (?, ?, ?, ?, ?, ?)",
+                (url, timestamp, timestamp, response_code, "", 1),
+            )
+        conn.commit()
+        conn.close()
 
-        Prevents duplicate entries.
-        """
+    @staticmethod
+    def log_positive_result(url: str, found_keywords: List[str]) -> None:
         log_file = "positive_report.txt"
         entry = (
             f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} - {url}: {', '.join(found_keywords)}\n"
@@ -192,14 +210,7 @@ class PhishingUtils:
         logger.info(f"Logged phishing match: {url}")
 
 
-###############################################################################
-# Database Manager
-###############################################################################
 class DatabaseManager:
-    """
-    Manage database creation, upgrades, and connections.
-    """
-
     def __init__(self, db_file: str = DB_FILE):
         self.db_file = db_file
 
@@ -207,7 +218,6 @@ class DatabaseManager:
         return sqlite3.connect(self.db_file)
 
     def init_db(self):
-        """Initialize the database table for scan results."""
         conn = self._connect()
         cursor = conn.cursor()
         cursor.execute(
@@ -227,7 +237,6 @@ class DatabaseManager:
         conn.close()
 
     def init_phishing_db(self):
-        """Initialize the database table for phishing sites."""
         conn = self._connect()
         cursor = conn.cursor()
         cursor.execute(
@@ -247,7 +256,8 @@ class DatabaseManager:
                 last_report_sent TEXT,
                 resolved_ip TEXT,
                 asn_provider TEXT,
-                is_cloudflare INTEGER
+                is_cloudflare INTEGER,
+                provider_abuse_email TEXT
             )
             """
         )
@@ -255,7 +265,6 @@ class DatabaseManager:
         conn.close()
 
     def upgrade_phishing_db(self):
-        """Upgrade the phishing_sites table by adding missing columns."""
         conn = self._connect()
         cursor = conn.cursor()
         cursor.execute("PRAGMA table_info(phishing_sites)")
@@ -279,7 +288,6 @@ class DatabaseManager:
         conn.close()
 
     def init_registrar_abuse_db(self):
-        """Initialize the registrar_abuse table used for caching abuse email addresses."""
         conn = self._connect()
         cursor = conn.cursor()
         cursor.execute(
@@ -294,21 +302,8 @@ class DatabaseManager:
         conn.close()
 
 
-###############################################################################
-# Abuse Report Manager
-###############################################################################
 def basic_whois_lookup(url: str) -> dict:
-    """
-    Perform a basic WHOIS lookup for the given URL.
-
-    Args:
-        url (str): URL for which WHOIS information is needed.
-
-    Returns:
-        dict: WHOIS information (empty dict on failure).
-    """
     try:
-        # Extract domain by stripping protocol and path.
         domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
         logger.debug(f"Performing WHOIS lookup for: {domain}")
         data = whois.whois(domain)
@@ -319,32 +314,26 @@ def basic_whois_lookup(url: str) -> dict:
 
 
 class AbuseReportManager:
-    """
-    Manages the extraction of abuse emails from WHOIS data and sending abuse reports.
-    """
-
-    def __init__(self, db_manager: DatabaseManager, cc_emails: Optional[List[str]], timeout: int):
+    def __init__(
+        self,
+        db_manager: DatabaseManager,
+        cc_emails: Optional[List[str]],
+        timeout: int,
+        monitoring_event: threading.Event = None,
+    ):
         self.db_manager = db_manager
         if cc_emails is None:
-            default_cc = os.getenv("DEFAULT_CC_EMAILS", "")
+            default_cc = getattr(settings, "DEFAULT_CC_EMAILS", "")
             self.cc_emails = (
                 [email.strip() for email in default_cc.split(",")] if default_cc else []
             )
         else:
             self.cc_emails = cc_emails
         self.timeout = timeout
+        self.monitoring_event = monitoring_event
 
     @staticmethod
     def extract_registrar(whois_data) -> Optional[str]:
-        """
-        Extract registrar information from WHOIS data.
-
-        Args:
-            whois_data: WHOIS lookup result.
-
-        Returns:
-            Registrar name as string if found, else None.
-        """
         if isinstance(whois_data, dict):
             registrar = whois_data.get("registrar")
             if registrar:
@@ -359,15 +348,6 @@ class AbuseReportManager:
         return None
 
     def get_abuse_email_by_registrar(self, registrar: str) -> Optional[str]:
-        """
-        Check the registrar abuse database for a cached abuse email.
-
-        Args:
-            registrar (str): Registrar name.
-
-        Returns:
-            Cached abuse email if found, else None.
-        """
         conn = sqlite3.connect(self.db_manager.db_file)
         cursor = conn.cursor()
         query = "SELECT abuse_email FROM registrar_abuse WHERE LOWER(registrar) LIKE ?"
@@ -382,18 +362,6 @@ class AbuseReportManager:
         return None
 
     def extract_abuse_emails(self, whois_data) -> List[str]:
-        """
-        Extract abuse email addresses from WHOIS data.
-
-        First checks for a cached registrar abuse email; if not found,
-        uses regex to find emails with 'abuse' in them.
-
-        Args:
-            whois_data: WHOIS lookup result.
-
-        Returns:
-            List of abuse email addresses.
-        """
         registrar = self.extract_registrar(whois_data) or ""
         abuse_from_registrar = self.get_abuse_email_by_registrar(registrar)
         if abuse_from_registrar:
@@ -410,42 +378,35 @@ class AbuseReportManager:
         site_url: str,
         whois_str: str,
         attachment_path: Optional[str] = None,
+        test_mode: bool = False,
     ) -> None:
-        """
-        Send an abuse report email to the specified abuse email addresses.
+        default_attachment = AttachmentConfig.get_attachment()
+        if default_attachment:
+            attachment_path = default_attachment
 
-        Renders an HTML email using Jinja2 and attaches a file if provided.
-        Adjusts CC list and ensures that if multiple abuse addresses exist,
-        any 'abuse-tracker' address is demoted if a better candidate is available.
-
-        Args:
-            abuse_emails (List[str]): List of abuse email addresses.
-            site_url (str): URL of the phishing site.
-            whois_str (str): WHOIS information as a string.
-            attachment_path (Optional[str]): File path of the attachment (if any).
-        """
-        smtp_host = settings.SMTP_HOST
-        smtp_port = settings.SMTP_PORT
-        smtp_user = os.environ.get("SMTP_USER", "")
-        smtp_pass = os.environ.get("SMTP_PASS", "")
-        sender_email = settings.ABUSE_EMAIL_SENDER
-        subject = f"{settings.ABUSE_EMAIL_SUBJECT} for {site_url}"
+        smtp_host = getattr(settings, "SMTP_HOST")
+        smtp_port = getattr(settings, "SMTP_PORT")
+        smtp_user = getattr(settings, "SMTP_USER", "")
+        smtp_pass = getattr(settings, "SMTP_PASS", "")
+        sender_email = getattr(settings, "ABUSE_EMAIL_SENDER")
+        subject = f"{getattr(settings, 'ABUSE_EMAIL_SUBJECT')} for {site_url}"
         attachment_filename = os.path.basename(attachment_path) if attachment_path else None
 
         env_jinja = Environment(
             loader=FileSystemLoader("templates"), autoescape=select_autoescape(["html", "xml"])
         )
-        final_cc = self.cc_emails[:] if self.cc_emails else []
-        if sender_email not in final_cc:
+        final_cc = [] if test_mode else (self.cc_emails[:] if self.cc_emails else [])
+        if not test_mode and sender_email not in final_cc:
             final_cc.insert(0, sender_email)
-        escalation2 = os.getenv("DEFAULT_CC_ESCALATION_LEVEL2", "")
-        escalation3 = os.getenv("DEFAULT_CC_ESCALATION_LEVEL3", "")
-        for var in [escalation2, escalation3]:
-            if var:
-                for email in var.split(","):
-                    email = email.strip()
-                    if email and email not in final_cc:
-                        final_cc.append(email)
+        if not test_mode:
+            escalation2 = getattr(settings, "DEFAULT_CC_ESCALATION_LEVEL2", "")
+            escalation3 = getattr(settings, "DEFAULT_CC_ESCALATION_LEVEL3", "")
+            for var in [escalation2, escalation3]:
+                if var:
+                    for email in var.split(","):
+                        email = email.strip()
+                        if email and email not in final_cc:
+                            final_cc.append(email)
         try:
             html_content = env_jinja.get_template("abuse_report.html").render(
                 site_url=site_url,
@@ -467,7 +428,7 @@ class AbuseReportManager:
             msg["Subject"] = subject
             msg["From"] = sender_email
             msg["To"] = primary
-            if final_cc:
+            if not test_mode and final_cc:
                 msg["Cc"] = ", ".join(final_cc)
                 recipients = [primary] + final_cc
             else:
@@ -482,22 +443,25 @@ class AbuseReportManager:
                     logger.info(f"Attached file {attachment_filename} to email for {site_url}")
                 except Exception as e:
                     logger.error(f"Failed to attach file {attachment_path}: {e}")
+            attachment_info = f" with attachment {attachment_filename}" if attachment_path else ""
             try:
                 with smtplib.SMTP(smtp_host, smtp_port) as server:
                     if smtp_user and smtp_pass:
                         server.login(smtp_user, smtp_pass)
                     server.sendmail(sender_email, recipients, msg.as_string())
                 logger.info(
-                    f"Abuse report sent to {primary} for site {site_url}; CC: {final_cc if final_cc else 'None'}"
+                    f"Abuse report sent to {primary} for site {site_url}{attachment_info}; CC: {final_cc if final_cc else 'None'}"
                 )
             except Exception as e:
                 logger.error(f"Failed to send abuse report to {primary}: {e}")
 
     def report_phishing_sites(self):
-        """
-        Background thread that continuously checks flagged phishing sites,
-        updates WHOIS and site status, and sends abuse reports if needed.
-        """
+        if self.monitoring_event:
+            logger.info(
+                "Waiting for monitoring thread to complete initial cycle before sending abuse reports..."
+            )
+            self.monitoring_event.wait()
+            logger.info("Monitoring thread initial cycle complete. Starting abuse reporting.")
         while True:
             conn = None
             try:
@@ -525,20 +489,54 @@ class AbuseReportManager:
                         timestamp = current_time.strftime("%Y-%m-%d %H:%M:%S")
                         domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
                         resolved_ip, asn_provider = get_ip_info(domain)
-                        cloudflare_detected = False
-                        if resolved_ip:
-                            cloudflare_detected = is_cloudflare_ip(resolved_ip)
-                        abuse_list = self.extract_abuse_emails(whois_data)
-                        if cloudflare_detected:
-                            logger.info(
-                                f"Cloudflare detected for {url}. Using abuse@cloudflare.com"
+                        cursor.execute(
+                            "SELECT site_status, takedown_date FROM phishing_sites WHERE url = ?",
+                            (url,),
+                        )
+                        row = cursor.fetchone()
+                        current_status = row[0] if row else "up"
+                        current_takedown = row[1] if row else None
+                        if not resolved_ip:
+                            new_status = "down"
+                            new_takedown = (
+                                current_takedown if current_status == "down" else timestamp
                             )
-                            abuse_list = ["abuse@cloudflare.com"]
+                        else:
+                            new_status = "up"
+                            new_takedown = None
+                            try:
+                                response = requests.get(
+                                    url,
+                                    timeout=self.timeout,
+                                    headers={"User-Agent": DEFAULT_USER_AGENT},
+                                )
+                                if response.status_code == 200:
+                                    if "suspended" in response.text.lower():
+                                        new_status = "down"
+                                        new_takedown = (
+                                            current_takedown
+                                            if current_status == "down"
+                                            else timestamp
+                                        )
+                                    else:
+                                        new_status = "up"
+                                        new_takedown = None
+                                else:
+                                    new_status = "down"
+                                    new_takedown = (
+                                        current_takedown if current_status == "down" else timestamp
+                                    )
+                            except Exception as e:
+                                logger.error(f"GET request failed for {url}: {e}")
+                                new_status = "down"
+                                new_takedown = (
+                                    current_takedown if current_status == "down" else timestamp
+                                )
                         cursor.execute(
                             """
                             UPDATE phishing_sites
                             SET whois_info = ?, last_seen = ?, reported = 1, last_report_sent = ?,
-                                resolved_ip = ?, asn_provider = ?, is_cloudflare = ?
+                                resolved_ip = ?, asn_provider = ?, is_cloudflare = ?, site_status = ?, takedown_date = ?
                             WHERE url = ?
                             """,
                             (
@@ -547,13 +545,19 @@ class AbuseReportManager:
                                 timestamp,
                                 resolved_ip,
                                 asn_provider,
-                                1 if cloudflare_detected else 0,
+                                1 if (resolved_ip and is_cloudflare_ip(resolved_ip)) else 0,
+                                new_status,
+                                new_takedown,
                                 url,
                             ),
                         )
                         logger.info(f"WHOIS data enriched for {url}")
+                        abuse_list = self.extract_abuse_emails(whois_data)
                         if abuse_list:
-                            self.send_abuse_report(abuse_list, url, whois_str)
+                            attachment = AttachmentConfig.get_attachment()
+                            self.send_abuse_report(
+                                abuse_list, url, whois_str, attachment_path=attachment
+                            )
                             cursor.execute(
                                 "UPDATE phishing_sites SET abuse_report_sent = 1, abuse_email = ?, last_report_sent = ? WHERE url = ?",
                                 (abuse_list[0], timestamp, url),
@@ -569,95 +573,102 @@ class AbuseReportManager:
             time.sleep(settings.REPORT_INTERVAL)
 
     def process_manual_reports(self, attachment_path: Optional[str] = None):
-        """
-        Process manually flagged phishing sites to update WHOIS information and send abuse reports.
-
-        Args:
-            attachment_path (Optional[str]): Path to an attachment to include with the report.
-        """
-        conn = None
-        try:
-            conn = sqlite3.connect(self.db_manager.db_file)
-            cursor = conn.cursor()
-            cursor.execute(
-                "SELECT url, reported, abuse_report_sent, abuse_email FROM phishing_sites WHERE manual_flag = 1 AND reported = 0"
-            )
-            sites = cursor.fetchall()
-            for url, reported, abuse_report_sent, stored_abuse in sites:
-                try:
-                    whois_data = basic_whois_lookup(url)
-                    whois_str = str(whois_data)
-                    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
-                    resolved_ip, asn_provider = get_ip_info(domain)
-                    cloudflare_detected = False
-                    if resolved_ip:
-                        cloudflare_detected = is_cloudflare_ip(resolved_ip)
+        conn = sqlite3.connect(self.db_manager.db_file)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT url, reported, abuse_report_sent, abuse_email FROM phishing_sites WHERE manual_flag = 1 AND reported = 0"
+        )
+        sites = cursor.fetchall()
+        for url, reported, abuse_report_sent, stored_abuse in sites:
+            try:
+                whois_data = basic_whois_lookup(url)
+                whois_str = str(whois_data)
+                timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+                resolved_ip, asn_provider = get_ip_info(domain)
+                cloudflare_detected = False
+                if resolved_ip:
+                    cloudflare_detected = is_cloudflare_ip(resolved_ip)
+                cursor.execute(
+                    """
+                    UPDATE phishing_sites
+                    SET whois_info = ?, last_seen = ?, reported = 1,
+                        resolved_ip = ?, asn_provider = ?, is_cloudflare = ?
+                    WHERE url = ?
+                    """,
+                    (
+                        whois_str,
+                        timestamp,
+                        resolved_ip,
+                        asn_provider,
+                        1 if cloudflare_detected else 0,
+                        url,
+                    ),
+                )
+                logger.info(f"Manually processed WHOIS data for {url}")
+                abuse_list = (
+                    [stored_abuse] if stored_abuse else self.extract_abuse_emails(whois_data)
+                )
+                if cloudflare_detected:
+                    logger.info(f"Cloudflare detected for {url}. Using abuse@cloudflare.com")
+                    abuse_list = ["abuse@cloudflare.com"]
+                if abuse_list and abuse_report_sent == 0:
+                    self.send_abuse_report(
+                        abuse_list, url, whois_str, attachment_path=attachment_path
+                    )
                     cursor.execute(
-                        """
-                        UPDATE phishing_sites
-                        SET whois_info = ?, last_seen = ?, reported = 1,
-                            resolved_ip = ?, asn_provider = ?, is_cloudflare = ?
-                        WHERE url = ?
-                        """,
-                        (
-                            whois_str,
-                            timestamp,
-                            resolved_ip,
-                            asn_provider,
-                            1 if cloudflare_detected else 0,
-                            url,
-                        ),
+                        "UPDATE phishing_sites SET abuse_report_sent = 1, abuse_email = ?, last_report_sent = ? WHERE url = ?",
+                        (abuse_list[0], timestamp, url),
                     )
-                    logger.info(f"Manually processed WHOIS data for {url}")
-                    abuse_list = (
-                        [stored_abuse] if stored_abuse else self.extract_abuse_emails(whois_data)
-                    )
-                    if cloudflare_detected:
-                        logger.info(f"Cloudflare detected for {url}. Using abuse@cloudflare.com")
-                        abuse_list = ["abuse@cloudflare.com"]
-                    if abuse_list and abuse_report_sent == 0:
-                        self.send_abuse_report(abuse_list, url, whois_str, attachment_path)
-                        cursor.execute(
-                            "UPDATE phishing_sites SET abuse_report_sent = 1, abuse_email = ?, last_report_sent = ? WHERE url = ?",
-                            (abuse_list[0], timestamp, url),
-                        )
-                except Exception as e:
-                    logger.error(f"WHOIS query failed for {url}: {e}")
-            conn.commit()
-        except Exception as outer_e:
-            logger.error(f"Error processing manual reports: {outer_e}")
-        finally:
-            if conn:
-                conn.close()
+            except Exception as e:
+                logger.error(f"WHOIS query failed for {url}: {e}")
+        conn.commit()
+        conn.close()
+
+    def send_test_report(self, test_email: str, attachment_path: Optional[str] = None):
+        test_whois_str = "This is a test WHOIS information for a test phishing site."
+        test_site_url = "https://test.phishing-site.com"
+        test_abuse_emails = [test_email]
+        logger.info("Sending test 2-days report...")
+        attachment = AttachmentConfig.get_attachment() or attachment_path
+        self.send_abuse_report(
+            test_abuse_emails,
+            test_site_url,
+            test_whois_str,
+            attachment_path=attachment,
+            test_mode=True,
+        )
+        logger.info("Test report sent.")
 
 
-###############################################################################
-# Takedown Monitor
-###############################################################################
 class TakedownMonitor:
-    """
-    Continuously monitor phishing sites to determine if they are still active or have been taken down.
-    """
-
-    def __init__(self, db_manager: DatabaseManager, timeout: int, check_interval: int = 3600):
+    def __init__(
+        self,
+        db_manager: DatabaseManager,
+        timeout: int,
+        check_interval: int = 3600,
+        monitoring_event: threading.Event = None,
+    ):
         self.db_manager = db_manager
         self.timeout = timeout
         self.check_interval = check_interval
+        self.monitoring_event = monitoring_event
 
     def run(self):
-        """
-        Run the takedown monitor which periodically checks each phishing site and updates its status.
-        """
+        first_cycle_done = False
         while True:
-            conn = None
-            try:
-                conn = sqlite3.connect(self.db_manager.db_file)
-                cursor = conn.cursor()
-                cursor.execute("SELECT url, site_status, takedown_date FROM phishing_sites")
-                sites = cursor.fetchall()
-                for url, current_status, current_takedown in sites:
-                    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            conn = sqlite3.connect(self.db_manager.db_file)
+            cursor = conn.cursor()
+            cursor.execute("SELECT url, site_status, takedown_date FROM phishing_sites")
+            sites = cursor.fetchall()
+            for url, current_status, current_takedown in sites:
+                timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+                resolved_ip, asn_provider = get_ip_info(domain)
+                if not resolved_ip:
+                    new_status = "down"
+                    new_takedown = current_takedown if current_status == "down" else timestamp
+                else:
                     try:
                         response = requests.get(
                             url, timeout=self.timeout, headers={"User-Agent": DEFAULT_USER_AGENT}
@@ -666,7 +677,7 @@ class TakedownMonitor:
                             if "suspended" in response.text.lower():
                                 new_status = "down"
                                 new_takedown = (
-                                    timestamp if current_status != "down" else current_takedown
+                                    current_takedown if current_status == "down" else timestamp
                                 )
                             else:
                                 new_status = "up"
@@ -674,60 +685,50 @@ class TakedownMonitor:
                         else:
                             new_status = "down"
                             new_takedown = (
-                                timestamp if current_status != "down" else current_takedown
+                                current_takedown if current_status == "down" else timestamp
                             )
                     except Exception as e:
                         logger.error(f"GET request failed for {url}: {e}")
                         new_status = "down"
-                        new_takedown = timestamp if current_status != "down" else current_takedown
-                    cursor.execute(
-                        "UPDATE phishing_sites SET site_status = ?, takedown_date = ?, last_seen = ? WHERE url = ?",
-                        (new_status, new_takedown, timestamp, url),
-                    )
+                        new_takedown = current_takedown if current_status == "down" else timestamp
+                cursor.execute(
+                    "UPDATE phishing_sites SET site_status = ?, takedown_date = ?, last_seen = ? WHERE url = ?",
+                    (new_status, new_takedown, timestamp, url),
+                )
+                logger.info(
+                    f"Updated {url}: site_status set to '{new_status}', takedown_date set to '{new_takedown}'"
+                )
+            conn.commit()
+            if not first_cycle_done:
+                first_cycle_done = True
+                if self.monitoring_event and not self.monitoring_event.is_set():
                     logger.info(
-                        f"Updated {url}: site_status set to '{new_status}', takedown_date set to '{new_takedown}'"
+                        "Takedown monitor initial cycle complete, setting monitoring event."
                     )
-                conn.commit()
-            except Exception as e:
-                logger.error(f"Error in takedown monitor thread: {e}")
-            finally:
-                if conn:
-                    conn.close()
+                    self.monitoring_event.set()
+            conn.close()
             time.sleep(self.check_interval)
 
 
-###############################################################################
-# External Offset Functions for File-based Batching
-###############################################################################
 def save_offset(offset: int):
-    """
-    Save the current offset to a file so that scan cycles can resume from the correct position.
-    """
     with open(OFFSET_FILE, "w") as f:
         f.write(str(offset))
+    logger.debug(f"Offset saved as: {offset}")
 
 
 def get_offset() -> int:
     try:
         with open(OFFSET_FILE, "r") as f:
             offset_str = f.read().strip()
-            return int(float(offset_str))
+            offset = int(float(offset_str))
+            logger.debug(f"Retrieved offset: {offset}")
+            return offset
     except Exception as ex:
         logger.error(f"Error getting offset from {OFFSET_FILE}: {ex}")
         return 0
 
 
-###############################################################################
-# Phishing Scanner (File-based)
-###############################################################################
 class PhishingScanner:
-    """
-    Scans for phishing sites by reading a batch of target queries from a file.
-
-    The queries file is processed in batches (default size 150K lines) so that
-    the engine can handle a very large list (e.g., 2.6B lines) without loading everything into memory.
-    """
-
     def __init__(
         self, timeout: int, keywords: List[str], domains: List[str], allowed_sites: List[str], args
     ):
@@ -736,58 +737,44 @@ class PhishingScanner:
         self.domains = domains
         self.allowed_sites = allowed_sites
         self.batch_size = BATCH_SIZE
-
-        # If not running in threads-only mode, (re)generate the queries file if needed.
-        if not args.threads_only:
-            if args.regen_queries or not os.path.exists(QUERIES_FILE):
-                logger.info(f"Generating queries file {QUERIES_FILE}...")
-                generate_queries_file(self.keywords, self.domains)
-            else:
-                logger.info(f"Using existing {QUERIES_FILE} file.")
-        else:
-            logger.info("Threads-only mode: Skipping queries file generation.")
-
-        # Count total queries in the file. (Note: For huge files this may take a while.)
-        try:
-            with open(QUERIES_FILE, "r") as f:
-                self.total_queries = sum(1 for _ in f)
-            logger.info(f"Total queries in file: {self.total_queries}")
-        except Exception as ex:
-            logger.error(f"Error counting total queries: {ex}")
+        if args.test_report:
+            logger.info("Test report mode active: Skipping queries file generation.")
             self.total_queries = 0
+        else:
+            if not args.threads_only:
+                if args.regen_queries or not os.path.exists(QUERIES_FILE):
+                    logger.info(f"Generating queries file {QUERIES_FILE}...")
+                    generate_queries_file(self.keywords, self.domains)
+                else:
+                    logger.info(f"Using existing {QUERIES_FILE} file.")
+            else:
+                logger.info("Threads-only mode: Skipping queries file generation.")
+            try:
+                with open(QUERIES_FILE, "r") as f:
+                    self.total_queries = sum(1 for _ in f)
+                logger.info(f"Total queries in file: {self.total_queries}")
+            except Exception as ex:
+                logger.error(f"Error counting total queries: {ex}")
+                self.total_queries = 0
 
     def get_dynamic_target_sites(self) -> List[str]:
-        """
-        Retrieve the next batch of target sites from the queries file using the saved offset.
-
-        If no lines are read (i.e. end of file), the offset is reset to 0 to restart scanning.
-
-        Returns:
-            List[str]: A list of query lines to scan.
-        """
-        offset = get_offset()  # Ensure proper conversion (even if stored as a float string)
+        offset = get_offset()
         batch = []
         with open(QUERIES_FILE, "r") as f:
-            # Advance the file pointer up to the current offset.
             for _ in range(offset):
                 f.readline()
-            # Read the next batch_size lines.
             for _ in range(self.batch_size):
                 line = f.readline()
                 if not line:
                     break
                 batch.append(line.strip())
-
         if not batch:
-            # Reached end of file; reset offset to 0 for continuous scanning.
             logger.info(
                 "Reached end of queries.txt. Resetting offset to 0 for continuous scanning."
             )
             save_offset(0)
-            # Optionally, re-read the first batch immediately:
             with open(QUERIES_FILE, "r") as f:
                 batch = [line.strip() for line in islice(f, self.batch_size)]
-            # Also update the offset accordingly.
             save_offset(len(batch))
         else:
             new_offset = offset + len(batch)
@@ -796,33 +783,14 @@ class PhishingScanner:
             logger.info(
                 f"Batch starting at offset {offset}: {len(batch)} queries read. Remaining queries: {remaining}"
             )
-
         return batch
 
     @staticmethod
     def augment_with_www(domain: str) -> List[str]:
-        """
-        Generate candidate domains by adding or not adding the 'www.' prefix.
-
-        Args:
-            domain (str): The domain to augment.
-
-        Returns:
-            List[str]: List containing the original domain and the www-prefixed version.
-        """
         parts = domain.split(".")
         return [domain, f"www.{domain}"] if len(parts) == 2 else [domain]
 
     def filter_allowed_targets(self, targets: List[str]) -> List[str]:
-        """
-        Filter out targets that are on the allowed (whitelist) sites.
-
-        Args:
-            targets (List[str]): List of target URLs.
-
-        Returns:
-            List[str]: Filtered list excluding allowed sites.
-        """
         allowed_set = {site.lower().strip() for site in self.allowed_sites}
         filtered = [target for target in targets if target.lower().strip() not in allowed_set]
         removed = len(targets) - len(filtered)
@@ -831,17 +799,6 @@ class PhishingScanner:
         return filtered
 
     def get_candidate_urls(self, domain: str) -> List[str]:
-        """
-        Generate candidate URLs for a domain by testing both HTTP and HTTPS schemes.
-
-        For each candidate, a HEAD request is made to check if the site is reachable.
-
-        Args:
-            domain (str): The domain to test.
-
-        Returns:
-            List[str]: A list of reachable URLs.
-        """
         candidate_domains = self.augment_with_www(domain)
         candidate_urls = []
         dns_error_logged = False
@@ -873,15 +830,7 @@ class PhishingScanner:
         return candidate_urls
 
     def scan_site(self, domain: str) -> None:
-        """
-        Scan a given domain for phishing keywords.
-
-        Attempts to retrieve candidate URLs for the domain and checks each one for the specified keywords.
-        When keywords are found, the result is stored and logged.
-
-        Args:
-            domain (str): The domain to scan.
-        """
+        code = 0
         for url in self.get_candidate_urls(domain) or []:
             logger.info(f"Scanning {url} for keywords: {self.keywords}")
             try:
@@ -899,42 +848,34 @@ class PhishingScanner:
                     PhishingUtils.log_positive_result(url, matches)
                 else:
                     logger.debug(f"No keywords found in {url}")
-                # If one candidate URL is successfully scanned, break out of the loop.
                 break
             except requests.exceptions.Timeout:
                 logger.warning(f"Timeout scanning {url}")
+                PhishingUtils.update_scan_result_response_code(url, code)
             except requests.exceptions.ConnectionError as e:
                 if any(phrase in str(e) for phrase in DNS_ERROR_KEY_PHRASES):
                     logger.info(f"DNS failure during scan: {url}")
                 else:
                     logger.error(f"Connection failure: {url} - {e}")
+                PhishingUtils.update_scan_result_response_code(url, code)
             except Exception as e:
                 logger.error(f"Scan error: {url} - {repr(e)}")
+                PhishingUtils.update_scan_result_response_code(url, code)
 
     def run_scan_cycle(self) -> None:
-        """
-        Continuously process scan cycles until all queries in the file have been processed.
-
-        This loop keeps reading batches from the queries file and processing them with a ThreadPoolExecutor.
-        The loop condition is based on the current offset (the number of lines processed) versus the total number
-        of lines in the queries file. When get_offset() equals or exceeds self.total_queries, all queries have been processed.
-        """
         while get_offset() < self.total_queries:
             targets = self.get_dynamic_target_sites()
             if not targets:
                 logger.info("No targets returned from queries file; waiting before next cycle.")
                 time.sleep(settings.SCAN_INTERVAL)
                 continue
-
             if self.allowed_sites:
                 targets = self.filter_allowed_targets(targets)
-
             current_offset = get_offset()
             logger.info(
                 f"Processing batch: offset {current_offset}/{self.total_queries}, batch size {len(targets)}"
             )
-
-            with ThreadPoolExecutor(max_workers=30) as executor:
+            with ThreadPoolExecutor(max_workers=60) as executor:
                 futures = {executor.submit(self.scan_site, target): target for target in targets}
                 for i, future in enumerate(as_completed(futures), 1):
                     try:
@@ -944,43 +885,60 @@ class PhishingScanner:
                     if i % 10 == 0:
                         progress_percent = (i / len(targets)) * 100
                         logger.info(f"Progress: {i}/{len(targets)} ({progress_percent:.1f}%)")
+            gc.collect()
 
 
-###############################################################################
-# Engine
-###############################################################################
 class Engine:
-    """
-    The main engine that orchestrates the scanning, reporting, and monitoring threads.
-    """
-
     def __init__(self, args):
+        self.timeout = args.timeout if args.timeout is not None else settings.TIMEOUT
+        self.log_level = (
+            args.log_level if args.log_level is not None else getattr(settings, "LOG_LEVEL", "INFO")
+        )
+        self.abuse_email = (
+            args.abuse_email
+            if args.abuse_email is not None
+            else getattr(settings, "ABUSE_EMAIL", None)
+        )
+        self.attachment = (
+            args.attachment
+            if args.attachment is not None
+            else getattr(settings, "ATTACHMENT", None)
+        )
+        if args.cc and args.cc.strip() != "":
+            self.cc_emails = [email.strip() for email in args.cc.split(",")]
+        else:
+            self.cc_emails = (
+                [email.strip() for email in getattr(settings, "CC", "").split(",")]
+                if getattr(settings, "CC", "")
+                else None
+            )
         self.args = args
-        self.timeout = args.timeout
-        self.cc_emails = [email.strip() for email in args.cc.split(",")] if args.cc else None
-
-        # Initialize and upgrade the database.
         self.db_manager = DatabaseManager()
         self.db_manager.init_db()
         self.db_manager.init_phishing_db()
         self.db_manager.upgrade_phishing_db()
         self.db_manager.init_registrar_abuse_db()
-
+        self.monitoring_event = threading.Event()
         self.report_manager = AbuseReportManager(
-            self.db_manager, cc_emails=self.cc_emails, timeout=self.timeout
+            self.db_manager,
+            cc_emails=self.cc_emails,
+            timeout=self.timeout,
+            monitoring_event=self.monitoring_event,
         )
         self.takedown_monitor = TakedownMonitor(
-            self.db_manager, timeout=self.timeout, check_interval=int(3600 / 3)
+            self.db_manager,
+            timeout=self.timeout,
+            check_interval=int(3600 / 3),
+            monitoring_event=self.monitoring_event,
         )
-
-        # Convert settings values to list if needed.
         transform_to_list = lambda s: (
             [item.strip() for item in s.split(",")] if isinstance(s, str) else s
         )
         self.keywords = transform_to_list(settings.KEYWORDS)
         self.domains = transform_to_list(settings.DOMAINS)
         self.allowed_sites = transform_to_list(getattr(settings, "ALLOWED_SITES", ""))
-        if not self.args.threads_only:
+        self.mode = EngineMode(self.args)
+        if self.mode.scanning_mode:
             self.scanner = PhishingScanner(
                 self.timeout, self.keywords, self.domains, self.allowed_sites, self.args
             )
@@ -988,13 +946,6 @@ class Engine:
             self.scanner = None
 
     def mark_site_as_phishing(self, url: str, abuse_email: Optional[str] = None):
-        """
-        Mark a given URL as phishing by updating/inserting its record in the database.
-
-        Args:
-            url (str): The URL to mark as phishing.
-            abuse_email (Optional[str]): Known abuse email address for the site, if any.
-        """
         conn = sqlite3.connect(self.db_manager.db_file)
         cursor = conn.cursor()
         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1023,31 +974,31 @@ class Engine:
         conn.close()
 
     def start(self):
-        """
-        Start the engine. Depending on the provided arguments, the engine will:
-          - Flag a URL as phishing and exit.
-          - Process manually flagged reports and exit.
-          - Or start the background threads (reporting and takedown monitoring) and scanning cycles.
-        """
         if self.args.report:
-            self.mark_site_as_phishing(self.args.report, abuse_email=self.args.abuse_email)
-            logger.info(f"URL {self.args.report} flagged as phishing. Exiting after manual report.")
+            self.mark_site_as_phishing(self.args.report, abuse_email=self.abuse_email)
+            self.report_manager.process_manual_reports(attachment_path=self.attachment)
+            logger.info(
+                f"URL {self.args.report} flagged as phishing and abuse report processed. Exiting."
+            )
             return
-
         if self.args.process_reports:
-            self.report_manager.process_manual_reports(attachment_path=self.args.attachment)
+            self.report_manager.process_manual_reports(attachment_path=self.attachment)
             logger.info("Manually processed flagged phishing reports. Exiting.")
             return
-
-        # Start background threads for reporting and takedown monitoring.
+        if self.args.test_report:
+            if not self.abuse_email:
+                logger.error("For a test report, please provide a test email using --abuse-email")
+                return
+            attachment = AttachmentConfig.get_attachment() or self.attachment
+            self.report_manager.send_test_report(self.abuse_email, attachment_path=attachment)
+            logger.info("Test report sent. Exiting.")
+            return
         reporting_thread = threading.Thread(
             target=self.report_manager.report_phishing_sites, daemon=True
         )
         reporting_thread.start()
-
         takedown_thread = threading.Thread(target=self.takedown_monitor.run, daemon=True)
         takedown_thread.start()
-
         if self.args.threads_only:
             logger.info(
                 "Running in threads-only mode. Background threads are active; skipping scanning cycle."
@@ -1067,16 +1018,7 @@ class Engine:
                 time.sleep(settings.SCAN_INTERVAL)
 
 
-###############################################################################
-# Main entry point and Argument Parsing
-###############################################################################
 def parse_arguments() -> argparse.Namespace:
-    """
-    Parse command-line arguments.
-
-    Returns:
-        argparse.Namespace: Parsed command-line arguments.
-    """
     parser = argparse.ArgumentParser(
         description="Anisakys Phishing Detection Engine",
         epilog=(
@@ -1084,28 +1026,28 @@ def parse_arguments() -> argparse.Namespace:
             "  ./anisakys.py --timeout 30 --log-level DEBUG\n"
             "  ./anisakys.py --report https://site.domain.com --abuse-email abuse@domain.com\n"
             '  ./anisakys.py --process-reports --attachment /path/to/file.pdf --cc "cc1@example.com, cc2@example.com"\n'
-            "  ./anisakys.py --threads-only --log-level DEBUG"
+            "  ./anisakys.py --threads-only --log-level DEBUG\n"
+            "  ./anisakys.py --test-report --abuse-email your-test@example.com\n"
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(
         "--timeout",
         type=int,
-        choices=range(10, 300),
-        default=settings.TIMEOUT,
-        help=f"Request timeout in seconds (default: {settings.TIMEOUT})",
+        default=None,
+        help="Request timeout in seconds (default: settings.TIMEOUT)",
     )
     parser.add_argument(
         "--log-level",
         choices=["INFO", "DEBUG"],
-        default="INFO",
-        help="Set logging verbosity (default: INFO)",
+        default=None,
+        help="Set logging verbosity (default: settings.LOG_LEVEL or INFO)",
     )
     parser.add_argument("--report", type=str, help="Manually flag a URL as phishing.")
     parser.add_argument(
         "--abuse-email",
         type=str,
-        help="(Optional) Provide a known abuse email address for the domain.",
+        help="(Optional) Provide a known abuse email address for the domain (default: settings.ABUSE_EMAIL)",
     )
     parser.add_argument(
         "--process-reports",
@@ -1115,32 +1057,37 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--attachment",
         type=str,
-        help="Optional file path to attach to the abuse report (only used with --process-reports).",
+        help="Optional file path to attach to the abuse report (default: settings.ATTACHMENT)",
     )
     parser.add_argument(
         "--cc",
         type=str,
-        help="Optional comma-separated list of email addresses to CC on the abuse report.",
+        help="Optional comma-separated list of email addresses to CC on the abuse report (default: settings.CC)",
     )
     parser.add_argument(
         "--threads-only",
         action="store_true",
-        help="Only run background threads (reporting and takedown monitor) without running the scanning cycle.",
+        help="Only run background threads without running the scanning cycle.",
     )
     parser.add_argument(
         "--regen-queries",
         action="store_true",
         help="Force regeneration of the queries file even if it already exists.",
     )
+    parser.add_argument(
+        "--test-report",
+        action="store_true",
+        help="Send a test 2-days report including attachment and escalation CCs, then exit.",
+    )
     return parser.parse_args()
 
 
 def main():
-    """
-    Main function: parses arguments, sets logging, initializes the engine, and starts it.
-    """
     args = parse_arguments()
-    logger.setLevel(args.log_level)
+    log_level = (
+        args.log_level if args.log_level is not None else getattr(settings, "LOG_LEVEL", "INFO")
+    )
+    logger.setLevel(log_level)
     engine = Engine(args)
     engine.start()
 

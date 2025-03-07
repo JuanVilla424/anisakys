@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     DEFAULT_CC_EMAILS: Optional[str] = None
     DEFAULT_CC_EMAILS_ESCALATION_LEVEL2: Optional[str] = None
     DEFAULT_CC_EMAILS_ESCALATION_LEVEL3: Optional[str] = None
+    DEFAULT_ATTACHMENT: Optional[str] = None
 
     model_config = {
         "env_file": ".env",
