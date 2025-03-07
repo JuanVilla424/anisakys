@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "anisakys"
-version = "1.0.18"
+version = "1.0.19"
 description = "Open Phishing Monitor Daemon. Scan similar domains based on world keys."
 authors = ["B <g46327wsj1.marbling129@passinbox.com>"]
 license = "GLPv3"
