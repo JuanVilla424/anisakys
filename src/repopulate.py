@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
+"""
+populate_provider_email.py
+
+This script updates the "provider_abuse_email" field in the phishing_sites table by
+resolving each site's IP and ASN/provider. If the site is not behind Cloudflare, it
+automatically generates a provider abuse email in the format:
+    abuse@{normalized_asn}.com
+where the ASN string is normalized by removing non-alphanumeric characters.
+"""
+
 import sqlite3
 import socket
 import re
 import ipaddress
+from typing import Optional
 from ipwhois import IPWhois
-
 from src.config import CLOUDFLARE_IP_RANGES
 
 
@@ -34,29 +44,49 @@ def is_cloudflare_ip(ip: str) -> bool:
         return False
 
 
-def repopulate_asn_and_cloudflare(db_file: str = "scan_results.db"):
+def get_provider_abuse_email(asn_provider: str) -> Optional[str]:
+    """
+    Automatically generate a provider abuse email from the ASN/provider string.
+    The provider string is normalized by removing non-alphanumeric characters and converting to lowercase,
+    then an email is constructed as abuse@{normalized_asn}.com.
+    """
+    if not asn_provider:
+        return None
+    normalized = re.sub(r"[^a-z0-9]", "", asn_provider.lower())
+    if normalized:
+        email = f"abuse@{normalized}.com"
+        return email
+    return None
+
+
+def populate_provider_email(db_file: str = "scan_results.db"):
     conn = sqlite3.connect(db_file)
     cursor = conn.cursor()
-    cursor.execute("SELECT url FROM phishing_sites WHERE site_status = 'up'")
+    cursor.execute("SELECT url FROM phishing_sites")
     rows = cursor.fetchall()
     for (url,) in rows:
-        # Extract domain from URL (remove http/https and any trailing paths)
+        # Remove protocol and trailing path to get the domain
         domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
         resolved_ip, asn_provider = get_ip_info(domain)
-        cloudflare_flag = 1 if resolved_ip and is_cloudflare_ip(resolved_ip) else 0
-        print(f"Updating {url}: IP={resolved_ip}, ASN={asn_provider}, Cloudflare={cloudflare_flag}")
-        cursor.execute(
-            """
-            UPDATE phishing_sites
-            SET resolved_ip = ?, asn_provider = ?, is_cloudflare = ?
-            WHERE url = ?
-            """,
-            (resolved_ip, asn_provider, cloudflare_flag, url),
-        )
+        if not resolved_ip:
+            print(f"Skipping {url}: could not resolve IP.")
+            continue
+        if is_cloudflare_ip(resolved_ip):
+            print(f"Skipping {url}: Cloudflare detected.")
+            continue
+        provider_email = get_provider_abuse_email(asn_provider)
+        if provider_email:
+            print(f"Updating {url} with provider abuse email: {provider_email}")
+            cursor.execute(
+                "UPDATE phishing_sites SET provider_abuse_email = ? WHERE url = ?",
+                (provider_email, url),
+            )
+        else:
+            print(f"No ASN/provider info for {url}; cannot generate provider abuse email.")
     conn.commit()
     conn.close()
-    print("Re-population complete.")
+    print("Provider abuse email population complete.")
 
 
 if __name__ == "__main__":
-    repopulate_asn_and_cloudflare()
+    populate_provider_email()
