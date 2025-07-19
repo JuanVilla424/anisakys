@@ -1,37 +1,12 @@
-# Pre-Commit for pre-commit hooks management
-pre-commit>=4.0.0
-
-# Pylint for python lint
-pylint>=3.3.1
-
-# YamlLint for YAML lint
-yamllint>=1.35.1
-
-# Poetry for package management alternative
-poetry>=1.8.4
-
-# Bump2Version for version release control
-bump2version>=1.0.0
-
-# Toml for pyproject.toml management
-toml>=0.10.1
-
-# Black for Code Formatting
-black>=24.3.0
-
-# Pytest for Unit/Integration Testing
-pytest>=7.3.1
-pytest-cov>=4.0.0
-
-# Coverage Reporting
-coverage>=7.2.5
-
 requests~=2.32.3
-
-# PyDantic
 pydantic>=2.9.1
 pydantic-settings>=2.0.0
 python-whois>=0.9.4
-jinja2>=3.1.4
+jinja2>=3.1.6
 ipwhois>=1.2.0
 psutil>=6.1.1
+sqlalchemy
+psycopg2-binary
+validators
+flask
+flask-limiter

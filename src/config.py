@@ -1,8 +1,17 @@
+import sys
 import ipaddress
-
+from pathlib import Path
 from pydantic_settings import BaseSettings
 from pydantic import Field
 from typing import Optional
+
+if "pytest" in sys.modules:
+    test_env = Path(".env.test")
+    if not test_env.exists():
+        raise Exception("When running tests, the .env.test file must exist.")
+    env_file = ".env.test"
+else:
+    env_file = ".env"
 
 
 class Settings(BaseSettings):
@@ -19,16 +28,20 @@ class Settings(BaseSettings):
     DEFAULT_CC_EMAILS: Optional[str] = None
     DEFAULT_CC_EMAILS_ESCALATION_LEVEL2: Optional[str] = None
     DEFAULT_CC_EMAILS_ESCALATION_LEVEL3: Optional[str] = None
-    DEFAULT_ATTACHMENT: Optional[str] = None
+    ATTACHMENTS_FOLDER: Optional[str] = None
+    DATABASE_URL: Optional[str] = None
+    QUERIES_FILE: Optional[str] = None
+    OFFSET_FILE: Optional[str] = None
 
     model_config = {
-        "env_file": ".env",
+        "env_file": env_file,
         "extra": "ignore",
         "case_sensitive": False,
     }
 
 
 settings = Settings()
+
 CLOUDFLARE_IP_RANGES = [
     ipaddress.ip_network("173.245.48.0/20"),
     ipaddress.ip_network("103.21.244.0/22"),
