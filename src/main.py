@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Enhanced Anisakys Phishing Detection Engine
+Enhanced Anisakys Phishing Detection Engine with Multi-API Integration
 
-This script scans and processes phishing sites with improved abuse email detection
-and REST API capabilities for external reporting.
+This script scans and processes phishing sites with improved abuse email detection,
+REST API capabilities, and multi-API validation using VirusTotal, URLVoid, and PhishTank.
 
 Usage examples:
   ./anisakys.py --timeout 30 --log-level DEBUG
@@ -13,6 +13,7 @@ Usage examples:
   ./anisakys.py --regen-queries
   ./anisakys.py --test-report --abuse-email your-test@example.com
   ./anisakys.py --start-api --api-port 8080  # Start REST API server
+  ./anisakys.py --multi-api-scan --url https://suspicious-site.com  # Multi-API validation
 """
 
 import gc
@@ -23,12 +24,14 @@ import argparse
 import requests
 from itertools import permutations, islice
 import datetime
-from typing import List, Optional, Tuple, Dict, Any
+from typing import List, Optional, Tuple, Dict, Any, Union
 import threading
 import smtplib
 import psutil
 import json
 import subprocess
+import hashlib
+import base64
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
@@ -60,6 +63,23 @@ if not QUERIES_FILE:
     raise Exception("QUERIES_FILE must be set in your .env file")
 
 OFFSET_FILE = getattr(settings, "OFFSET_FILE", "offset_test.txt")
+
+# API Configuration
+VIRUSTOTAL_API_KEY = getattr(settings, "VIRUSTOTAL_API_KEY", None)
+URLVOID_API_KEY = getattr(settings, "URLVOID_API_KEY", None)
+PHISHTANK_API_KEY = getattr(settings, "PHISHTANK_API_KEY", None)
+
+# Auto-Analysis Configuration
+AUTO_MULTI_API_SCAN = getattr(settings, "AUTO_MULTI_API_SCAN", True)
+AUTO_REPORT_THRESHOLD_CONFIDENCE = getattr(settings, "AUTO_REPORT_THRESHOLD_CONFIDENCE", 85)
+AUTO_REPORT_THREAT_LEVELS = getattr(settings, "AUTO_REPORT_THREAT_LEVELS", ["critical", "high"])
+MANUAL_REVIEW_THRESHOLD_CONFIDENCE = getattr(settings, "MANUAL_REVIEW_THRESHOLD_CONFIDENCE", 70)
+AUTO_ANALYSIS_DELAY_SECONDS = getattr(settings, "AUTO_ANALYSIS_DELAY_SECONDS", 30)
+
+# Auto-analysis is only truly enabled if we have API keys AND the setting is enabled
+AUTO_ANALYSIS_ENABLED = AUTO_MULTI_API_SCAN and (
+    VIRUSTOTAL_API_KEY or URLVOID_API_KEY or PHISHTANK_API_KEY
+)
 
 # Constants
 ALLOWED_HEAD_STATUS = {200, 201, 202, 203, 204, 205, 206, 301, 302, 403, 405, 503, 504}
@@ -295,6 +315,598 @@ ENHANCED_REGISTRAR_ABUSE_DB = {
 db_engine = create_engine(DATABASE_URL, pool_pre_ping=True, echo=False)
 
 
+class VirusTotalIntegration:
+    """
+    VirusTotal API v3 Integration for comprehensive threat detection.
+
+    Provides multi-engine scanning using 70+ antivirus engines and URL scanners
+    for comprehensive threat detection with real-time reputation analysis.
+    """
+
+    def __init__(self, api_key: Optional[str] = None):
+        """
+        Initialize VirusTotal integration.
+
+        Args:
+            api_key (Optional[str]): VirusTotal API key. If None, uses environment variable.
+        """
+        self.api_key = api_key or VIRUSTOTAL_API_KEY
+        self.base_url = "https://www.virustotal.com/api/v3"
+        self.session = requests.Session()
+        self.session.headers.update(
+            {"x-apikey": self.api_key, "User-Agent": "Anisakys-Phishing-Detector/1.0"}
+        )
+
+    def scan_url(self, url: str) -> Dict[str, Any]:
+        """
+        Submit URL for analysis and get comprehensive threat assessment.
+
+        Args:
+            url (str): URL to scan
+
+        Returns:
+            Dict[str, Any]: Detailed threat assessment including detection ratios
+        """
+        if not self.api_key:
+            logger.warning("VirusTotal API key not configured, skipping scan")
+            return {"error": "API key not configured"}
+
+        try:
+            # First, submit the URL for scanning
+            url_id = base64.urlsafe_b64encode(url.encode()).decode().strip("=")
+
+            # Check if URL has been analyzed before
+            response = self.session.get(f"{self.base_url}/urls/{url_id}")
+
+            if response.status_code == 200:
+                data = response.json()
+                analysis = data.get("data", {}).get("attributes", {})
+                last_analysis = analysis.get("last_analysis_stats", {})
+
+                result = {
+                    "url": url,
+                    "scan_date": analysis.get("last_analysis_date"),
+                    "reputation": analysis.get("reputation", 0),
+                    "malicious": last_analysis.get("malicious", 0),
+                    "suspicious": last_analysis.get("suspicious", 0),
+                    "harmless": last_analysis.get("harmless", 0),
+                    "undetected": last_analysis.get("undetected", 0),
+                    "total_engines": sum(last_analysis.values()) if last_analysis else 0,
+                    "threat_level": self._calculate_threat_level(last_analysis),
+                    "community_score": analysis.get("total_votes", {}).get("harmless", 0)
+                    - analysis.get("total_votes", {}).get("malicious", 0),
+                    "categories": analysis.get("categories", {}),
+                    "engines_detail": analysis.get("last_analysis_results", {}),
+                }
+
+                logger.info(
+                    f"VirusTotal scan for {url}: {result['malicious']}/{result['total_engines']} engines detected threats"
+                )
+                return result
+
+            elif response.status_code == 404:
+                # URL not found, submit for scanning
+                scan_response = self.session.post(f"{self.base_url}/urls", data={"url": url})
+
+                if scan_response.status_code == 200:
+                    logger.info(f"Submitted {url} to VirusTotal for analysis")
+                    return {
+                        "status": "submitted",
+                        "message": "URL submitted for analysis, check back later",
+                    }
+                else:
+                    logger.error(
+                        f"Failed to submit {url} to VirusTotal: {scan_response.status_code}"
+                    )
+                    return {"error": f"Failed to submit URL: {scan_response.status_code}"}
+
+            else:
+                logger.error(f"VirusTotal API error: {response.status_code}")
+                return {"error": f"API error: {response.status_code}"}
+
+        except Exception as e:
+            logger.error(f"VirusTotal scan failed for {url}: {e}")
+            return {"error": str(e)}
+
+    def _calculate_threat_level(self, analysis_stats: Dict[str, int]) -> str:
+        """
+        Calculate threat level based on detection statistics.
+
+        Args:
+            analysis_stats (Dict[str, int]): Analysis statistics from VirusTotal
+
+        Returns:
+            str: Threat level (high, medium, low, clean)
+        """
+        if not analysis_stats:
+            return "unknown"
+
+        malicious = analysis_stats.get("malicious", 0)
+        suspicious = analysis_stats.get("suspicious", 0)
+        total = sum(analysis_stats.values())
+
+        if total == 0:
+            return "unknown"
+
+        malicious_ratio = malicious / total
+        suspicious_ratio = suspicious / total
+
+        if malicious_ratio >= 0.1:  # 10% or more engines detect as malicious
+            return "high"
+        elif malicious_ratio >= 0.05 or suspicious_ratio >= 0.2:  # 5% malicious or 20% suspicious
+            return "medium"
+        elif malicious_ratio > 0 or suspicious_ratio > 0:
+            return "low"
+        else:
+            return "clean"
+
+    def get_domain_report(self, domain: str) -> Dict[str, Any]:
+        """
+        Get domain reputation and analysis report.
+
+        Args:
+            domain (str): Domain to analyze
+
+        Returns:
+            Dict[str, Any]: Domain analysis report
+        """
+        if not self.api_key:
+            return {"error": "API key not configured"}
+
+        try:
+            response = self.session.get(f"{self.base_url}/domains/{domain}")
+
+            if response.status_code == 200:
+                data = response.json()
+                attributes = data.get("data", {}).get("attributes", {})
+
+                return {
+                    "domain": domain,
+                    "reputation": attributes.get("reputation", 0),
+                    "categories": attributes.get("categories", {}),
+                    "last_analysis_stats": attributes.get("last_analysis_stats", {}),
+                    "registrar": attributes.get("registrar"),
+                    "creation_date": attributes.get("creation_date"),
+                    "last_update_date": attributes.get("last_update_date"),
+                }
+            else:
+                return {"error": f"Domain analysis failed: {response.status_code}"}
+
+        except Exception as e:
+            logger.error(f"VirusTotal domain analysis failed for {domain}: {e}")
+            return {"error": str(e)}
+
+
+class URLVoidIntegration:
+    """
+    URLVoid API Integration for multi-blacklist checking.
+
+    Queries against 30+ reputation engines and blocklist services for
+    comprehensive domain reputation analysis.
+    """
+
+    def __init__(self, api_key: Optional[str] = None):
+        """
+        Initialize URLVoid integration.
+
+        Args:
+            api_key (Optional[str]): URLVoid API key. If None, uses environment variable.
+        """
+        self.api_key = api_key or URLVOID_API_KEY
+        self.base_url = "https://api.urlvoid.com/v1"
+        self.session = requests.Session()
+
+    def analyze_domain(self, domain: str) -> Dict[str, Any]:
+        """
+        Analyze domain using multiple reputation engines and blocklist services.
+
+        Args:
+            domain (str): Domain to analyze
+
+        Returns:
+            Dict[str, Any]: Comprehensive safety score and reputation analysis
+        """
+        if not self.api_key:
+            logger.warning("URLVoid API key not configured, skipping analysis")
+            return {"error": "API key not configured"}
+
+        try:
+            params = {"key": self.api_key, "host": domain}
+
+            response = self.session.get(f"{self.base_url}/host/{domain}", params=params)
+
+            if response.status_code == 200:
+                data = response.json()
+                details = data.get("data", {}).get("report", {})
+
+                result = {
+                    "domain": domain,
+                    "safety_score": details.get("safety_score", 0),
+                    "domain_age": details.get("domain_age"),
+                    "domain_1st_registered": details.get("domain_1st_registered"),
+                    "domain_length": details.get("domain_length"),
+                    "hostname": details.get("hostname"),
+                    "ip_address": details.get("ip_address"),
+                    "asn": details.get("asn"),
+                    "asn_name": details.get("asn_name"),
+                    "country_code": details.get("country_code"),
+                    "server_type": details.get("server_type"),
+                    "detections": details.get("detections", {}),
+                    "blacklists": details.get("blacklists", []),
+                    "threat_level": self._calculate_urlvoid_threat_level(details),
+                    "ssl_certificate": details.get("ssl_certificate", {}),
+                    "redirects": details.get("redirects", []),
+                }
+
+                logger.info(f"URLVoid analysis for {domain}: Safety score {result['safety_score']}")
+                return result
+
+            else:
+                logger.error(f"URLVoid API error for {domain}: {response.status_code}")
+                return {"error": f"API error: {response.status_code}"}
+
+        except Exception as e:
+            logger.error(f"URLVoid analysis failed for {domain}: {e}")
+            return {"error": str(e)}
+
+    def _calculate_urlvoid_threat_level(self, details: Dict[str, Any]) -> str:
+        """
+        Calculate threat level based on URLVoid analysis.
+
+        Args:
+            details (Dict[str, Any]): URLVoid analysis details
+
+        Returns:
+            str: Threat level (high, medium, low, clean)
+        """
+        safety_score = details.get("safety_score", 100)
+        detections = details.get("detections", {})
+        blacklists = details.get("blacklists", [])
+
+        if safety_score <= 30 or len(blacklists) >= 5:
+            return "high"
+        elif safety_score <= 60 or len(blacklists) >= 2:
+            return "medium"
+        elif safety_score <= 80 or len(blacklists) >= 1:
+            return "low"
+        else:
+            return "clean"
+
+
+class PhishTankIntegration:
+    """
+    PhishTank API Integration for community-driven phishing database.
+
+    Provides access to verified phishing URLs from security community with
+    real-time updates and submission capabilities.
+    """
+
+    def __init__(self, api_key: Optional[str] = None):
+        """
+        Initialize PhishTank integration.
+
+        Args:
+            api_key (Optional[str]): PhishTank API key. If None, uses environment variable.
+        """
+        self.api_key = api_key or PHISHTANK_API_KEY
+        self.base_url = "https://checkurl.phishtank.com/checkurl/"
+        self.session = requests.Session()
+
+    def check_phishing_status(self, url: str) -> Dict[str, Any]:
+        """
+        Check if URL is in PhishTank verified phishing database.
+
+        Args:
+            url (str): URL to check
+
+        Returns:
+            Dict[str, Any]: Phishing status and verification details
+        """
+        try:
+            data = {"url": url, "format": "json"}
+
+            if self.api_key:
+                data["app_key"] = self.api_key
+
+            response = self.session.post(self.base_url, data=data)
+
+            if response.status_code == 200:
+                result = response.json()
+
+                if "results" in result:
+                    phish_details = result["results"]
+
+                    return {
+                        "url": url,
+                        "is_phishing": phish_details.get("in_database", False),
+                        "phish_id": phish_details.get("phish_id"),
+                        "verified": phish_details.get("verified", False),
+                        "verified_at": phish_details.get("verified_at"),
+                        "submission_time": phish_details.get("submission_time"),
+                        "target": phish_details.get("target"),
+                        "details_url": phish_details.get("phish_detail_url"),
+                        "threat_level": (
+                            "high" if phish_details.get("verified", False) else "medium"
+                        ),
+                    }
+                else:
+                    return {
+                        "url": url,
+                        "is_phishing": False,
+                        "verified": False,
+                        "threat_level": "clean",
+                    }
+
+            else:
+                logger.error(f"PhishTank API error for {url}: {response.status_code}")
+                return {"error": f"API error: {response.status_code}"}
+
+        except Exception as e:
+            logger.error(f"PhishTank check failed for {url}: {e}")
+            return {"error": str(e)}
+
+    def submit_phishing_url(self, url: str) -> Dict[str, Any]:
+        """
+        Submit suspected phishing URL to PhishTank database.
+
+        Args:
+            url (str): Suspected phishing URL to submit
+
+        Returns:
+            Dict[str, Any]: Submission result
+        """
+        if not self.api_key:
+            logger.warning("PhishTank API key not configured, cannot submit URLs")
+            return {"error": "API key required for submissions"}
+
+        try:
+            submit_url = "https://www.phishtank.com/add_web_phish.php"
+            data = {"url": url, "app_key": self.api_key}
+
+            response = self.session.post(submit_url, data=data)
+
+            if response.status_code == 200:
+                logger.info(f"Successfully submitted {url} to PhishTank")
+                return {"status": "submitted", "url": url}
+            else:
+                logger.error(f"Failed to submit {url} to PhishTank: {response.status_code}")
+                return {"error": f"Submission failed: {response.status_code}"}
+
+        except Exception as e:
+            logger.error(f"PhishTank submission failed for {url}: {e}")
+            return {"error": str(e)}
+
+
+class MultiAPIValidator:
+    """
+    Multi-API validation pipeline for comprehensive phishing detection.
+
+    Orchestrates VirusTotal, URLVoid, and PhishTank APIs for enhanced
+    threat detection with configurable validation thresholds.
+    """
+
+    def __init__(self):
+        """Initialize multi-API validator with all integrated services."""
+        self.virustotal = VirusTotalIntegration()
+        self.urlvoid = URLVoidIntegration()
+        self.phishtank = PhishTankIntegration()
+
+    def comprehensive_scan(self, url: str) -> Dict[str, Any]:
+        """
+        Perform comprehensive multi-API validation scan.
+
+        Args:
+            url (str): URL to validate
+
+        Returns:
+            Dict[str, Any]: Comprehensive validation report with aggregated results
+        """
+        logger.info(f"Starting comprehensive multi-API scan for {url}")
+
+        # Extract domain for domain-specific checks
+        domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+
+        results = {
+            "url": url,
+            "domain": domain,
+            "scan_timestamp": datetime.datetime.now().isoformat(),
+            "virustotal": {},
+            "urlvoid": {},
+            "phishtank": {},
+            "aggregated_threat_level": "unknown",
+            "confidence_score": 0,
+            "recommendations": [],
+        }
+
+        # Step 1: VirusTotal URL scan
+        logger.info(f"Step 1: VirusTotal URL analysis for {url}")
+        vt_result = self.virustotal.scan_url(url)
+        results["virustotal"] = vt_result
+
+        # Step 2: URLVoid domain analysis
+        logger.info(f"Step 2: URLVoid domain analysis for {domain}")
+        uv_result = self.urlvoid.analyze_domain(domain)
+        results["urlvoid"] = uv_result
+
+        # Step 3: PhishTank community check
+        logger.info(f"Step 3: PhishTank community database check for {url}")
+        pt_result = self.phishtank.check_phishing_status(url)
+        results["phishtank"] = pt_result
+
+        # Step 4: Aggregate results and calculate threat level
+        results["aggregated_threat_level"] = self._aggregate_threat_level(
+            vt_result, uv_result, pt_result
+        )
+        results["confidence_score"] = self._calculate_confidence_score(
+            vt_result, uv_result, pt_result
+        )
+        results["recommendations"] = self._generate_recommendations(vt_result, uv_result, pt_result)
+
+        logger.info(
+            f"Multi-API scan complete for {url}: "
+            f"Threat level: {results['aggregated_threat_level']}, "
+            f"Confidence: {results['confidence_score']}%"
+        )
+
+        return results
+
+    def _aggregate_threat_level(
+        self, vt_result: Dict[str, Any], uv_result: Dict[str, Any], pt_result: Dict[str, Any]
+    ) -> str:
+        """
+        Aggregate threat levels from multiple APIs into single assessment.
+
+        Args:
+            vt_result (Dict[str, Any]): VirusTotal scan result
+            uv_result (Dict[str, Any]): URLVoid analysis result
+            pt_result (Dict[str, Any]): PhishTank check result
+
+        Returns:
+            str: Aggregated threat level (critical, high, medium, low, clean)
+        """
+        threat_scores = []
+
+        # PhishTank has highest priority (verified community reports)
+        if pt_result.get("is_phishing") and pt_result.get("verified"):
+            return "critical"
+        elif pt_result.get("is_phishing"):
+            threat_scores.append(4)  # High threat from PhishTank
+
+        # VirusTotal threat level mapping
+        vt_threat = vt_result.get("threat_level", "unknown")
+        if vt_threat == "high":
+            threat_scores.append(4)
+        elif vt_threat == "medium":
+            threat_scores.append(3)
+        elif vt_threat == "low":
+            threat_scores.append(2)
+        elif vt_threat == "clean":
+            threat_scores.append(1)
+
+        # URLVoid threat level mapping
+        uv_threat = uv_result.get("threat_level", "unknown")
+        if uv_threat == "high":
+            threat_scores.append(4)
+        elif uv_threat == "medium":
+            threat_scores.append(3)
+        elif uv_threat == "low":
+            threat_scores.append(2)
+        elif uv_threat == "clean":
+            threat_scores.append(1)
+
+        if not threat_scores:
+            return "unknown"
+
+        avg_score = sum(threat_scores) / len(threat_scores)
+
+        if avg_score >= 4:
+            return "high"
+        elif avg_score >= 3:
+            return "medium"
+        elif avg_score >= 2:
+            return "low"
+        else:
+            return "clean"
+
+    def _calculate_confidence_score(
+        self, vt_result: Dict[str, Any], uv_result: Dict[str, Any], pt_result: Dict[str, Any]
+    ) -> int:
+        """
+        Calculate confidence score based on API response quality and agreement.
+
+        Returns:
+            int: Confidence score (0-100)
+        """
+        confidence = 0
+        factors = 0
+
+        # PhishTank confidence
+        if not pt_result.get("error"):
+            factors += 1
+            if pt_result.get("verified"):
+                confidence += 95  # High confidence for verified reports
+            elif pt_result.get("is_phishing"):
+                confidence += 75  # Medium confidence for unverified reports
+            else:
+                confidence += 60  # Base confidence for clean result
+
+        # VirusTotal confidence
+        if not vt_result.get("error"):
+            factors += 1
+            total_engines = vt_result.get("total_engines", 0)
+            if total_engines >= 50:
+                confidence += 90  # High confidence with many engines
+            elif total_engines >= 20:
+                confidence += 75  # Medium confidence
+            elif total_engines > 0:
+                confidence += 60  # Low confidence
+
+        # URLVoid confidence
+        if not uv_result.get("error"):
+            factors += 1
+            safety_score = uv_result.get("safety_score", 50)
+            confidence += min(90, safety_score + 20)  # Scale safety score
+
+        return int(confidence / factors) if factors > 0 else 0
+
+    def _generate_recommendations(
+        self, vt_result: Dict[str, Any], uv_result: Dict[str, Any], pt_result: Dict[str, Any]
+    ) -> List[str]:
+        """
+        Generate actionable recommendations based on scan results.
+
+        Returns:
+            List[str]: List of recommendations
+        """
+        recommendations = []
+
+        # PhishTank recommendations
+        if pt_result.get("is_phishing"):
+            if pt_result.get("verified"):
+                recommendations.append(
+                    "🚨 CRITICAL: URL verified as phishing by PhishTank community"
+                )
+                recommendations.append(
+                    "🔒 IMMEDIATE ACTION: Block URL and report to hosting provider"
+                )
+            else:
+                recommendations.append("⚠️ WARNING: URL reported as phishing (unverified)")
+
+        # VirusTotal recommendations
+        if not vt_result.get("error"):
+            malicious = vt_result.get("malicious", 0)
+            total = vt_result.get("total_engines", 0)
+
+            if malicious > 0:
+                recommendations.append(
+                    f"🛡️ VirusTotal: {malicious}/{total} engines flagged as malicious"
+                )
+                if malicious >= 5:
+                    recommendations.append(
+                        "🚨 HIGH RISK: Multiple security engines detected threats"
+                    )
+
+        # URLVoid recommendations
+        if not uv_result.get("error"):
+            safety_score = uv_result.get("safety_score", 100)
+            blacklists = uv_result.get("blacklists", [])
+
+            if safety_score <= 50:
+                recommendations.append(f"⚠️ URLVoid: Low safety score ({safety_score}/100)")
+
+            if blacklists:
+                recommendations.append(
+                    f"🚫 Found on {len(blacklists)} blacklist(s): {', '.join(blacklists[:3])}"
+                )
+
+        # General recommendations
+        if not recommendations:
+            recommendations.append("✅ No immediate threats detected by available scanners")
+            recommendations.append("🔍 Continue monitoring for changes")
+
+        return recommendations
+
+
 class DynamicBatchConfig:
     """Configuration for dynamic batch sizing based on system resources."""
 
@@ -402,12 +1014,14 @@ class EngineMode:
         self.process_reports_mode = args.process_reports
         self.threads_only_mode = args.threads_only
         self.api_mode = getattr(args, "start_api", False)
+        self.multi_api_mode = getattr(args, "multi_api_scan", False)
         self.scanning_mode = not (
             self.report_mode
             or self.process_reports_mode
             or self.threads_only_mode
             or args.test_report
             or self.api_mode
+            or self.multi_api_mode
         )
 
 
@@ -571,7 +1185,7 @@ class EnhancedAbuseEmailDetector:
             if whois_server_email and self.validate_abuse_email_domain(whois_server_email, domain):
                 abuse_emails.append(whois_server_email)
 
-        # 5. Check if domain is behind Cloudflare and get hosting provider
+        # 5. Check hosting provider and ASN information
         try:
             domain_ip = socket.gethostbyname(domain)
             if is_cloudflare_ip(domain_ip):
@@ -580,12 +1194,23 @@ class EnhancedAbuseEmailDetector:
                 # Try to find real IP behind Cloudflare
                 real_ip = self.get_real_ip_behind_cloudflare(domain)
                 if real_ip:
-                    provider_name, provider_abuse = self.get_hosting_provider_info(real_ip)
+                    provider_name, provider_abuse, asn, asn_abuse_email = (
+                        self.get_hosting_provider_info(real_ip)
+                    )
+
+                    # Add provider abuse email
                     if provider_abuse and self.validate_abuse_email_domain(provider_abuse, domain):
                         abuse_emails.append(provider_abuse)
                         logger.info(
                             f"Found hosting provider abuse email: {provider_abuse} (Provider: {provider_name})"
                         )
+
+                    # Add ASN abuse email
+                    if asn_abuse_email and self.validate_abuse_email_domain(
+                        asn_abuse_email, domain
+                    ):
+                        abuse_emails.append(asn_abuse_email)
+                        logger.info(f"Found ASN abuse email: {asn_abuse_email} (ASN: {asn})")
 
                 # Always add Cloudflare as secondary option
                 cloudflare_email = "abuse@cloudflare.com"
@@ -594,12 +1219,23 @@ class EnhancedAbuseEmailDetector:
                     logger.info(f"Added Cloudflare abuse email as secondary option")
             else:
                 # Not behind Cloudflare, check hosting provider directly
-                provider_name, provider_abuse = self.get_hosting_provider_info(domain_ip)
+                provider_name, provider_abuse, asn, asn_abuse_email = (
+                    self.get_hosting_provider_info(domain_ip)
+                )
+
+                # Add provider abuse email
                 if provider_abuse and self.validate_abuse_email_domain(provider_abuse, domain):
                     abuse_emails.append(provider_abuse)
                     logger.info(
                         f"Found hosting provider abuse email: {provider_abuse} (Provider: {provider_name})"
                     )
+
+                # *** AQUÍ ESTABA EL PROBLEMA - FALTABA AGREGAR EL ASN EMAIL ***
+                # Add ASN abuse email
+                if asn_abuse_email and self.validate_abuse_email_domain(asn_abuse_email, domain):
+                    abuse_emails.append(asn_abuse_email)
+                    logger.info(f"Found ASN abuse email: {asn_abuse_email} (ASN: {asn})")
+
         except Exception as e:
             logger.debug(f"Failed to get IP/hosting info for {domain}: {e}")
 
@@ -609,9 +1245,17 @@ class EnhancedAbuseEmailDetector:
             try:
                 # Get hosting info from IP WHOIS
                 domain_ip = socket.gethostbyname(domain)
-                provider_name, provider_abuse = self.get_hosting_provider_info(domain_ip)
+                provider_name, provider_abuse, asn, asn_abuse_email = (
+                    self.get_hosting_provider_info(domain_ip)
+                )
+
+                # Add both provider and ASN emails if available
                 if provider_abuse and self.validate_abuse_email_domain(provider_abuse, domain):
                     abuse_emails.append(provider_abuse)
+
+                if asn_abuse_email and self.validate_abuse_email_domain(asn_abuse_email, domain):
+                    abuse_emails.append(asn_abuse_email)
+
             except:
                 pass
 
@@ -623,7 +1267,7 @@ class EnhancedAbuseEmailDetector:
                 unique_emails.append(email)
                 seen.add(email)
 
-        # Log the final result
+        # Enhanced logging with ASN information
         if unique_emails:
             logger.info(
                 f"Found {len(unique_emails)} valid abuse email(s) for {domain}: {unique_emails}"
@@ -820,105 +1464,146 @@ class EnhancedAbuseEmailDetector:
         logger.warning(f"All WHOIS methods failed for {domain}")
         return {}
 
-    def get_hosting_provider_info(
-        self, ip: str
-    ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+        def get_hosting_provider_info(
+            self, ip: str
+        ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+            """
+            Get hosting provider information from IP address with enhanced ASN support.
+
+            Args:
+                ip (str): IP address to investigate
+
+            Returns:
+                Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+                (provider_name, provider_abuse_email, asn, asn_abuse_email)
+            """
+            try:
+                obj = IPWhois(ip)
+                res = obj.lookup_rdap(depth=1)
+
+                # Get provider name - handle None values safely
+                provider_name = ""
+                network_info = res.get("network", {})
+                if network_info and isinstance(network_info, dict):
+                    provider_name = network_info.get("name") or ""
+                    if not provider_name:
+                        provider_name = res.get("asn_description") or ""
+
+                # Ensure provider_name is string and handle None
+                if provider_name is None:
+                    provider_name = ""
+
+                # Safely convert to string and handle potential None
+                provider_name = str(provider_name) if provider_name else ""
+
+                # Get ASN information
+                asn = res.get("asn", "")
+                if asn and not str(asn).startswith("AS"):
+                    asn = f"AS{asn}"
+
+                # Clean ASN format for lookup
+                asn_clean = str(asn).replace("AS", "").strip() if asn else ""
+
+                # Get ASN abuse email from our database
+                asn_abuse_email = None
+                if asn_clean:
+                    asn_abuse_email = self.get_abuse_email_by_asn(asn_clean)
+                    if asn_abuse_email:
+                        logger.info(f"Found ASN abuse email for {asn}: {asn_abuse_email}")
+
+                # Look for provider abuse emails in the WHOIS data
+                provider_abuse_emails = []
+
+                # Check abuse contacts
+                objects = res.get("objects", {})
+                if objects and isinstance(objects, dict):
+                    for contact_id, contact_data in objects.items():
+                        if isinstance(contact_data, dict):
+                            contact_info = contact_data.get("contact", {})
+                            if (
+                                contact_info
+                                and isinstance(contact_info, dict)
+                                and str(contact_info.get("role", "")).lower() == "abuse"
+                            ):
+                                email = contact_info.get("email")
+                                if email:
+                                    if isinstance(email, list):
+                                        provider_abuse_emails.extend(email)
+                                    else:
+                                        provider_abuse_emails.append(email)
+
+                # Look for abuse emails in remarks or other fields
+                if network_info and isinstance(network_info, dict):
+                    remarks = network_info.get("remarks", [])
+                    if remarks and isinstance(remarks, list):
+                        for remark in remarks:
+                            if isinstance(remark, dict):
+                                title = remark.get("title") or ""
+                                description = remark.get("description", [])
+                                if title and "abuse" in str(title).lower():
+                                    if isinstance(description, list):
+                                        for desc in description:
+                                            if desc:
+                                                emails = re.findall(
+                                                    r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+                                                    str(desc),
+                                                )
+                                                provider_abuse_emails.extend(emails)
+
+                # Filter and validate provider emails
+                valid_provider_emails = []
+                for email in provider_abuse_emails:
+                    if email and self.validate_email(str(email)):
+                        valid_provider_emails.append(str(email))
+
+                provider_abuse_email = valid_provider_emails[0] if valid_provider_emails else None
+
+                logger.debug(
+                    f"IP {ip} info: Provider={provider_name}, ASN={asn}, "
+                    f"Provider abuse={provider_abuse_email}, ASN abuse={asn_abuse_email}"
+                )
+
+                return provider_name, provider_abuse_email, asn, asn_abuse_email
+
+            except Exception as e:
+                logger.error(f"Failed to get hosting provider info for IP {ip}: {e}")
+                return None, None, None, None
+
+    def get_abuse_email_by_asn(self, asn: str) -> Optional[str]:
         """
-        Get hosting provider information from IP address with enhanced ASN support.
+        Get abuse email from ASN database.
 
         Args:
-            ip (str): IP address to investigate
+            asn (str): ASN number (with or without 'AS' prefix)
 
         Returns:
-            Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
-            (provider_name, provider_abuse_email, asn, asn_abuse_email)
+            Optional[str]: Abuse email if found, None otherwise
         """
-        try:
-            obj = IPWhois(ip)
-            res = obj.lookup_rdap(depth=1)
+        # Normalize ASN (remove AS prefix if present)
+        asn_clean = asn.replace("AS", "").strip()
 
-            # Get provider name - handle None values
-            provider_name = None
-            network_info = res.get("network", {})
-            if network_info:
-                provider_name = network_info.get("name", "")
-                if not provider_name:
-                    provider_name = res.get("asn_description", "")
+        abuse_email = ASN_ABUSE_EMAIL_DB.get(asn_clean)
+        if abuse_email:
+            logger.info(f"Found ASN abuse email for AS{asn_clean}: {abuse_email}")
+            return abuse_email
 
-            # Ensure provider_name is string
-            if provider_name is None:
-                provider_name = ""
+        # Also try with AS prefix in case the database has inconsistent keys
+        abuse_email = ASN_ABUSE_EMAIL_DB.get(f"AS{asn_clean}")
+        if abuse_email:
+            logger.info(f"Found ASN abuse email for AS{asn_clean}: {abuse_email}")
+            return abuse_email
 
-            # Get ASN information
-            asn = res.get("asn", "")
-            if asn and not str(asn).startswith("AS"):
-                asn = f"AS{asn}"
-
-            # Get ASN abuse email
-            asn_abuse_email = None
-            if asn:
-                asn_abuse_email = self.get_abuse_email_by_asn(str(asn))
-
-            # Look for provider abuse emails in the WHOIS data
-            provider_abuse_emails = []
-
-            # Check abuse contacts
-            objects = res.get("objects", {})
-            if objects:
-                for contact_id, contact_data in objects.items():
-                    if isinstance(contact_data, dict):
-                        contact_info = contact_data.get("contact", {})
-                        if contact_info and contact_info.get("role", "").lower() == "abuse":
-                            email = contact_info.get("email")
-                            if email:
-                                if isinstance(email, list):
-                                    provider_abuse_emails.extend(email)
-                                else:
-                                    provider_abuse_emails.append(email)
-
-            # Look for abuse emails in remarks or other fields
-            if network_info:
-                remarks = network_info.get("remarks", [])
-                if remarks:
-                    for remark in remarks:
-                        if isinstance(remark, dict):
-                            title = remark.get("title", "")
-                            description = remark.get("description", [])
-                            if title and "abuse" in title.lower():
-                                for desc in description:
-                                    if desc:
-                                        emails = re.findall(
-                                            r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
-                                            str(desc),
-                                        )
-                                        provider_abuse_emails.extend(emails)
-
-            # Filter and validate provider emails
-            valid_provider_emails = []
-            for email in provider_abuse_emails:
-                if email and self.validate_email(email):
-                    valid_provider_emails.append(email)
-
-            provider_abuse_email = valid_provider_emails[0] if valid_provider_emails else None
-
-            logger.debug(
-                f"IP {ip} info: Provider={provider_name}, ASN={asn}, "
-                f"Provider abuse={provider_abuse_email}, ASN abuse={asn_abuse_email}"
-            )
-
-            return provider_name, provider_abuse_email, asn, asn_abuse_email
-
-        except Exception as e:
-            logger.error(f"Failed to get hosting provider info for IP {ip}: {e}")
-            return None, None, None, None
+        logger.debug(f"No ASN abuse email found for AS{asn_clean}")
+        return None
 
 
 class PhishingAPI:
-    """REST API for external phishing reports."""
+    """REST API for external phishing reports with multi-API integration."""
 
     def __init__(self, db_manager, abuse_detector):
         self.db_manager = db_manager
         self.abuse_detector = abuse_detector
+        self.multi_api_validator = MultiAPIValidator()
         self.app = Flask(__name__)
         self.app.config["JSON_SORT_KEYS"] = False
 
@@ -973,6 +1658,33 @@ class PhishingAPI:
 
             except Exception as e:
                 logger.error(f"API error in report_phishing: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        @self.app.route("/api/v1/multi-scan", methods=["POST"])
+        @self.limiter.limit("3 per minute")
+        def multi_api_scan():
+            """Perform multi-API validation scan."""
+            try:
+                data = request.get_json()
+
+                if not data:
+                    return jsonify({"error": "No JSON data provided"}), 400
+
+                url = data.get("url")
+                if not url:
+                    return jsonify({"error": "URL is required"}), 400
+
+                # Validate URL
+                if not validators.url(url):
+                    return jsonify({"error": "Invalid URL format"}), 400
+
+                # Perform comprehensive scan
+                scan_result = self.multi_api_validator.comprehensive_scan(url)
+
+                return jsonify(scan_result), 200
+
+            except Exception as e:
+                logger.error(f"API error in multi_api_scan: {e}")
                 return jsonify({"error": "Internal server error"}), 500
 
         @self.app.route("/api/v1/status/<path:url>", methods=["GET"])
@@ -1161,7 +1873,7 @@ class PhishingAPI:
 
     def run(self, host: str = "0.0.0.0", port: int = 8080, debug: bool = False):
         """Run the API server."""
-        logger.info(f"Starting Phishing API server on {host}:{port}")
+        logger.info(f"Starting Enhanced Phishing API server on {host}:{port}")
         self.app.run(host=host, port=port, debug=debug)
 
 
@@ -1358,7 +2070,7 @@ class PhishingUtils:
 
 
 def upgrade_phishing_db():
-    """Upgrade phishing database schema with new ASN fields."""
+    """Upgrade phishing database schema with new multi-API and auto-analysis fields."""
     with db_engine.begin() as conn:
         # Add new columns for API functionality
         try:
@@ -1394,11 +2106,75 @@ def upgrade_phishing_db():
         except:
             pass
 
-    logger.info("Upgraded phishing_sites table with ASN support if necessary.")
+        # Add new multi-API validation columns
+        try:
+            conn.execute(text("ALTER TABLE phishing_sites ADD COLUMN virustotal_result TEXT"))
+        except:
+            pass
+        try:
+            conn.execute(text("ALTER TABLE phishing_sites ADD COLUMN urlvoid_result TEXT"))
+        except:
+            pass
+        try:
+            conn.execute(text("ALTER TABLE phishing_sites ADD COLUMN phishtank_result TEXT"))
+        except:
+            pass
+        try:
+            conn.execute(text("ALTER TABLE phishing_sites ADD COLUMN multi_api_threat_level TEXT"))
+        except:
+            pass
+        try:
+            conn.execute(text("ALTER TABLE phishing_sites ADD COLUMN api_confidence_score INTEGER"))
+        except:
+            pass
+
+        # Add new auto-analysis columns
+        try:
+            conn.execute(
+                text("ALTER TABLE phishing_sites ADD COLUMN auto_detected INTEGER DEFAULT 0")
+            )
+        except:
+            pass
+        try:
+            conn.execute(
+                text(
+                    "ALTER TABLE phishing_sites ADD COLUMN auto_analysis_status TEXT DEFAULT 'pending'"
+                )
+            )
+        except:
+            pass
+        try:
+            conn.execute(
+                text("ALTER TABLE phishing_sites ADD COLUMN auto_analysis_timestamp TIMESTAMP")
+            )
+        except:
+            pass
+        try:
+            conn.execute(text("ALTER TABLE phishing_sites ADD COLUMN detection_keywords TEXT"))
+        except:
+            pass
+        try:
+            conn.execute(
+                text("ALTER TABLE phishing_sites ADD COLUMN auto_report_eligible INTEGER DEFAULT 0")
+            )
+        except:
+            pass
+        try:
+            conn.execute(
+                text(
+                    "ALTER TABLE phishing_sites ADD COLUMN requires_manual_review INTEGER DEFAULT 0"
+                )
+            )
+        except:
+            pass
+
+    logger.info(
+        "Upgraded phishing_sites table with multi-API and auto-analysis support if necessary."
+    )
 
 
 class DatabaseManager:
-    """Database operations manager."""
+    """Database operations manager with enhanced auto-analysis support."""
 
     def __init__(self, db_url: str = DATABASE_URL):
         self.db_url = db_url
@@ -1425,7 +2201,7 @@ class DatabaseManager:
             logger.info("Initialized scan_results table.")
 
     def init_phishing_db(self):
-        """Initialize phishing sites table with enhanced ASN support."""
+        """Initialize phishing sites table with enhanced multi-API support."""
         with self.engine.begin() as conn:
             conn.execute(
                 text(
@@ -1434,6 +2210,7 @@ class DatabaseManager:
                         id SERIAL PRIMARY KEY,
                         url TEXT UNIQUE,
                         manual_flag INTEGER DEFAULT 0,
+                        auto_detected INTEGER DEFAULT 0,
                         first_seen TIMESTAMP,
                         last_seen TIMESTAMP,
                         whois_info TEXT,
@@ -1453,12 +2230,22 @@ class DatabaseManager:
                         asn TEXT,
                         asn_abuse_email TEXT,
                         hosting_provider TEXT,
-                        all_abuse_emails TEXT
+                        all_abuse_emails TEXT,
+                        virustotal_result TEXT,
+                        urlvoid_result TEXT,
+                        phishtank_result TEXT,
+                        multi_api_threat_level TEXT,
+                        api_confidence_score INTEGER,
+                        auto_analysis_status TEXT DEFAULT 'pending',
+                        auto_analysis_timestamp TIMESTAMP,
+                        detection_keywords TEXT,
+                        auto_report_eligible INTEGER DEFAULT 0,
+                        requires_manual_review INTEGER DEFAULT 0
                     )
                 """
                 )
             )
-            logger.info("Initialized phishing_sites table with enhanced ASN support.")
+            logger.info("Initialized phishing_sites table with enhanced multi-API support.")
 
     def init_registrar_abuse_db(self):
         """Initialize registrar abuse table."""
@@ -1474,6 +2261,245 @@ class DatabaseManager:
                 )
             )
             logger.info("Initialized registrar_abuse table.")
+
+    def store_detected_phishing_site(
+        self, url: str, keywords: List[str], source: str = "auto_detection"
+    ) -> bool:
+        """
+        Store a newly detected phishing site for auto-analysis.
+
+        Args:
+            url (str): Detected phishing URL
+            keywords (List[str]): Keywords that triggered detection
+            source (str): Detection source
+
+        Returns:
+            bool: True if stored successfully, False if already exists
+        """
+        try:
+            with self.engine.begin() as conn:
+                timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                keywords_str = ", ".join(keywords)
+
+                # Check if URL already exists
+                existing = conn.execute(
+                    text("SELECT id, auto_detected FROM phishing_sites WHERE url = :url"),
+                    {"url": url},
+                ).fetchone()
+
+                if existing:
+                    # Update existing record with new detection
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE phishing_sites
+                            SET auto_detected = 1, last_seen = :timestamp,
+                                detection_keywords = :keywords, source = :source,
+                                auto_analysis_status = 'pending'
+                            WHERE url = :url
+                        """
+                        ),
+                        {
+                            "timestamp": timestamp,
+                            "keywords": keywords_str,
+                            "source": source,
+                            "url": url,
+                        },
+                    )
+                    logger.info(f"Updated existing phishing detection for {url}")
+                    return False
+                else:
+                    # Insert new detection
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO phishing_sites
+                            (url, auto_detected, first_seen, last_seen, detection_keywords,
+                             source, auto_analysis_status, priority)
+                            VALUES (:url, 1, :timestamp, :timestamp, :keywords,
+                                    :source, 'pending', 'high')
+                        """
+                        ),
+                        {
+                            "url": url,
+                            "timestamp": timestamp,
+                            "keywords": keywords_str,
+                            "source": source,
+                        },
+                    )
+                    logger.info(f"NEW PHISHING DETECTION: {url} - Keywords: {keywords_str}")
+                    return True
+
+        except Exception as e:
+            logger.error(f"Failed to store detected phishing site {url}: {e}")
+            return False
+
+    def get_pending_analysis_sites(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Get sites pending multi-API analysis.
+
+        Args:
+            limit (int): Maximum number of sites to return
+
+        Returns:
+            List[Dict[str, Any]]: List of sites pending analysis
+        """
+        try:
+            with self.engine.begin() as conn:
+                results = conn.execute(
+                    text(
+                        """
+                        SELECT url, detection_keywords, first_seen, source, priority
+                        FROM phishing_sites
+                        WHERE auto_analysis_status = 'pending'
+                        AND auto_detected = 1
+                        ORDER BY
+                            CASE priority
+                                WHEN 'high' THEN 1
+                                WHEN 'medium' THEN 2
+                                WHEN 'low' THEN 3
+                                ELSE 2
+                            END,
+                            first_seen ASC
+                        LIMIT :limit
+                    """
+                    ),
+                    {"limit": limit},
+                ).fetchall()
+
+                sites = []
+                for row in results:
+                    sites.append(
+                        {
+                            "url": row[0],
+                            "keywords": row[1],
+                            "first_seen": row[2],
+                            "source": row[3],
+                            "priority": row[4],
+                        }
+                    )
+
+                return sites
+
+        except Exception as e:
+            logger.error(f"Failed to get pending analysis sites: {e}")
+            return []
+
+    def update_analysis_results(
+        self, url: str, multi_api_results: Dict[str, Any], auto_report_decision: Dict[str, Any]
+    ) -> bool:
+        """
+        Update site with multi-API analysis results and auto-report decision.
+
+        Args:
+            url (str): Site URL
+            multi_api_results (Dict[str, Any]): Multi-API scan results
+            auto_report_decision (Dict[str, Any]): Auto-report decision data
+
+        Returns:
+            bool: True if updated successfully
+        """
+        try:
+            with self.engine.begin() as conn:
+                timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                conn.execute(
+                    text(
+                        """
+                        UPDATE phishing_sites
+                        SET auto_analysis_status = :status,
+                            auto_analysis_timestamp = :timestamp,
+                            virustotal_result = :vt_result,
+                            urlvoid_result = :uv_result,
+                            phishtank_result = :pt_result,
+                            multi_api_threat_level = :threat_level,
+                            api_confidence_score = :confidence_score,
+                            auto_report_eligible = :auto_eligible,
+                            requires_manual_review = :manual_review,
+                            priority = :priority
+                        WHERE url = :url
+                    """
+                    ),
+                    {
+                        "status": "completed",
+                        "timestamp": timestamp,
+                        "vt_result": json.dumps(multi_api_results.get("virustotal", {})),
+                        "uv_result": json.dumps(multi_api_results.get("urlvoid", {})),
+                        "pt_result": json.dumps(multi_api_results.get("phishtank", {})),
+                        "threat_level": multi_api_results.get("aggregated_threat_level"),
+                        "confidence_score": multi_api_results.get("confidence_score"),
+                        "auto_eligible": 1 if auto_report_decision.get("auto_report", False) else 0,
+                        "manual_review": (
+                            1 if auto_report_decision.get("manual_review", False) else 0
+                        ),
+                        "priority": auto_report_decision.get("priority", "medium"),
+                        "url": url,
+                    },
+                )
+
+                logger.info(
+                    f"Analysis completed for {url}: Threat={multi_api_results.get('aggregated_threat_level')}, Confidence={multi_api_results.get('confidence_score')}%"
+                )
+                return True
+
+        except Exception as e:
+            logger.error(f"Failed to update analysis results for {url}: {e}")
+            return False
+
+    def get_auto_report_eligible_sites(self, limit: int = 5) -> List[Dict[str, Any]]:
+        """
+        Get sites eligible for automatic reporting.
+
+        Args:
+            limit (int): Maximum number of sites to return
+
+        Returns:
+            List[Dict[str, Any]]: List of sites eligible for auto-reporting
+        """
+        try:
+            with self.engine.begin() as conn:
+                results = conn.execute(
+                    text(
+                        """
+                        SELECT url, multi_api_threat_level, api_confidence_score,
+                               detection_keywords, auto_analysis_timestamp, priority
+                        FROM phishing_sites
+                        WHERE auto_report_eligible = 1
+                        AND abuse_report_sent = 0
+                        AND site_status = 'up'
+                        ORDER BY
+                            CASE priority
+                                WHEN 'high' THEN 1
+                                WHEN 'medium' THEN 2
+                                WHEN 'low' THEN 3
+                                ELSE 2
+                            END,
+                            api_confidence_score DESC,
+                            auto_analysis_timestamp ASC
+                        LIMIT :limit
+                    """
+                    ),
+                    {"limit": limit},
+                ).fetchall()
+
+                sites = []
+                for row in results:
+                    sites.append(
+                        {
+                            "url": row[0],
+                            "threat_level": row[1],
+                            "confidence_score": row[2],
+                            "keywords": row[3],
+                            "analysis_timestamp": row[4],
+                            "priority": row[5],
+                        }
+                    )
+
+                return sites
+
+        except Exception as e:
+            logger.error(f"Failed to get auto-report eligible sites: {e}")
+            return []
 
 
 def basic_whois_lookup(url: str) -> dict:
@@ -1505,7 +2531,7 @@ def basic_whois_lookup(url: str) -> dict:
 
 
 class AbuseReportManager:
-    """Enhanced abuse report manager with improved email detection."""
+    """Enhanced abuse report manager with improved email detection and multi-API integration."""
 
     def __init__(
         self,
@@ -1517,6 +2543,7 @@ class AbuseReportManager:
     ):
         self.db_manager = db_manager
         self.abuse_detector = abuse_detector
+        self.multi_api_validator = MultiAPIValidator()
         if cc_emails is None:
             default_cc = getattr(settings, "DEFAULT_CC_ESCALATION_LEVEL2", "")
             self.cc_emails = (
@@ -1553,9 +2580,10 @@ class AbuseReportManager:
         whois_str: str,
         attachment_paths: Optional[List[str]] = None,
         test_mode: bool = False,
+        multi_api_results: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """
-        Send abuse report with enhanced error handling and multiple attachments support.
+        Send abuse report with enhanced error handling, multiple attachments support, and multi-API results.
 
         Args:
             abuse_emails (List[str]): List of abuse email addresses
@@ -1563,6 +2591,7 @@ class AbuseReportManager:
             whois_str (str): WHOIS information
             attachment_paths (Optional[List[str]]): List of attachment file paths
             test_mode (bool): Whether this is a test report
+            multi_api_results (Optional[Dict[str, Any]]): Multi-API validation results
 
         Returns:
             bool: True if report was sent successfully, False otherwise
@@ -1598,6 +2627,60 @@ class AbuseReportManager:
                         if email and email not in final_cc:
                             final_cc.append(email)
 
+        # Prepare multi-API results summary for template
+        api_summary = ""
+        threat_level = "unknown"
+        confidence_score = 0
+
+        if multi_api_results:
+            threat_level = multi_api_results.get("aggregated_threat_level", "unknown")
+            confidence_score = multi_api_results.get("confidence_score", 0)
+
+            # Create human-readable API summary
+            api_summary += f"🤖 **Multi-API Threat Assessment**\n"
+            api_summary += f"📊 **Threat Level**: {threat_level.upper()}\n"
+            api_summary += f"🎯 **Confidence Score**: {confidence_score}%\n\n"
+
+            # VirusTotal results
+            vt_result = multi_api_results.get("virustotal", {})
+            if not vt_result.get("error"):
+                malicious = vt_result.get("malicious", 0)
+                total = vt_result.get("total_engines", 0)
+                if total > 0:
+                    api_summary += (
+                        f"🛡️ **VirusTotal**: {malicious}/{total} engines detected threats\n"
+                    )
+
+            # URLVoid results
+            uv_result = multi_api_results.get("urlvoid", {})
+            if not uv_result.get("error"):
+                safety_score = uv_result.get("safety_score", 100)
+                blacklists = uv_result.get("blacklists", [])
+                api_summary += f"🔍 **URLVoid**: Safety score {safety_score}/100"
+                if blacklists:
+                    api_summary += f", found on {len(blacklists)} blacklist(s)"
+                api_summary += "\n"
+
+            # PhishTank results
+            pt_result = multi_api_results.get("phishtank", {})
+            if not pt_result.get("error"):
+                if pt_result.get("is_phishing"):
+                    status = (
+                        "VERIFIED PHISHING" if pt_result.get("verified") else "Reported as phishing"
+                    )
+                    api_summary += f"🚨 **PhishTank**: {status}\n"
+                else:
+                    api_summary += f"✅ **PhishTank**: Not in phishing database\n"
+
+            # Recommendations
+            recommendations = multi_api_results.get("recommendations", [])
+            if recommendations:
+                api_summary += f"\n📋 **Recommendations**:\n"
+                for rec in recommendations[:5]:  # Limit to top 5 recommendations
+                    api_summary += f"• {rec}\n"
+
+            api_summary += "\n"
+
         # Render email template
         try:
             env_jinja = Environment(
@@ -1606,10 +2689,14 @@ class AbuseReportManager:
             html_content = env_jinja.get_template("abuse_report.html").render(
                 site_url=site_url,
                 whois_info=whois_str,
-                attachment_filenames=attachment_filenames,  # Updated to support multiple files
+                attachment_filenames=attachment_filenames,
                 attachment_count=len(attachment_filenames),
                 cc_emails=final_cc,
                 timestamp=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                api_summary=api_summary,
+                threat_level=threat_level,
+                confidence_score=confidence_score,
+                multi_api_results=multi_api_results,
             )
             logger.debug("Rendered email content (first 300 chars): " + html_content[:300])
         except Exception as render_err:
@@ -1700,6 +2787,7 @@ class AbuseReportManager:
 
                 # Send email
                 attachment_info = ""
+                api_info = ""
                 if attached_files:
                     if len(attached_files) == 1:
                         attachment_info = f" with attachment {attached_files[0]}"
@@ -1708,13 +2796,16 @@ class AbuseReportManager:
                             f" with {len(attached_files)} attachments: {', '.join(attached_files)}"
                         )
 
+                if multi_api_results:
+                    api_info = f" [Threat: {threat_level}, Confidence: {confidence_score}%]"
+
                 with smtplib.SMTP(smtp_host, smtp_port) as server:
                     if smtp_user and smtp_pass:
                         server.login(smtp_user, smtp_pass)
                     server.sendmail(sender_email, recipients, msg.as_string())
 
                 logger.info(
-                    f"✅ Abuse report sent to {primary} for site {site_url}{attachment_info}; "
+                    f"Enhanced abuse report sent to {primary} for site {site_url}{attachment_info}{api_info}; "
                     f"CC: {final_cc if final_cc else 'None'}"
                 )
                 success_count += 1
@@ -1726,17 +2817,15 @@ class AbuseReportManager:
         # Log final summary
         if success_count > 0:
             logger.info(
-                f"🎯 SUMMARY: Successfully sent abuse reports to {success_count}/{len(abuse_emails)} recipients for {site_url}"
+                f"SUMMARY: Successfully sent enhanced abuse reports to {success_count}/{len(abuse_emails)} recipients for {site_url}"
             )
         else:
-            logger.error(
-                f"❌ SUMMARY: Failed to send abuse reports to any recipients for {site_url}"
-            )
+            logger.error(f"SUMMARY: Failed to send abuse reports to any recipients for {site_url}")
 
         return success_count > 0
 
     def report_phishing_sites(self):
-        """Main loop for reporting phishing sites."""
+        """Main loop for reporting phishing sites with enhanced multi-API validation and auto-reporting."""
         if self.monitoring_event:
             logger.info(
                 "Waiting for monitoring thread to complete initial cycle before sending abuse reports..."
@@ -1747,12 +2836,16 @@ class AbuseReportManager:
         while True:
             try:
                 with self.db_manager.engine.begin() as conn:
+                    # Process both manual flags and auto-detected sites
                     sites = conn.execute(
                         text(
                             """
-                            SELECT url, abuse_email, last_report_sent, site_status, takedown_date, priority
+                            SELECT url, abuse_email, last_report_sent, site_status, takedown_date, priority,
+                                   manual_flag, auto_detected, auto_report_eligible
                             FROM phishing_sites
-                            WHERE manual_flag = 1 AND site_status = 'up'
+                            WHERE (manual_flag = 1 OR auto_report_eligible = 1)
+                            AND site_status = 'up'
+                            AND abuse_report_sent = 0
                             ORDER BY
                                 CASE priority
                                     WHEN 'high' THEN 1
@@ -1765,10 +2858,23 @@ class AbuseReportManager:
                         )
                     ).fetchall()
 
+                    if sites:
+                        logger.info(
+                            f"Processing {len(sites)} sites for abuse reporting (manual + auto-eligible)"
+                        )
+
                     for row in sites:
-                        url, stored_abuse, last_report_sent, current_status, current_takedown = row[
-                            :5
-                        ]
+                        (
+                            url,
+                            stored_abuse,
+                            last_report_sent,
+                            current_status,
+                            current_takedown,
+                            priority,
+                            manual_flag,
+                            auto_detected,
+                            auto_eligible,
+                        ) = row
 
                         try:
                             current_time = datetime.datetime.now()
@@ -1782,11 +2888,133 @@ class AbuseReportManager:
                             else:
                                 last_report_time = None
 
+                            # Skip if reported recently (48 hours)
                             if (
                                 last_report_time
                                 and (current_time - last_report_time).total_seconds() < 172800
                             ):
                                 continue
+
+                            # Get multi-API results if available
+                            multi_api_results = None
+                            try:
+                                api_data = conn.execute(
+                                    text(
+                                        """
+                                        SELECT virustotal_result, urlvoid_result, phishtank_result,
+                                               multi_api_threat_level, api_confidence_score, detection_keywords
+                                        FROM phishing_sites WHERE url = :url
+                                    """
+                                    ),
+                                    {"url": url},
+                                ).fetchone()
+
+                                if api_data and api_data[0]:  # Has VirusTotal results
+                                    multi_api_results = {
+                                        "aggregated_threat_level": api_data[3] or "unknown",
+                                        "confidence_score": api_data[4] or 0,
+                                        "virustotal": (
+                                            json.loads(api_data[0]) if api_data[0] else {}
+                                        ),
+                                        "urlvoid": json.loads(api_data[1]) if api_data[1] else {},
+                                        "phishtank": json.loads(api_data[2]) if api_data[2] else {},
+                                        "recommendations": [],
+                                    }
+
+                                    # Add detection context for auto-detected sites
+                                    if auto_detected and api_data[5]:  # Has detection keywords
+                                        multi_api_results["recommendations"].extend(
+                                            [
+                                                f"🤖 AUTO-DETECTED: Site flagged by automated scanning system",
+                                                f"🎯 DETECTION KEYWORDS: {api_data[5]}",
+                                                f"📊 THREAT ASSESSMENT: {api_data[3] or 'unknown'} ({api_data[4] or 0}% confidence)",
+                                            ]
+                                        )
+
+                                    # Add API-based recommendations
+                                    vt_result = multi_api_results.get("virustotal", {})
+                                    if (
+                                        not vt_result.get("error")
+                                        and vt_result.get("malicious", 0) > 0
+                                    ):
+                                        multi_api_results["recommendations"].append(
+                                            f"🛡️ VirusTotal: {vt_result['malicious']}/{vt_result.get('total_engines', 0)} engines detected threats"
+                                        )
+
+                                    uv_result = multi_api_results.get("urlvoid", {})
+                                    if not uv_result.get("error"):
+                                        safety_score = uv_result.get("safety_score", 100)
+                                        blacklists = uv_result.get("blacklists", [])
+                                        if blacklists:
+                                            multi_api_results["recommendations"].append(
+                                                f"🚫 URLVoid: Found on {len(blacklists)} blacklist(s)"
+                                            )
+                                        elif safety_score < 70:
+                                            multi_api_results["recommendations"].append(
+                                                f"⚠️ URLVoid: Low safety score ({safety_score}/100)"
+                                            )
+
+                                    pt_result = multi_api_results.get("phishtank", {})
+                                    if not pt_result.get("error") and pt_result.get("is_phishing"):
+                                        status = (
+                                            "VERIFIED PHISHING"
+                                            if pt_result.get("verified")
+                                            else "Reported as phishing"
+                                        )
+                                        multi_api_results["recommendations"].append(
+                                            f"🚨 PhishTank: {status}"
+                                        )
+
+                            except Exception as e:
+                                logger.debug(f"Could not load API results for {url}: {e}")
+
+                            # Perform fresh analysis if needed (for manual flags without API data)
+                            if manual_flag and not multi_api_results:
+                                if AUTO_ANALYSIS_ENABLED:
+                                    logger.info(
+                                        f"Performing fresh multi-API analysis for manual flag: {url}"
+                                    )
+                                    multi_api_results = self.multi_api_validator.comprehensive_scan(
+                                        url
+                                    )
+
+                                    # Store fresh results
+                                    try:
+                                        conn.execute(
+                                            text(
+                                                """
+                                                UPDATE phishing_sites
+                                                SET virustotal_result = :vt_result,
+                                                    urlvoid_result = :uv_result,
+                                                    phishtank_result = :pt_result,
+                                                    multi_api_threat_level = :threat_level,
+                                                    api_confidence_score = :confidence_score
+                                                WHERE url = :url
+                                            """
+                                            ),
+                                            {
+                                                "vt_result": json.dumps(
+                                                    multi_api_results.get("virustotal", {})
+                                                ),
+                                                "uv_result": json.dumps(
+                                                    multi_api_results.get("urlvoid", {})
+                                                ),
+                                                "pt_result": json.dumps(
+                                                    multi_api_results.get("phishtank", {})
+                                                ),
+                                                "threat_level": multi_api_results.get(
+                                                    "aggregated_threat_level"
+                                                ),
+                                                "confidence_score": multi_api_results.get(
+                                                    "confidence_score"
+                                                ),
+                                                "url": url,
+                                            },
+                                        )
+                                    except Exception as e:
+                                        logger.warning(
+                                            f"Failed to store fresh API results for {url}: {e}"
+                                        )
 
                             whois_data = basic_whois_lookup(url)
                             whois_str = str(whois_data)
@@ -1828,7 +3056,17 @@ class AbuseReportManager:
                                     "url": url,
                                 },
                             )
-                            logger.info(f"WHOIS data enriched for {url}")
+
+                            # Log the type of report being processed
+                            report_type = []
+                            if manual_flag:
+                                report_type.append("MANUAL")
+                            if auto_detected:
+                                report_type.append("AUTO-DETECTED")
+                            if auto_eligible:
+                                report_type.append("AUTO-ELIGIBLE")
+
+                            logger.info(f"WHOIS data enriched for {url} [{', '.join(report_type)}]")
 
                             # Get abuse emails using enhanced detection
                             domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
@@ -1837,14 +3075,13 @@ class AbuseReportManager:
                                 domain, whois_data, registrar
                             )
 
-                            # Additional check: if Cloudflare detected but no other emails found, only use Cloudflare
+                            # Enhanced Cloudflare handling
                             if cloudflare_detected and not abuse_list:
                                 logger.info(
                                     f"Cloudflare detected for {url}, no hosting provider found. Using abuse@cloudflare.com only"
                                 )
                                 abuse_list = ["abuse@cloudflare.com"]
                             elif cloudflare_detected and abuse_list:
-                                # Ensure Cloudflare is in the list but not first priority unless no hosting found
                                 cloudflare_email = "abuse@cloudflare.com"
                                 if cloudflare_email not in abuse_list:
                                     abuse_list.append(cloudflare_email)
@@ -1852,7 +3089,6 @@ class AbuseReportManager:
                                     f"Cloudflare detected for {url}. Will report to hosting provider first, then Cloudflare: {abuse_list}"
                                 )
                             elif cloudflare_detected:
-                                # Pure Cloudflare case
                                 logger.info(
                                     f"Cloudflare detected for {url}, using Cloudflare abuse only"
                                 )
@@ -1871,8 +3107,19 @@ class AbuseReportManager:
 
                             if abuse_list:
                                 attachment_paths = AttachmentConfig.get_all_attachments()
+
+                                # Enhanced logging for auto-reports
+                                if auto_eligible:
+                                    logger.info(f"SENDING AUTO-REPORT: {url} to {abuse_list[0]}")
+                                else:
+                                    logger.info(f"SENDING MANUAL REPORT: {url} to {abuse_list[0]}")
+
                                 if self.send_abuse_report(
-                                    abuse_list, url, whois_str, attachment_paths=attachment_paths
+                                    abuse_list,
+                                    url,
+                                    whois_str,
+                                    attachment_paths=attachment_paths,
+                                    multi_api_results=multi_api_results,
                                 ):
                                     conn.execute(
                                         text(
@@ -1888,21 +3135,27 @@ class AbuseReportManager:
                                             "url": url,
                                         },
                                     )
+
+                                    # Enhanced success logging
+                                    if auto_eligible:
+                                        logger.info(f"AUTO-REPORT SUCCESS: {url}")
+                                    else:
+                                        logger.info(f"MANUAL REPORT SUCCESS: {url}")
                             else:
                                 logger.warning(
                                     f"No valid abuse emails found for {url} - all emails were same domain or invalid"
                                 )
 
                         except Exception as e:
-                            logger.error(f"WHOIS query failed for {url}: {e}")
+                            logger.error(f"Error processing report for {url}: {e}")
 
             except Exception as e:
-                logger.error(f"Error in abuse reporting loop: {e}")
+                logger.error(f"Error in enhanced abuse reporting loop: {e}")
 
             time.sleep(settings.REPORT_INTERVAL)
 
     def process_manual_reports(self, attachment_paths: Optional[List[str]] = None):
-        """Process manual reports that haven't been processed yet."""
+        """Process manual reports that haven't been processed yet with multi-API validation."""
         # If no specific attachments provided, get all configured attachments
         if attachment_paths is None:
             attachment_paths = AttachmentConfig.get_all_attachments()
@@ -1930,6 +3183,42 @@ class AbuseReportManager:
                 url, reported, abuse_report_sent, stored_abuse = row[:4]
 
                 try:
+                    # Perform multi-API validation if API keys are configured
+                    multi_api_results = None
+                    if AUTO_ANALYSIS_ENABLED:
+                        logger.info(f"Performing multi-API validation for {url}")
+                        multi_api_results = self.multi_api_validator.comprehensive_scan(url)
+
+                        # Store API results in database
+                        try:
+                            conn.execute(
+                                text(
+                                    """
+                                    UPDATE phishing_sites
+                                    SET virustotal_result = :vt_result,
+                                        urlvoid_result = :uv_result,
+                                        phishtank_result = :pt_result,
+                                        multi_api_threat_level = :threat_level,
+                                        api_confidence_score = :confidence_score
+                                    WHERE url = :url
+                                """
+                                ),
+                                {
+                                    "vt_result": json.dumps(
+                                        multi_api_results.get("virustotal", {})
+                                    ),
+                                    "uv_result": json.dumps(multi_api_results.get("urlvoid", {})),
+                                    "pt_result": json.dumps(multi_api_results.get("phishtank", {})),
+                                    "threat_level": multi_api_results.get(
+                                        "aggregated_threat_level"
+                                    ),
+                                    "confidence_score": multi_api_results.get("confidence_score"),
+                                    "url": url,
+                                },
+                            )
+                        except Exception as e:
+                            logger.warning(f"Failed to store API results for {url}: {e}")
+
                     whois_data = basic_whois_lookup(url)
                     whois_str = str(whois_data)
                     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1994,7 +3283,11 @@ class AbuseReportManager:
 
                     if abuse_list and abuse_report_sent == 0:
                         if self.send_abuse_report(
-                            abuse_list, url, whois_str, attachment_paths=attachment_paths
+                            abuse_list,
+                            url,
+                            whois_str,
+                            attachment_paths=attachment_paths,
+                            multi_api_results=multi_api_results,
                         ):
                             conn.execute(
                                 text(
@@ -2014,10 +3307,10 @@ class AbuseReportManager:
                 except Exception as e:
                     logger.error(f"WHOIS query failed for {url}: {e}")
 
-        logger.info("Completed manual reports processing.")
+        logger.info("Completed manual reports processing with multi-API validation.")
 
     def send_test_report(self, test_email: str, attachment_paths: Optional[List[str]] = None):
-        """Send a test abuse report."""
+        """Send a test abuse report with multi-API results."""
         test_whois_str = "This is a test WHOIS information for a test phishing site."
         test_site_url = "https://test.phishing-site.com"
         test_abuse_emails = [test_email]
@@ -2026,7 +3319,26 @@ class AbuseReportManager:
         if attachment_paths is None:
             attachment_paths = AttachmentConfig.get_all_attachments()
 
-        logger.info("Sending test abuse report...")
+        # Generate test multi-API results
+        test_multi_api_results = {
+            "url": test_site_url,
+            "aggregated_threat_level": "high",
+            "confidence_score": 85,
+            "virustotal": {"malicious": 5, "total_engines": 70, "threat_level": "high"},
+            "urlvoid": {
+                "safety_score": 25,
+                "blacklists": ["malware-patrol", "phishtank"],
+                "threat_level": "high",
+            },
+            "phishtank": {"is_phishing": True, "verified": True, "threat_level": "critical"},
+            "recommendations": [
+                "🚨 CRITICAL: URL verified as phishing by PhishTank community",
+                "🛡️ VirusTotal: 5/70 engines flagged as malicious",
+                "🚫 Found on 2 blacklist(s): malware-patrol, phishtank",
+            ],
+        }
+
+        logger.info("Sending test abuse report with multi-API validation results...")
 
         if self.send_abuse_report(
             test_abuse_emails,
@@ -2034,8 +3346,9 @@ class AbuseReportManager:
             test_whois_str,
             attachment_paths=attachment_paths,
             test_mode=True,
+            multi_api_results=test_multi_api_results,
         ):
-            logger.info("Test report sent successfully.")
+            logger.info("Test report with multi-API results sent successfully.")
         else:
             logger.error("Failed to send test report.")
 
@@ -2142,8 +3455,400 @@ def get_offset() -> int:
         return 0
 
 
+class AutoPhishingAnalyzer:
+    """
+    Automated phishing analysis engine with multi-API integration and intelligent auto-reporting.
+
+    This class handles the automatic analysis of detected phishing sites using multiple APIs
+    and makes intelligent decisions about auto-reporting based on threat levels and confidence scores.
+    """
+
+    def __init__(self, db_manager: DatabaseManager, abuse_detector: EnhancedAbuseEmailDetector):
+        """
+        Initialize the auto-analyzer.
+
+        Args:
+            db_manager (DatabaseManager): Database manager instance
+            abuse_detector (EnhancedAbuseEmailDetector): Abuse email detector instance
+        """
+        self.db_manager = db_manager
+        self.abuse_detector = abuse_detector
+        self.multi_api_validator = MultiAPIValidator()
+        self.running = False
+
+    def start_analysis_worker(self):
+        """Start the background analysis worker thread."""
+        if not self.running:
+            self.running = True
+            analysis_thread = threading.Thread(target=self._analysis_worker_loop, daemon=True)
+            analysis_thread.start()
+            logger.info("Auto-analysis worker started")
+
+    def stop_analysis_worker(self):
+        """Stop the background analysis worker."""
+        self.running = False
+        logger.info("Auto-analysis worker stopped")
+
+    def _analysis_worker_loop(self):
+        """Main loop for the analysis worker."""
+        logger.info("Auto-analysis worker loop started")
+
+        while self.running:
+            try:
+                # Get pending sites for analysis
+                pending_sites = self.db_manager.get_pending_analysis_sites(limit=5)
+
+                if pending_sites:
+                    logger.info(f"Processing {len(pending_sites)} sites for auto-analysis")
+
+                    for site_info in pending_sites:
+                        if not self.running:
+                            break
+
+                        try:
+                            self.analyze_detected_site(
+                                site_info["url"],
+                                site_info["keywords"].split(", ") if site_info["keywords"] else [],
+                            )
+
+                            # Small delay between analyses to avoid overwhelming APIs
+                            time.sleep(AUTO_ANALYSIS_DELAY_SECONDS)
+
+                        except Exception as e:
+                            logger.error(f"Error analyzing site {site_info['url']}: {e}")
+                            continue
+                else:
+                    # No pending sites, wait longer
+                    time.sleep(60)
+
+            except Exception as e:
+                logger.error(f"Error in auto-analysis worker loop: {e}")
+                time.sleep(30)
+
+    def analyze_detected_site(self, url: str, detection_keywords: List[str]) -> Dict[str, Any]:
+        """
+        Perform comprehensive analysis on a detected phishing site.
+
+        Args:
+            url (str): URL to analyze
+            detection_keywords (List[str]): Keywords that triggered detection
+
+        Returns:
+            Dict[str, Any]: Analysis results and auto-report decision
+        """
+        logger.info(f"Starting comprehensive analysis for: {url}")
+
+        try:
+            # Perform multi-API scan
+            if AUTO_ANALYSIS_ENABLED:
+                multi_api_results = self.multi_api_validator.comprehensive_scan(url)
+            else:
+                logger.warning("Auto multi-API scan disabled or no API keys configured")
+                multi_api_results = {
+                    "aggregated_threat_level": "unknown",
+                    "confidence_score": 0,
+                    "virustotal": {"error": "API key not configured"},
+                    "urlvoid": {"error": "API key not configured"},
+                    "phishtank": {"error": "API key not configured"},
+                }
+
+            # Make auto-report decision
+            auto_report_decision = self._make_auto_report_decision(
+                multi_api_results, detection_keywords
+            )
+
+            # Update database with results
+            self.db_manager.update_analysis_results(url, multi_api_results, auto_report_decision)
+
+            # Log decision
+            threat_level = multi_api_results.get("aggregated_threat_level", "unknown")
+            confidence = multi_api_results.get("confidence_score", 0)
+
+            if auto_report_decision.get("auto_report", False):
+                logger.info(
+                    f"AUTO-REPORT ELIGIBLE: {url} - "
+                    f"Threat: {threat_level}, Confidence: {confidence}%, "
+                    f"Keywords: {', '.join(detection_keywords)}"
+                )
+            elif auto_report_decision.get("manual_review", False):
+                logger.info(
+                    f"MANUAL REVIEW REQUIRED: {url} - "
+                    f"Threat: {threat_level}, Confidence: {confidence}%, "
+                    f"Keywords: {', '.join(detection_keywords)}"
+                )
+            else:
+                logger.info(
+                    f"ANALYSIS COMPLETE: {url} - "
+                    f"Threat: {threat_level}, Confidence: {confidence}% - No action required"
+                )
+
+            return {
+                "url": url,
+                "multi_api_results": multi_api_results,
+                "auto_report_decision": auto_report_decision,
+                "analysis_timestamp": datetime.datetime.now().isoformat(),
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to analyze detected site {url}: {e}")
+            return {"error": str(e), "url": url}
+
+    def _make_auto_report_decision(
+        self, multi_api_results: Dict[str, Any], detection_keywords: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Make intelligent auto-report decision based on analysis results.
+
+        Args:
+            multi_api_results (Dict[str, Any]): Multi-API scan results
+            detection_keywords (List[str]): Keywords that triggered detection
+
+        Returns:
+            Dict[str, Any]: Auto-report decision with reasoning
+        """
+        threat_level = multi_api_results.get("aggregated_threat_level", "unknown")
+        confidence_score = multi_api_results.get("confidence_score", 0)
+
+        decision = {
+            "auto_report": False,
+            "manual_review": False,
+            "priority": "medium",
+            "reasoning": [],
+        }
+
+        # Critical threat level from PhishTank verified
+        pt_result = multi_api_results.get("phishtank", {})
+        if pt_result.get("is_phishing") and pt_result.get("verified"):
+            decision["auto_report"] = True
+            decision["priority"] = "high"
+            decision["reasoning"].append("PhishTank verified phishing site")
+
+        # High threat level with high confidence
+        elif (
+            threat_level in AUTO_REPORT_THREAT_LEVELS
+            and confidence_score >= AUTO_REPORT_THRESHOLD_CONFIDENCE
+        ):
+            decision["auto_report"] = True
+            decision["priority"] = "high" if threat_level == "critical" else "medium"
+            decision["reasoning"].append(
+                f"High threat level ({threat_level}) with {confidence_score}% confidence"
+            )
+
+        # VirusTotal multiple detections
+        vt_result = multi_api_results.get("virustotal", {})
+        if not vt_result.get("error"):
+            malicious_count = vt_result.get("malicious", 0)
+            total_engines = vt_result.get("total_engines", 0)
+
+            if malicious_count >= 5 and confidence_score >= AUTO_REPORT_THRESHOLD_CONFIDENCE:
+                decision["auto_report"] = True
+                decision["priority"] = "high"
+                decision["reasoning"].append(
+                    f"VirusTotal: {malicious_count}/{total_engines} engines detected threats"
+                )
+            elif malicious_count >= 2 and confidence_score >= MANUAL_REVIEW_THRESHOLD_CONFIDENCE:
+                decision["manual_review"] = True
+                decision["reasoning"].append(
+                    f"VirusTotal: {malicious_count}/{total_engines} engines detected threats (manual review)"
+                )
+
+        # URLVoid blacklist detections
+        uv_result = multi_api_results.get("urlvoid", {})
+        if not uv_result.get("error"):
+            blacklists = uv_result.get("blacklists", [])
+            safety_score = uv_result.get("safety_score", 100)
+
+            if len(blacklists) >= 3 and confidence_score >= AUTO_REPORT_THRESHOLD_CONFIDENCE:
+                decision["auto_report"] = True
+                decision["priority"] = "high"
+                decision["reasoning"].append(f"URLVoid: Found on {len(blacklists)} blacklists")
+            elif (
+                len(blacklists) >= 1 or safety_score <= 30
+            ) and confidence_score >= MANUAL_REVIEW_THRESHOLD_CONFIDENCE:
+                decision["manual_review"] = True
+                decision["reasoning"].append(
+                    f"URLVoid: Safety score {safety_score}/100, {len(blacklists)} blacklists"
+                )
+
+        # High-value keywords detected
+        high_value_keywords = [
+            "login",
+            "password",
+            "account",
+            "verify",
+            "suspend",
+            "billing",
+            "payment",
+        ]
+        matching_hvk = [
+            kw
+            for kw in detection_keywords
+            if kw.lower() in [hvk.lower() for hvk in high_value_keywords]
+        ]
+
+        if len(matching_hvk) >= 2 and confidence_score >= MANUAL_REVIEW_THRESHOLD_CONFIDENCE:
+            if not decision["auto_report"]:
+                decision["manual_review"] = True
+            decision["reasoning"].append(f"High-value keywords detected: {', '.join(matching_hvk)}")
+
+        # Medium threat with reasonable confidence needs manual review
+        if (
+            threat_level in ["medium", "high"]
+            and confidence_score >= MANUAL_REVIEW_THRESHOLD_CONFIDENCE
+            and not decision["auto_report"]
+        ):
+            decision["manual_review"] = True
+            decision["reasoning"].append(
+                f"Medium/High threat level with {confidence_score}% confidence"
+            )
+
+        # Default reasoning if none set
+        if not decision["reasoning"]:
+            decision["reasoning"].append(
+                f"Low threat level ({threat_level}) or insufficient confidence ({confidence_score}%)"
+            )
+
+        return decision
+
+    def process_auto_reports(self, report_manager) -> int:
+        """
+        Process sites eligible for automatic reporting.
+
+        Args:
+            report_manager: AbuseReportManager instance
+
+        Returns:
+            int: Number of sites processed for auto-reporting
+        """
+        try:
+            eligible_sites = self.db_manager.get_auto_report_eligible_sites(limit=5)
+
+            if not eligible_sites:
+                return 0
+
+            logger.info(f"Processing {len(eligible_sites)} sites for auto-reporting")
+            processed_count = 0
+
+            for site_info in eligible_sites:
+                try:
+                    url = site_info["url"]
+                    threat_level = site_info["threat_level"]
+                    confidence = site_info["confidence_score"]
+                    keywords = site_info["keywords"]
+
+                    logger.info(
+                        f"Auto-reporting: {url} - "
+                        f"Threat: {threat_level}, Confidence: {confidence}%, "
+                        f"Keywords: {keywords}"
+                    )
+
+                    # Get WHOIS and abuse emails
+                    whois_data = basic_whois_lookup(url)
+                    whois_str = str(whois_data)
+                    domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+                    registrar = self.abuse_detector.extract_registrar(whois_data)
+                    abuse_list = self.abuse_detector.get_enhanced_abuse_email(
+                        domain, whois_data, registrar
+                    )
+
+                    if not abuse_list:
+                        logger.warning(
+                            f"No valid abuse emails found for {url}, marking for manual review"
+                        )
+                        # Mark for manual review instead
+                        with self.db_manager.engine.begin() as conn:
+                            conn.execute(
+                                text(
+                                    """
+                                    UPDATE phishing_sites
+                                    SET auto_report_eligible = 0, requires_manual_review = 1
+                                    WHERE url = :url
+                                """
+                                ),
+                                {"url": url},
+                            )
+                        continue
+
+                    # Get enhanced multi-API results for report
+                    with self.db_manager.engine.begin() as conn:
+                        api_results = conn.execute(
+                            text(
+                                """
+                                SELECT virustotal_result, urlvoid_result, phishtank_result,
+                                       multi_api_threat_level, api_confidence_score
+                                FROM phishing_sites WHERE url = :url
+                            """
+                            ),
+                            {"url": url},
+                        ).fetchone()
+
+                    if api_results:
+                        enhanced_results = {
+                            "aggregated_threat_level": api_results[3],
+                            "confidence_score": api_results[4],
+                            "virustotal": json.loads(api_results[0]) if api_results[0] else {},
+                            "urlvoid": json.loads(api_results[1]) if api_results[1] else {},
+                            "phishtank": json.loads(api_results[2]) if api_results[2] else {},
+                            "recommendations": [
+                                f"🤖 AUTO-DETECTED: Site flagged by automated system",
+                                f"🎯 DETECTION KEYWORDS: {keywords}",
+                                f"📊 THREAT ASSESSMENT: {threat_level.upper()} ({confidence}% confidence)",
+                            ],
+                        }
+                    else:
+                        enhanced_results = None
+
+                    # Send abuse report with enhanced data
+                    attachment_paths = AttachmentConfig.get_all_attachments()
+                    success = report_manager.send_abuse_report(
+                        abuse_list,
+                        url,
+                        whois_str,
+                        attachment_paths=attachment_paths,
+                        multi_api_results=enhanced_results,
+                    )
+
+                    if success:
+                        # Update database to mark as reported
+                        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        with self.db_manager.engine.begin() as conn:
+                            conn.execute(
+                                text(
+                                    """
+                                    UPDATE phishing_sites
+                                    SET abuse_report_sent = 1,
+                                        last_report_sent = :timestamp,
+                                        abuse_email = :abuse_email,
+                                        reported = 1
+                                    WHERE url = :url
+                                """
+                                ),
+                                {"timestamp": timestamp, "abuse_email": abuse_list[0], "url": url},
+                            )
+
+                        logger.info(f"AUTO-REPORT SENT: {url} to {abuse_list[0]}")
+                        processed_count += 1
+                    else:
+                        logger.error(f"AUTO-REPORT FAILED: {url}")
+
+                except Exception as e:
+                    logger.error(f"Error processing auto-report for {url}: {e}")
+                    continue
+
+            if processed_count > 0:
+                logger.info(
+                    f"AUTO-REPORT SUMMARY: {processed_count}/{len(eligible_sites)} sites reported successfully"
+                )
+
+            return processed_count
+
+        except Exception as e:
+            logger.error(f"Error in process_auto_reports: {e}")
+            return 0
+
+
 class PhishingScanner:
-    """Enhanced phishing scanner with improved detection capabilities."""
+    """Enhanced phishing scanner with optional auto-analysis integration."""
 
     def __init__(
         self, timeout: int, keywords: List[str], domains: List[str], allowed_sites: List[str], args
@@ -2153,6 +3858,21 @@ class PhishingScanner:
         self.domains = domains
         self.allowed_sites = allowed_sites
         self.batch_size = DynamicBatchConfig.get_batch_size()
+
+        # These are always initialized for core functionality
+        self.multi_api_validator = MultiAPIValidator()
+        self.db_manager = None
+
+        # Initialize database for auto-analysis only if enabled
+        if AUTO_ANALYSIS_ENABLED:
+            try:
+                self.db_manager = DatabaseManager(db_url=DATABASE_URL)
+                logger.debug("Database manager initialized for auto-analysis")
+            except Exception as e:
+                logger.warning(f"Could not initialize database for auto-analysis: {e}")
+                self.db_manager = None
+        else:
+            logger.debug("Auto-analysis disabled, skipping database manager for scanner")
 
         if args.test_report:
             logger.info("Test report mode active: Skipping queries file generation.")
@@ -2179,26 +3899,31 @@ class PhishingScanner:
         """Get next batch of target sites from queries file."""
         offset = get_offset()
         batch = []
+        logger.debug(f"Getting targets from offset {offset}, batch_size={self.batch_size}")
 
         # If offset is beyond file size, reset to beginning for continuous scanning
-        if offset >= self.total_queries:
+        if self.total_queries > 0 and offset >= self.total_queries:
             logger.info(
                 f"Offset {offset} beyond file size {self.total_queries}. Resetting to beginning for continuous scanning."
             )
             save_offset(0)
             offset = 0
 
-        with open(QUERIES_FILE, "r") as f:
-            # Skip to current offset
-            for _ in range(offset):
-                f.readline()
+        try:
+            with open(QUERIES_FILE, "r") as f:
+                # Skip to current offset
+                for _ in range(offset):
+                    f.readline()
 
-            # Read next batch
-            for _ in range(self.batch_size):
-                line = f.readline()
-                if not line:  # End of file
-                    break
-                batch.append(line.strip())
+                # Read next batch
+                for _ in range(self.batch_size):
+                    line = f.readline()
+                    if not line:  # End of file
+                        break
+                    batch.append(line.strip())
+        except Exception as e:
+            logger.error(f"Error reading queries file {QUERIES_FILE}: {e}")
+            return []
 
         if not batch:
             # If no batch read (shouldn't happen with reset logic above), reset anyway
@@ -2220,6 +3945,7 @@ class PhishingScanner:
             else:
                 logger.debug(f"Batch from offset {offset}: {len(batch)} queries read.")
 
+        logger.debug(f"Returning batch of {len(batch)} targets")
         return batch
 
     @staticmethod
@@ -2277,7 +4003,7 @@ class PhishingScanner:
         return candidate_urls
 
     def scan_site(self, domain: str) -> None:
-        """Scan a single site for phishing indicators."""
+        """Scan a single site for phishing indicators with automatic multi-API analysis integration."""
         code = 0
         for url in self.get_candidate_urls(domain) or []:
             logger.info(f"Scanning {url} for keywords: {self.keywords}")
@@ -2319,11 +4045,101 @@ class PhishingScanner:
                         if any(kw.lower() in content for kw in self.keywords):
                             matches.append(indicator)
 
+                # Always store scan result in the original table
                 PhishingUtils.store_scan_result(url, code, matches, db_file=DATABASE_URL)
 
                 if matches:
-                    logger.info(f"Found keywords {matches} in {url}")
+                    logger.info(f"Phishing keywords found in {url}: {matches}")
                     PhishingUtils.log_positive_result(url, matches)
+
+                    # Auto-detection integration (optional, only if APIs are configured and DB available)
+                    if AUTO_ANALYSIS_ENABLED and self.db_manager is not None:
+                        try:
+                            # Store for auto-analysis
+                            stored = self.db_manager.store_detected_phishing_site(
+                                url, matches, source="auto_detection"
+                            )
+
+                            if stored:
+                                logger.info(f"Queued for auto-analysis: {url}")
+
+                            # Immediate analysis for critical keywords
+                            critical_keywords = [
+                                "login",
+                                "password",
+                                "account",
+                                "banking",
+                                "paypal",
+                            ]
+                            has_critical = any(
+                                kw.lower() in [m.lower() for m in matches]
+                                for kw in critical_keywords
+                            )
+
+                            if has_critical:
+                                logger.warning(
+                                    f"Critical keywords detected in {url}, performing immediate analysis"
+                                )
+                                try:
+                                    immediate_results = self.multi_api_validator.comprehensive_scan(
+                                        url
+                                    )
+                                    threat_level = immediate_results.get(
+                                        "aggregated_threat_level", "unknown"
+                                    )
+                                    confidence = immediate_results.get("confidence_score", 0)
+
+                                    logger.warning(
+                                        f"Immediate analysis complete for {url}: Threat={threat_level}, Confidence={confidence}%"
+                                    )
+
+                                    # Store immediate results
+                                    with self.db_manager.engine.begin() as conn:
+                                        conn.execute(
+                                            text(
+                                                """
+                                                UPDATE phishing_sites
+                                                SET auto_analysis_status = 'completed',
+                                                    auto_analysis_timestamp = :timestamp,
+                                                    virustotal_result = :vt_result,
+                                                    urlvoid_result = :uv_result,
+                                                    phishtank_result = :pt_result,
+                                                    multi_api_threat_level = :threat_level,
+                                                    api_confidence_score = :confidence_score,
+                                                    priority = 'high'
+                                                WHERE url = :url
+                                            """
+                                            ),
+                                            {
+                                                "timestamp": datetime.datetime.now().strftime(
+                                                    "%Y-%m-%d %H:%M:%S"
+                                                ),
+                                                "vt_result": json.dumps(
+                                                    immediate_results.get("virustotal", {})
+                                                ),
+                                                "uv_result": json.dumps(
+                                                    immediate_results.get("urlvoid", {})
+                                                ),
+                                                "pt_result": json.dumps(
+                                                    immediate_results.get("phishtank", {})
+                                                ),
+                                                "threat_level": threat_level,
+                                                "confidence_score": confidence,
+                                                "url": url,
+                                            },
+                                        )
+
+                                except Exception as api_error:
+                                    logger.error(
+                                        f"Immediate multi-API analysis failed for {url}: {api_error}"
+                                    )
+
+                        except Exception as auto_error:
+                            logger.error(
+                                f"Auto-detection integration failed for {url}: {auto_error}"
+                            )
+                            # Continue with normal operation even if auto-detection fails
+                            pass
                 else:
                     logger.debug(f"No keywords found in {url}")
 
@@ -2345,12 +4161,17 @@ class PhishingScanner:
                 PhishingUtils.update_scan_result_response_code(url, code)
 
     def run_scan_cycle(self) -> None:
-        """Run continuous scanning cycles without long waits."""
-        logger.info("Starting continuous scanning mode...")
+        """Run continuous scanning cycles with integrated auto-analysis."""
+        logger.info("Starting enhanced continuous scanning with auto-analysis integration...")
+        logger.debug(
+            f"Scanner configuration: timeout={self.timeout}, keywords={len(self.keywords)}, domains={len(self.domains)}"
+        )
+        logger.debug(f"Total queries to process: {self.total_queries}")
 
         cycle_count = 0
         while True:
             cycle_count += 1
+            logger.debug(f"Starting scan cycle #{cycle_count}")
 
             targets = self.get_dynamic_target_sites()
             if not targets:
@@ -2372,6 +4193,7 @@ class PhishingScanner:
             )
 
             # Use ThreadPoolExecutor for parallel scanning
+            logger.debug(f"Starting parallel scanning with 180 workers for {len(targets)} targets")
             with ThreadPoolExecutor(max_workers=180) as executor:
                 futures = {executor.submit(self.scan_site, target): target for target in targets}
 
@@ -2402,7 +4224,7 @@ class PhishingScanner:
 
 
 class Engine:
-    """Main engine class with enhanced capabilities."""
+    """Main engine class with enhanced multi-API capabilities and intelligent auto-analysis."""
 
     def __init__(self, args):
         self.timeout = args.timeout if args.timeout is not None else settings.TIMEOUT
@@ -2442,8 +4264,16 @@ class Engine:
         upgrade_phishing_db()
         self.db_manager.init_registrar_abuse_db()
 
+        logger.debug("Database initialization completed")
+
         # Initialize enhanced abuse detector
         self.abuse_detector = EnhancedAbuseEmailDetector(self.db_manager)
+
+        # Initialize multi-API validator
+        self.multi_api_validator = MultiAPIValidator()
+
+        # Initialize auto-analyzer (always, but may be inactive)
+        self.auto_analyzer = AutoPhishingAnalyzer(self.db_manager, self.abuse_detector)
 
         # Initialize threading event for coordination
         self.monitoring_event = threading.Event()
@@ -2475,13 +4305,15 @@ class Engine:
         # Determine operational mode
         self.mode = EngineMode(self.args)
 
-        # Initialize scanner if needed
+        # ALWAYS initialize scanner if needed (independent of API keys)
         if self.mode.scanning_mode:
             self.scanner = PhishingScanner(
                 self.timeout, self.keywords, self.domains, self.allowed_sites, self.args
             )
+            logger.debug("Scanner initialized for scanning mode")
         else:
             self.scanner = None
+            logger.debug("No scanner needed for current mode")
 
     def mark_site_as_phishing(self, url: str, abuse_email: Optional[str] = None):
         """Mark a site as phishing with enhanced database operations."""
@@ -2517,13 +4349,141 @@ class Engine:
                 )
                 logger.info(f"Marked {url} as phishing with abuse email {abuse_email}")
 
+    def perform_multi_api_scan(self, url: str):
+        """Perform multi-API scan and display results."""
+        if not validators.url(url):
+            logger.error(f"Invalid URL format: {url}")
+            return
+
+        logger.info(f"🔍 Starting multi-API comprehensive scan for: {url}")
+
+        try:
+            results = self.multi_api_validator.comprehensive_scan(url)
+
+            # Display results in a formatted way
+            print("\n" + "=" * 80)
+            print(f"🎯 MULTI-API SCAN RESULTS FOR: {url}")
+            print("=" * 80)
+
+            print(f"📊 THREAT LEVEL: {results['aggregated_threat_level'].upper()}")
+            print(f"🎯 CONFIDENCE SCORE: {results['confidence_score']}%")
+            print(f"⏰ SCAN TIMESTAMP: {results['scan_timestamp']}")
+
+            # VirusTotal Results
+            print("\n🛡️  VIRUSTOTAL RESULTS:")
+            vt_result = results.get("virustotal", {})
+            if vt_result.get("error"):
+                print(f"   ❌ Error: {vt_result['error']}")
+            elif "total_engines" in vt_result:
+                print(f"   🔍 Engines Scanned: {vt_result['total_engines']}")
+                print(f"   🚨 Malicious Detections: {vt_result.get('malicious', 0)}")
+                print(f"   ⚠️  Suspicious Detections: {vt_result.get('suspicious', 0)}")
+                print(f"   ✅ Harmless: {vt_result.get('harmless', 0)}")
+                print(f"   📈 Reputation Score: {vt_result.get('reputation', 0)}")
+            else:
+                print(f"   ⏳ Status: {vt_result.get('status', 'Unknown')}")
+
+            # URLVoid Results
+            print("\n🔍 URLVOID RESULTS:")
+            uv_result = results.get("urlvoid", {})
+            if uv_result.get("error"):
+                print(f"   ❌ Error: {uv_result['error']}")
+            else:
+                print(f"   🛡️  Safety Score: {uv_result.get('safety_score', 'N/A')}/100")
+                print(f"   📅 Domain Age: {uv_result.get('domain_age', 'N/A')}")
+                print(f"   🏢 ASN: {uv_result.get('asn', 'N/A')}")
+                print(f"   🌍 Country: {uv_result.get('country_code', 'N/A')}")
+                blacklists = uv_result.get("blacklists", [])
+                if blacklists:
+                    print(f"   🚫 Blacklists: {', '.join(blacklists)}")
+
+            # PhishTank Results
+            print("\n🎣 PHISHTANK RESULTS:")
+            pt_result = results.get("phishtank", {})
+            if pt_result.get("error"):
+                print(f"   ❌ Error: {pt_result['error']}")
+            else:
+                is_phishing = pt_result.get("is_phishing", False)
+                verified = pt_result.get("verified", False)
+                if is_phishing:
+                    status = "VERIFIED PHISHING" if verified else "REPORTED AS PHISHING"
+                    print(f"   🚨 Status: {status}")
+                    if pt_result.get("target"):
+                        print(f"   🎯 Target: {pt_result['target']}")
+                else:
+                    print(f"   ✅ Status: Not in phishing database")
+
+            # Recommendations
+            print("\n📋 RECOMMENDATIONS:")
+            recommendations = results.get("recommendations", [])
+            for i, rec in enumerate(recommendations, 1):
+                print(f"   {i}. {rec}")
+
+            print("\n" + "=" * 80)
+
+            # Store results if this was a positive detection
+            threat_level = results["aggregated_threat_level"]
+            if threat_level in ["critical", "high", "medium"]:
+                logger.info(f"🚨 Storing scan results due to threat level: {threat_level}")
+
+                # Store in database for further action
+                with self.db_manager.engine.begin() as conn:
+                    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+                    # Check if already exists
+                    existing = conn.execute(
+                        text("SELECT id FROM phishing_sites WHERE url = :url"), {"url": url}
+                    ).fetchone()
+
+                    if not existing:
+                        conn.execute(
+                            text(
+                                """
+                                INSERT INTO phishing_sites
+                                (url, manual_flag, first_seen, last_seen, virustotal_result,
+                                 urlvoid_result, phishtank_result, multi_api_threat_level,
+                                 api_confidence_score, source, priority)
+                                VALUES (:url, 1, :timestamp, :timestamp, :vt_result,
+                                        :uv_result, :pt_result, :threat_level, :confidence,
+                                        'multi_api_scan', :priority)
+                            """
+                            ),
+                            {
+                                "url": url,
+                                "timestamp": timestamp,
+                                "vt_result": json.dumps(vt_result),
+                                "uv_result": json.dumps(uv_result),
+                                "pt_result": json.dumps(pt_result),
+                                "threat_level": threat_level,
+                                "confidence": results["confidence_score"],
+                                "priority": "high" if threat_level == "critical" else "medium",
+                            },
+                        )
+                        print(f"🔄 URL flagged in database for further processing")
+
+        except Exception as e:
+            logger.error(f"Multi-API scan failed for {url}: {e}")
+            print(f"\n❌ Scan failed: {e}")
+
     def start(self):
-        """Start the engine in the appropriate mode."""
+        """Start the engine in the appropriate mode with enhanced auto-analysis."""
+        logger.debug(
+            f"Starting engine in mode: scanning={self.mode.scanning_mode}, threads_only={self.args.threads_only}"
+        )
+
         if self.args.report:
             self.mark_site_as_phishing(self.args.report, abuse_email=self.abuse_email)
             logger.info(
                 f"URL {self.args.report} flagged as phishing. Exiting without sending an email."
             )
+            return
+
+        if getattr(self.args, "multi_api_scan", False):
+            url = getattr(self.args, "url", None)
+            if not url:
+                logger.error("--multi-api-scan requires --url parameter")
+                return
+            self.perform_multi_api_scan(url)
             return
 
         if self.args.process_reports:
@@ -2557,45 +4517,117 @@ class Engine:
             )
             return
 
-        # Start background threads
+        # Start background threads for abuse reporting and monitoring
+        logger.debug("Starting background threads...")
+
         reporting_thread = threading.Thread(
             target=self.report_manager.report_phishing_sites, daemon=True
         )
         reporting_thread.start()
+        logger.debug("Abuse reporting thread started")
 
         takedown_thread = threading.Thread(target=self.takedown_monitor.run, daemon=True)
         takedown_thread.start()
+        logger.debug("Takedown monitoring thread started")
+
+        # Start auto-analysis worker if APIs are configured
+        if AUTO_ANALYSIS_ENABLED:
+            self.auto_analyzer.start_analysis_worker()
+            logger.info("Auto-analysis system started with multi-API integration")
+        else:
+            logger.info("Auto-analysis disabled (no API keys configured or disabled in settings)")
 
         if self.args.threads_only:
             logger.info(
                 "Running in threads-only mode. Background threads are active; skipping scanning cycle."
             )
             logger.info(
-                "This mode only processes already flagged phishing sites and monitors takedowns."
+                "Active systems: Abuse reporting, Takedown monitoring"
+                + (", Auto-analysis" if AUTO_ANALYSIS_ENABLED else "")
             )
             logger.info("To scan for new sites, run without --threads-only flag.")
+
+            # Show system status
+            if AUTO_ANALYSIS_ENABLED:
+                try:
+                    pending_count = len(self.db_manager.get_pending_analysis_sites(limit=100))
+                    auto_eligible_count = len(
+                        self.db_manager.get_auto_report_eligible_sites(limit=100)
+                    )
+                    logger.info(
+                        f"System Status: {pending_count} sites pending analysis, {auto_eligible_count} sites eligible for auto-reporting"
+                    )
+                except Exception as e:
+                    logger.debug(f"Could not get system status: {e}")
+            else:
+                logger.info("Auto-analysis system inactive - no API keys configured")
+
+            # Show what the threads are doing
+            logger.info("Background threads running:")
+            logger.info("  - Abuse Report Manager: Processing flagged phishing sites")
+            logger.info("  - Takedown Monitor: Monitoring site status changes")
+            if AUTO_ANALYSIS_ENABLED:
+                logger.info(
+                    "  - Auto-Analysis Worker: Analyzing detected sites with multi-API validation"
+                )
+
+            logger.info("System ready. Press Ctrl+C to stop.")
+
             while True:
                 time.sleep(60)
-        else:
-            logger.info(
-                f"Initialized with {len(self.keywords)} keywords and {len(self.domains)} domain extensions"
-            )
-            logger.info(f"Allowed sites (whitelist): {self.allowed_sites}")
-            logger.info(f"Scan interval: {settings.SCAN_INTERVAL}s | Timeout: {self.timeout}s")
 
-            # Run continuous scanning cycles
+        elif self.mode.scanning_mode:
+            # SCANNING MODE - This should always work regardless of API keys
             logger.info(
-                f"Starting continuous scanning with {len(self.keywords)} keywords and {len(self.domains)} domain extensions"
+                f"Initialized scanning engine with {len(self.keywords)} keywords and {len(self.domains)} domain extensions"
             )
             logger.info(f"Allowed sites (whitelist): {self.allowed_sites}")
             logger.info(f"Timeout: {self.timeout}s per request")
 
+            if not self.scanner:
+                logger.error("Scanner not initialized! This is a bug.")
+                return
+
+            logger.debug("Scanner object exists, preparing to start scanning...")
+
+            # Log API configuration status for scanning
+            api_status = []
+            if VIRUSTOTAL_API_KEY:
+                api_status.append("VirusTotal")
+            if URLVOID_API_KEY:
+                api_status.append("URLVoid")
+            if PHISHTANK_API_KEY:
+                api_status.append("PhishTank")
+
+            if api_status:
+                logger.info(f"Multi-API integration enabled: {', '.join(api_status)}")
+                logger.info(f"Auto-analysis: {'Enabled' if AUTO_ANALYSIS_ENABLED else 'Disabled'}")
+                if AUTO_ANALYSIS_ENABLED:
+                    logger.info(
+                        f"Auto-report threshold: {AUTO_REPORT_THRESHOLD_CONFIDENCE}% confidence"
+                    )
+                    logger.info(
+                        f"Manual review threshold: {MANUAL_REVIEW_THRESHOLD_CONFIDENCE}% confidence"
+                    )
+            else:
+                logger.info("Multi-API integration disabled (no API keys configured)")
+                logger.info("Running in basic scanning mode - will detect and log phishing sites")
+
+            # Start continuous scanning
+            logger.info("Starting continuous scanning cycle...")
+            logger.debug("About to call scanner.run_scan_cycle()")
+
             try:
-                self.scanner.run_scan_cycle()  # This now runs continuously
+                self.scanner.run_scan_cycle()
             except KeyboardInterrupt:
                 logger.info("Received interrupt signal, shutting down gracefully...")
+                if AUTO_ANALYSIS_ENABLED:
+                    self.auto_analyzer.stop_analysis_worker()
             except Exception as e:
                 logger.error(f"Error in scan cycle: {e}")
+                import traceback
+
+                logger.debug(f"Full traceback: {traceback.format_exc()}")
                 logger.info("Restarting scanning in 60 seconds...")
                 time.sleep(60)
                 # Restart scanning
@@ -2603,12 +4635,17 @@ class Engine:
                     self.scanner.run_scan_cycle()
                 except KeyboardInterrupt:
                     logger.info("Received interrupt signal, shutting down gracefully...")
+                    if AUTO_ANALYSIS_ENABLED:
+                        self.auto_analyzer.stop_analysis_worker()
+        else:
+            logger.error("Unknown mode - this shouldn't happen!")
+            logger.debug(f"Mode details: {vars(self.mode)}")
 
 
 def parse_arguments() -> argparse.Namespace:
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
-        description="Enhanced Anisakys Phishing Detection Engine",
+        description="Enhanced Anisakys Phishing Detection Engine with Intelligent Auto-Analysis & Auto-Reporting",
         epilog=(
             "Example usages:\n"
             "  ./anisakys.py --timeout 30 --log-level DEBUG\n"
@@ -2616,16 +4653,39 @@ def parse_arguments() -> argparse.Namespace:
             "  ./anisakys.py --report https://site.domain.com --abuse-email abuse@domain.com\n"
             '  ./anisakys.py --process-reports --attachment /path/to/file.pdf --cc "cc1@example.com, cc2@example.com"\n'
             "  ./anisakys.py --process-reports --attachments-folder /path/to/attachments/\n"
-            "  ./anisakys.py --threads-only --log-level DEBUG  # Only monitoring, no scanning\n"
+            "  ./anisakys.py --threads-only --log-level DEBUG  # Only monitoring + auto-analysis, no scanning\n"
             "  ./anisakys.py --start-api --api-port 8080\n"
             "  ./anisakys.py --test-report --abuse-email your-test@example.com --attachments-folder /path/to/attachments/\n"
+            "  ./anisakys.py --multi-api-scan --url https://suspicious-site.com  # Multi-API validation\n"
+            "  ./anisakys.py --show-auto-status  # Show auto-analysis and auto-reporting status\n"
             "\n"
-            "🚀 NEW FEATURES:\n"
-            "  ✅ Enhanced ASN abuse email detection\n"
-            "  ✅ TLD-specific WHOIS servers (supports .online, .site, etc.)\n"
-            "  ✅ Multiple abuse emails per report (hosting + ASN + registrar)\n"
+            "🚀 INTELLIGENT AUTO-ANALYSIS FEATURES:\n"
+            "  ✅ VirusTotal API v3 integration (70+ engines)\n"
+            "  ✅ URLVoid API integration (30+ reputation engines)\n"
+            "  ✅ PhishTank community database integration\n"
+            "  ✅ Multi-API validation pipeline with threat aggregation\n"
+            "  ✅ Intelligent auto-reporting based on confidence thresholds\n"
+            "  ✅ Real-time threat scoring and confidence levels\n"
+            "  ✅ Automatic detection → analysis → reporting pipeline\n"
+            "  ✅ Provider-specific abuse contact detection\n"
             "  ✅ Cloudflare real hosting detection\n"
             "  ✅ Same-domain validation (prevents reporting abuse@malicious.com)\n"
+            "  ✅ Critical keyword immediate analysis\n"
+            "  ✅ Automated evidence collection and enhanced reporting\n"
+            "\n"
+            "🤖 AUTO-ANALYSIS WORKFLOW:\n"
+            "  1. Scanner detects phishing keywords → Stores in database\n"
+            "  2. Auto-analyzer performs multi-API validation → Calculates threat level\n"
+            "  3. Intelligence engine decides auto-report eligibility → Flags high-confidence threats\n"
+            "  4. Report manager sends enhanced abuse reports with API evidence\n"
+            "  5. Continuous monitoring for takedowns and status updates\n"
+            "\n"
+            "⚙️  CONFIGURATION VARIABLES (.env file):\n"
+            "  AUTO_MULTI_API_SCAN=true                    # Enable/disable auto-analysis\n"
+            "  AUTO_REPORT_THRESHOLD_CONFIDENCE=85         # Confidence % for auto-reporting\n"
+            "  AUTO_REPORT_THREAT_LEVELS=critical,high     # Threat levels eligible for auto-reporting\n"
+            "  MANUAL_REVIEW_THRESHOLD_CONFIDENCE=70       # Confidence % for manual review flag\n"
+            "  AUTO_ANALYSIS_DELAY_SECONDS=30              # Delay between API calls\n"
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
@@ -2651,7 +4711,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--process-reports",
         action="store_true",
-        help="Manually trigger processing of flagged phishing sites.",
+        help="Manually trigger processing of flagged phishing sites with multi-API validation.",
     )
     parser.add_argument(
         "--attachment",
@@ -2671,7 +4731,7 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--threads-only",
         action="store_true",
-        help="Only run background threads without running the scanning cycle.",
+        help="Only run background threads (monitoring, auto-analysis, auto-reporting) without scanning.",
     )
     parser.add_argument(
         "--regen-queries",
@@ -2681,10 +4741,12 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--test-report",
         action="store_true",
-        help="Send a test report including attachment and escalation CCs, then exit.",
+        help="Send a test report with multi-API evidence including attachment and escalation CCs, then exit.",
     )
     parser.add_argument(
-        "--start-api", action="store_true", help="Start the REST API server for external reports."
+        "--start-api",
+        action="store_true",
+        help="Start the REST API server for external reports and multi-API scanning.",
     )
     parser.add_argument(
         "--api-port", type=int, default=8080, help="Port for the API server (default: 8080)"
@@ -2697,16 +4759,221 @@ def parse_arguments() -> argparse.Namespace:
         action="store_true",
         help="Reset scanning offset to 0 (start from beginning of queries file)",
     )
+    parser.add_argument(
+        "--multi-api-scan",
+        action="store_true",
+        help="Perform comprehensive multi-API validation scan on a specific URL",
+    )
+    parser.add_argument("--url", type=str, help="URL to scan when using --multi-api-scan")
+    parser.add_argument(
+        "--show-auto-status",
+        action="store_true",
+        help="Show current auto-analysis and auto-reporting system status",
+    )
+    parser.add_argument(
+        "--force-auto-analysis",
+        action="store_true",
+        help="Force immediate auto-analysis of all pending sites (useful for testing)",
+    )
+    parser.add_argument(
+        "--auto-report-now",
+        action="store_true",
+        help="Force immediate processing of all auto-report eligible sites",
+    )
 
     return parser.parse_args()
 
 
+def show_auto_status():
+    """Show current status of the auto-analysis and auto-reporting system."""
+    print("\n" + "=" * 80)
+    print("🤖 ANISAKYS AUTO-ANALYSIS & AUTO-REPORTING STATUS")
+    print("=" * 80)
+
+    # Database connection
+    db_manager = DatabaseManager(db_url=DATABASE_URL)
+
+    try:
+        with db_manager.engine.begin() as conn:
+            # Get pending analysis count
+            pending_analysis = conn.execute(
+                text("SELECT COUNT(*) FROM phishing_sites WHERE auto_analysis_status = 'pending'")
+            ).scalar()
+
+            # Get auto-report eligible count
+            auto_eligible = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM phishing_sites WHERE auto_report_eligible = 1 AND abuse_report_sent = 0"
+                )
+            ).scalar()
+
+            # Get manual review required count
+            manual_review = conn.execute(
+                text("SELECT COUNT(*) FROM phishing_sites WHERE requires_manual_review = 1")
+            ).scalar()
+
+            # Get total auto-detected sites
+            total_auto_detected = conn.execute(
+                text("SELECT COUNT(*) FROM phishing_sites WHERE auto_detected = 1")
+            ).scalar()
+
+            # Get analysis completed count
+            analysis_completed = conn.execute(
+                text("SELECT COUNT(*) FROM phishing_sites WHERE auto_analysis_status = 'completed'")
+            ).scalar()
+
+            # Get auto-reports sent count
+            auto_reports_sent = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM phishing_sites WHERE auto_detected = 1 AND abuse_report_sent = 1"
+                )
+            ).scalar()
+
+            # Recent activity (last 24 hours)
+            yesterday = (datetime.datetime.now() - datetime.timedelta(days=1)).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+            recent_detections = conn.execute(
+                text(
+                    "SELECT COUNT(*) FROM phishing_sites WHERE auto_detected = 1 AND first_seen >= :date"
+                ),
+                {"date": yesterday},
+            ).scalar()
+
+            recent_analysis = conn.execute(
+                text("SELECT COUNT(*) FROM phishing_sites WHERE auto_analysis_timestamp >= :date"),
+                {"date": yesterday},
+            ).scalar()
+
+            # Threat level breakdown
+            threat_breakdown = conn.execute(
+                text(
+                    """
+                    SELECT multi_api_threat_level, COUNT(*) as count
+                    FROM phishing_sites
+                    WHERE auto_analysis_status = 'completed'
+                    GROUP BY multi_api_threat_level
+                    ORDER BY count DESC
+                """
+                )
+            ).fetchall()
+
+            print(f"📊 DETECTION STATISTICS:")
+            print(f"   🎯 Total Auto-Detected Sites: {total_auto_detected}")
+            print(f"   📋 Pending Analysis: {pending_analysis}")
+            print(f"   ✅ Analysis Completed: {analysis_completed}")
+            print(f"   🚨 Auto-Report Eligible: {auto_eligible}")
+            print(f"   👀 Manual Review Required: {manual_review}")
+            print(f"   📤 Auto-Reports Sent: {auto_reports_sent}")
+
+            print(f"\n⏰ RECENT ACTIVITY (Last 24 Hours):")
+            print(f"   🔍 New Detections: {recent_detections}")
+            print(f"   🤖 Sites Analyzed: {recent_analysis}")
+
+            print(f"\n🎯 THREAT LEVEL BREAKDOWN:")
+            if threat_breakdown:
+                for threat_level, count in threat_breakdown:
+                    if threat_level:
+                        print(f"   {threat_level.upper()}: {count} sites")
+            else:
+                print("   No completed analyses yet")
+
+            # Configuration status
+            print(f"\n⚙️  CONFIGURATION STATUS:")
+            print(
+                f"   🤖 Auto-Analysis: {'✅ Enabled' if AUTO_ANALYSIS_ENABLED else '❌ Disabled'}"
+            )
+            if AUTO_ANALYSIS_ENABLED:
+                print(
+                    f"   📊 Auto-Report Confidence Threshold: {AUTO_REPORT_THRESHOLD_CONFIDENCE}%"
+                )
+                print(
+                    f"   👀 Manual Review Confidence Threshold: {MANUAL_REVIEW_THRESHOLD_CONFIDENCE}%"
+                )
+                print(f"   🎯 Auto-Report Threat Levels: {', '.join(AUTO_REPORT_THREAT_LEVELS)}")
+                print(f"   ⏱️  Analysis Delay: {AUTO_ANALYSIS_DELAY_SECONDS} seconds")
+            else:
+                print(f"   ❌ Reason: No API keys configured or AUTO_MULTI_API_SCAN disabled")
+
+            # API status
+            print(f"\n🔧 API INTEGRATION STATUS:")
+            api_configs = []
+            if VIRUSTOTAL_API_KEY:
+                api_configs.append("✅ VirusTotal")
+            else:
+                api_configs.append("❌ VirusTotal")
+
+            if URLVOID_API_KEY:
+                api_configs.append("✅ URLVoid")
+            else:
+                api_configs.append("❌ URLVoid")
+
+            if PHISHTANK_API_KEY:
+                api_configs.append("✅ PhishTank")
+            else:
+                api_configs.append("❌ PhishTank")
+
+            for config in api_configs:
+                print(f"   {config}")
+
+            # Recent pending sites for analysis
+            if pending_analysis > 0:
+                print(f"\n🔍 NEXT SITES FOR ANALYSIS:")
+                recent_pending = conn.execute(
+                    text(
+                        """
+                        SELECT url, detection_keywords, first_seen, priority
+                        FROM phishing_sites
+                        WHERE auto_analysis_status = 'pending'
+                        ORDER BY
+                            CASE priority
+                                WHEN 'high' THEN 1
+                                WHEN 'medium' THEN 2
+                                WHEN 'low' THEN 3
+                                ELSE 2
+                            END,
+                            first_seen ASC
+                        LIMIT 5
+                    """
+                    )
+                ).fetchall()
+
+                for i, (url, keywords, first_seen, priority) in enumerate(recent_pending, 1):
+                    print(f"   {i}. {url} ({priority}) - Keywords: {keywords}")
+
+            # Recent auto-report eligible sites
+            if auto_eligible > 0:
+                print(f"\n🚨 SITES READY FOR AUTO-REPORTING:")
+                recent_eligible = conn.execute(
+                    text(
+                        """
+                        SELECT url, multi_api_threat_level, api_confidence_score
+                        FROM phishing_sites
+                        WHERE auto_report_eligible = 1 AND abuse_report_sent = 0
+                        ORDER BY api_confidence_score DESC, first_seen ASC
+                        LIMIT 5
+                    """
+                    )
+                ).fetchall()
+
+                for i, (url, threat_level, confidence) in enumerate(recent_eligible, 1):
+                    print(f"   {i}. {url} - {threat_level} ({confidence}% confidence)")
+
+    except Exception as e:
+        print(f"❌ Error getting status: {e}")
+
+    print("\n" + "=" * 80)
+
+
 def main():
-    """Main entry point."""
+    """Main entry point with enhanced auto-analysis capabilities."""
     args = parse_arguments()
     logger.setLevel(
         args.log_level if args.log_level is not None else getattr(settings, "LOG_LEVEL", "INFO")
     )
+
+    logger.debug("Anisakys starting up...")
+    logger.debug(f"Arguments: {vars(args)}")
 
     # Handle reset offset command
     if args.reset_offset:
@@ -2714,8 +4981,92 @@ def main():
         logger.info("Scanning offset reset to 0. Will start from beginning of queries file.")
         return
 
-    engine_instance = Engine(args)
-    engine_instance.start()
+    # Handle auto-status command
+    if args.show_auto_status:
+        show_auto_status()
+        return
+
+    # Handle force auto-analysis command
+    if args.force_auto_analysis:
+        logger.info("Forcing immediate auto-analysis of all pending sites...")
+        db_manager = DatabaseManager(db_url=DATABASE_URL)
+        abuse_detector = EnhancedAbuseEmailDetector(db_manager)
+        auto_analyzer = AutoPhishingAnalyzer(db_manager, abuse_detector)
+
+        pending_sites = db_manager.get_pending_analysis_sites(limit=50)
+        if pending_sites:
+            logger.info(f"Found {len(pending_sites)} sites pending analysis")
+            for site_info in pending_sites:
+                try:
+                    logger.info(f"Analyzing: {site_info['url']}")
+                    auto_analyzer.analyze_detected_site(
+                        site_info["url"],
+                        site_info["keywords"].split(", ") if site_info["keywords"] else [],
+                    )
+                    time.sleep(5)  # Short delay between analyses
+                except Exception as e:
+                    logger.error(f"Error analyzing {site_info['url']}: {e}")
+            logger.info("Force auto-analysis completed")
+        else:
+            logger.info("No sites pending analysis")
+        return
+
+    # Handle auto-report now command
+    if args.auto_report_now:
+        logger.info("Forcing immediate processing of auto-report eligible sites...")
+        db_manager = DatabaseManager(db_url=DATABASE_URL)
+        abuse_detector = EnhancedAbuseEmailDetector(db_manager)
+        auto_analyzer = AutoPhishingAnalyzer(db_manager, abuse_detector)
+
+        # Create a temporary report manager for this operation
+        report_manager = AbuseReportManager(db_manager, abuse_detector, cc_emails=None, timeout=30)
+
+        processed = auto_analyzer.process_auto_reports(report_manager)
+        logger.info(f"Auto-reporting completed: {processed} sites processed")
+        return
+
+    # Print enhanced API configuration status
+    api_configs = []
+    if VIRUSTOTAL_API_KEY:
+        api_configs.append("VirusTotal API: Enabled")
+    else:
+        api_configs.append("VirusTotal API: Not configured")
+
+    if URLVOID_API_KEY:
+        api_configs.append("URLVoid API: Enabled")
+    else:
+        api_configs.append("URLVoid API: Not configured")
+
+    if PHISHTANK_API_KEY:
+        api_configs.append("PhishTank API: Enabled")
+    else:
+        api_configs.append("PhishTank API: Not configured")
+
+    logger.info("Enhanced API Configuration Status:")
+    for config in api_configs:
+        logger.info(f"   {config}")
+
+    logger.info("Auto-Analysis Configuration:")
+    logger.info(f"   Auto-Analysis: {'Enabled' if AUTO_ANALYSIS_ENABLED else 'Disabled'}")
+    if AUTO_ANALYSIS_ENABLED:
+        logger.info(f"   Auto-Report Threshold: {AUTO_REPORT_THRESHOLD_CONFIDENCE}% confidence")
+        logger.info(f"   Manual Review Threshold: {MANUAL_REVIEW_THRESHOLD_CONFIDENCE}% confidence")
+        logger.info(f"   Auto-Report Threat Levels: {', '.join(AUTO_REPORT_THREAT_LEVELS)}")
+    else:
+        logger.info("   Reason: No API keys configured or AUTO_MULTI_API_SCAN=False")
+
+    logger.debug("Creating engine instance...")
+    try:
+        engine_instance = Engine(args)
+        logger.debug("Engine instance created successfully")
+        logger.debug("Starting engine...")
+        engine_instance.start()
+    except Exception as e:
+        logger.error(f"Failed to create or start engine: {e}")
+        import traceback
+
+        logger.debug(f"Full traceback: {traceback.format_exc()}")
+        raise
 
 
 if __name__ == "__main__":
