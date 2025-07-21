@@ -2,3 +2,6 @@
 	path = scripts
 	url = https://github.com/JuanVilla424/scripts.git
 	branch = dev
+[submodule "smtp-relay"]
+	path = smtp-relay
+	url = https://github.com/JuanVilla424/smtp-relay.git

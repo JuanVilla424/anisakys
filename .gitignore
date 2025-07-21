@@ -15,6 +15,7 @@ poetry.lock
 
 # Environment variables
 .env
+.env.test
 .env.*.local
 
 # Logs
@@ -133,8 +134,10 @@ $RECYCLE.BIN/
 *.sln
 *.sw?
 
-positive_report.txt
-scan_results.db*
+*.db
 attachments
-offset.txt
-queries.txt
+*offset*
+positive_report.txt
+*queries*
+
+identifier.sqlite
