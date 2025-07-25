@@ -1,19 +1,14 @@
 #!/usr/bin/env python3
 """
-Enhanced Anisakys Phishing Detection Engine with Multi-API Integration
+Enhanced Anisakys Phishing Detection Engine with Grinder Integration
 
-This script scans and processes phishing sites with improved abuse email detection,
-REST API capabilities, and multi-API validation using VirusTotal, URLVoid, and PhishTank.
+This script now includes bidirectional threat intelligence integration with Grinder,
+featuring API key authentication and automated IP reporting capabilities.
 
 Usage examples:
   ./anisakys.py --timeout 30 --log-level DEBUG
-  ./anisakys.py --report https://site.domain.com --abuse-email abuse@domain.com
-  ./anisakys.py --process-reports --attachment /path/to/file.pdf --cc "cc1@example.com, cc2@example.com"
-  ./anisakys.py --threads-only --log-level DEBUG
-  ./anisakys.py --regen-queries
-  ./anisakys.py --test-report --abuse-email your-test@example.com
-  ./anisakys.py --start-api --api-port 8080  # Start REST API server
-  ./anisakys.py --multi-api-scan --url https://suspicious-site.com  # Multi-API validation
+  ./anisakys.py --start-api --api-port 8080 --api-key your_anisakys_api_key
+  ./anisakys.py --multi-api-scan --url https://suspicious-site.com
 """
 
 import gc
@@ -48,6 +43,7 @@ from flask import Flask, request, jsonify
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import logging as flask_logging
+from functools import wraps
 
 from src.config import settings, CLOUDFLARE_IP_RANGES
 from src.logger import logger
@@ -68,10 +64,13 @@ VIRUSTOTAL_API_KEY = getattr(settings, "VIRUSTOTAL_API_KEY", None)
 URLVOID_API_KEY = getattr(settings, "URLVOID_API_KEY", None)
 PHISHTANK_API_KEY = getattr(settings, "PHISHTANK_API_KEY", None)
 
+# Grinder Integration Configuration
+GRINDER0X_API_URL = getattr(settings, "GRINDER0X_API_URL", None)
+GRINDER0X_API_KEY = getattr(settings, "GRINDER0X_API_KEY", None)
+
 # Auto-Analysis Configuration
 AUTO_MULTI_API_SCAN = getattr(settings, "AUTO_MULTI_API_SCAN", True)
 AUTO_REPORT_THRESHOLD_CONFIDENCE = getattr(settings, "AUTO_REPORT_THRESHOLD_CONFIDENCE", 85)
-AUTO_REPORT_THREAT_LEVELS = getattr(settings, "AUTO_REPORT_THREAT_LEVELS", ["critical", "high"])
 MANUAL_REVIEW_THRESHOLD_CONFIDENCE = getattr(settings, "MANUAL_REVIEW_THRESHOLD_CONFIDENCE", 70)
 AUTO_ANALYSIS_DELAY_SECONDS = getattr(settings, "AUTO_ANALYSIS_DELAY_SECONDS", 30)
 
@@ -79,6 +78,9 @@ AUTO_ANALYSIS_DELAY_SECONDS = getattr(settings, "AUTO_ANALYSIS_DELAY_SECONDS", 3
 AUTO_ANALYSIS_ENABLED = AUTO_MULTI_API_SCAN and (
     VIRUSTOTAL_API_KEY or URLVOID_API_KEY or PHISHTANK_API_KEY
 )
+
+# Grinder integration is enabled if both URL and API key are configured
+GRINDER_INTEGRATION_ENABLED = bool(GRINDER0X_API_URL and GRINDER0X_API_KEY)
 
 # Constants
 ALLOWED_HEAD_STATUS = {200, 201, 202, 203, 204, 205, 206, 301, 302, 403, 405, 503, 504}
@@ -309,8 +311,325 @@ ENHANCED_REGISTRAR_ABUSE_DB = {
     "icann": "abuse@icann.org",
 }
 
+# AbuseIPDB Category mappings for Grinder reports
+ABUSEIPDB_CATEGORIES = {
+    "phishing": 7,
+    "hacking": 15,
+    "web_app_attack": 21,
+    "bad_web_bot": 19,
+    "exploited_host": 20,
+    "malware": 16,
+    "botnet": 14,
+    "spam": 10,
+    "fraud": 18,
+}
+
 # Global engine for database operations
 db_engine = create_engine(DATABASE_URL, pool_pre_ping=True, echo=False)
+
+
+class GrinderReportClient:
+    """
+    HTTP client for reporting malicious IPs to Grinder system.
+
+    This class handles the bidirectional threat intelligence integration,
+    automatically reporting detected phishing infrastructure to Grinder
+    for subsequent AbuseIPDB reporting.
+    """
+
+    def __init__(self, api_url: str = None, api_key: str = None):
+        """
+        Initialize Grinder report client.
+
+        Args:
+            api_url (str, optional): Grinder API URL. Defaults to settings.
+            api_key (str, optional): Grinder API key. Defaults to settings.
+        """
+        self.api_url = api_url or GRINDER0X_API_URL
+        self.api_key = api_key or GRINDER0X_API_KEY
+        self.session = requests.Session()
+
+        if self.api_key:
+            self.session.headers.update(
+                {
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                    "User-Agent": "Anisakys-Threat-Intelligence/1.0",
+                }
+            )
+
+        self.enabled = bool(self.api_url and self.api_key)
+
+        if self.enabled:
+            logger.info(f"🔗 Grinder integration enabled: {self.api_url}")
+        else:
+            logger.warning("⚠️  Grinder integration disabled: Missing API URL or key")
+
+    def report_malicious_ip(
+        self, ip_address: str, detection_context: Dict[str, Any], confidence: int = 90
+    ) -> Dict[str, Any]:
+        """
+        Report a malicious IP address to Grinder system.
+
+        Args:
+            ip_address (str): The malicious IP address to report
+            detection_context (Dict[str, Any]): Context about the detection
+            confidence (int): Confidence level (0-100)
+
+        Returns:
+            Dict[str, Any]: Report submission result
+        """
+        if not self.enabled:
+            logger.debug("🔗 Grinder integration disabled, skipping IP report")
+            return {"status": "disabled", "message": "Grinder integration not configured"}
+
+        if not self._validate_ip_address(ip_address):
+            logger.error(f"❌ Invalid IP address format: {ip_address}")
+            return {"status": "error", "message": "Invalid IP address format"}
+
+        try:
+            # Determine appropriate categories based on detection context
+            categories = self._determine_categories(detection_context)
+
+            # Build the report payload
+            payload = {
+                "ip_address": ip_address,
+                "categories": categories,
+                "comment": self._build_comment(detection_context),
+                "confidence": min(max(confidence, 0), 100),  # Clamp between 0-100
+                "source": "anisakys_threat_intelligence",
+                "additional_info": {
+                    "detection_method": detection_context.get("method", "domain_analysis"),
+                    "related_domains": detection_context.get("domains", []),
+                    "severity": detection_context.get("severity", "high"),
+                    "threat_level": detection_context.get("threat_level", "unknown"),
+                    "analysis_timestamp": datetime.datetime.now().isoformat(),
+                    "keywords_detected": detection_context.get("keywords", []),
+                    "api_confidence": detection_context.get("api_confidence", 0),
+                },
+            }
+
+            # Send the report
+            endpoint_url = f"{self.api_url.rstrip('/')}/api/v1/report-ip"
+            logger.info(f"📤 Reporting malicious IP {ip_address} to Grinder: {endpoint_url}")
+
+            response = self.session.post(endpoint_url, json=payload, timeout=30)
+
+            if response.status_code == 200:
+                result = response.json()
+                logger.info(
+                    f"✅ Successfully reported IP {ip_address} to Grinder "
+                    f"(Categories: {categories}, Confidence: {confidence}%)"
+                )
+                return {
+                    "status": "success",
+                    "ip_address": ip_address,
+                    "grinder_response": result,
+                    "categories": categories,
+                    "confidence": confidence,
+                }
+
+            elif response.status_code == 429:
+                logger.warning(f"⏰ Rate limited when reporting IP {ip_address} to Grinder")
+                return {
+                    "status": "rate_limited",
+                    "message": "Rate limited by Grinder API",
+                    "retry_after": response.headers.get("Retry-After", "Unknown"),
+                }
+
+            elif response.status_code == 400:
+                error_details = response.json() if response.content else {"error": "Bad request"}
+                logger.error(f"❌ Bad request when reporting IP {ip_address}: {error_details}")
+                return {
+                    "status": "bad_request",
+                    "message": error_details.get("error", "Bad request"),
+                    "details": error_details,
+                }
+
+            else:
+                logger.error(
+                    f"❌ Failed to report IP {ip_address} to Grinder: "
+                    f"HTTP {response.status_code} - {response.text}"
+                )
+                return {
+                    "status": "error",
+                    "message": f"HTTP {response.status_code}",
+                    "response_text": response.text,
+                }
+
+        except requests.exceptions.Timeout:
+            logger.error(f"⏰ Timeout reporting IP {ip_address} to Grinder")
+            return {"status": "timeout", "message": "Request timeout"}
+
+        except requests.exceptions.ConnectionError as e:
+            logger.error(f"🌐 Connection error reporting IP {ip_address} to Grinder: {e}")
+            return {"status": "connection_error", "message": str(e)}
+
+        except Exception as e:
+            logger.error(f"❌ Unexpected error reporting IP {ip_address} to Grinder: {e}")
+            return {"status": "error", "message": str(e)}
+
+    def _validate_ip_address(self, ip_address: str) -> bool:
+        """
+        Validate IP address format.
+
+        Args:
+            ip_address (str): IP address to validate
+
+        Returns:
+            bool: True if valid, False otherwise
+        """
+        try:
+            ipaddress.ip_address(ip_address)
+            return True
+        except ValueError:
+            return False
+
+    def _determine_categories(self, detection_context: Dict[str, Any]) -> List[int]:
+        """
+        Determine appropriate AbuseIPDB categories based on detection context.
+
+        Args:
+            detection_context (Dict[str, Any]): Detection context information
+
+        Returns:
+            List[int]: List of category IDs
+        """
+        categories = []
+
+        # Always add phishing category for phishing sites
+        categories.append(ABUSEIPDB_CATEGORIES["phishing"])
+
+        # Add additional categories based on threat level and context
+        threat_level = detection_context.get("threat_level", "").lower()
+        keywords = detection_context.get("keywords", [])
+        method = detection_context.get("method", "").lower()
+
+        if threat_level in ["critical", "high"]:
+            categories.append(ABUSEIPDB_CATEGORIES["hacking"])
+
+        # Web application attack if web-related keywords detected
+        web_keywords = ["login", "password", "account", "banking", "payment"]
+        if any(kw.lower() in [k.lower() for k in keywords] for kw in web_keywords):
+            categories.append(ABUSEIPDB_CATEGORIES["web_app_attack"])
+
+        # Malware if detected through VirusTotal
+        if "virustotal" in method:
+            categories.append(ABUSEIPDB_CATEGORIES["malware"])
+
+        # Remove duplicates and return
+        return list(set(categories))
+
+    def _build_comment(self, detection_context: Dict[str, Any]) -> str:
+        """
+        Build a comprehensive comment for the abuse report.
+
+        Args:
+            detection_context (Dict[str, Any]): Detection context information
+
+        Returns:
+            str: Formatted comment for the report
+        """
+        threat_level = detection_context.get("threat_level", "unknown").upper()
+        domains = detection_context.get("domains", [])
+        keywords = detection_context.get("keywords", [])
+        api_confidence = detection_context.get("api_confidence", 0)
+
+        comment_parts = [
+            f"Phishing infrastructure detected by Anisakys threat intelligence system.",
+            f"Threat Level: {threat_level}",
+        ]
+
+        if api_confidence > 0:
+            comment_parts.append(f"API Confidence: {api_confidence}%")
+
+        if domains:
+            domain_list = ", ".join(domains[:5])  # Limit to first 5 domains
+            if len(domains) > 5:
+                domain_list += f" (and {len(domains) - 5} more)"
+            comment_parts.append(f"Related domains: {domain_list}")
+
+        if keywords:
+            keyword_list = ", ".join(keywords[:5])  # Limit to first 5 keywords
+            if len(keywords) > 5:
+                keyword_list += f" (and {len(keywords) - 5} more)"
+            comment_parts.append(f"Detection keywords: {keyword_list}")
+
+        comment_parts.append("Automated report from Anisakys phishing detection engine.")
+
+        return " | ".join(comment_parts)
+
+    def test_connection(self) -> Dict[str, Any]:
+        """
+        Test connection to Grinder API.
+
+        Returns:
+            Dict[str, Any]: Connection test result
+        """
+        if not self.enabled:
+            return {"status": "disabled", "message": "Grinder integration not configured"}
+
+        try:
+            # Try to access a test endpoint or health check
+            health_url = f"{self.api_url.rstrip('/')}/api/v1/health"
+            response = self.session.get(health_url, timeout=10)
+
+            if response.status_code == 200:
+                logger.info("✅ Grinder API connection test successful")
+                return {
+                    "status": "success",
+                    "message": "Successfully connected to Grinder API",
+                    "api_url": self.api_url,
+                }
+            else:
+                logger.warning(f"⚠️  Grinder API responded with {response.status_code}")
+                return {
+                    "status": "warning",
+                    "message": f"Grinder API responded with HTTP {response.status_code}",
+                    "api_url": self.api_url,
+                }
+
+        except Exception as e:
+            logger.error(f"❌ Failed to connect to Grinder API: {e}")
+            return {
+                "status": "error",
+                "message": f"Connection failed: {str(e)}",
+                "api_url": self.api_url,
+            }
+
+
+def require_api_key(f):
+    """
+    Decorator to require API key authentication for API endpoints.
+
+    Expects API key in Authorization header: Bearer <key>
+    """
+
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        auth_header = request.headers.get("Authorization", "")
+
+        if not auth_header.startswith("Bearer "):
+            logger.warning(f"🔐 Unauthorized API access attempt from {request.remote_addr}")
+            return jsonify({"error": "Authorization header required with Bearer token"}), 401
+
+        provided_key = auth_header[7:]  # Remove 'Bearer ' prefix
+
+        # Get the expected API key from Flask app config or environment
+        expected_key = getattr(flask_app, "api_key", None) if "flask_app" in globals() else None
+
+        if not expected_key:
+            logger.error("🔐 API key not configured for validation")
+            return jsonify({"error": "API authentication not properly configured"}), 500
+
+        if provided_key != expected_key:
+            logger.warning(f"🔐 Invalid API key provided from {request.remote_addr}")
+            return jsonify({"error": "Invalid API key"}), 401
+
+        logger.debug(f"🔐 Valid API key provided from {request.remote_addr}")
+        return f(*args, **kwargs)
+
+    return decorated_function
 
 
 class VirusTotalIntegration:
@@ -1640,14 +1959,27 @@ class EnhancedAbuseEmailDetector:
 
 
 class PhishingAPI:
-    """REST API for external phishing reports with multi-API integration."""
+    """REST API for external phishing reports with multi-API integration and Grinder integration."""
 
-    def __init__(self, db_manager, abuse_detector):
+    def __init__(self, db_manager, abuse_detector, api_key: str = None):
+        """
+        Initialize the Phishing API with authentication support and Grinder integration.
+
+        Args:
+            db_manager: Database manager instance
+            abuse_detector: Abuse email detector instance
+            api_key (str, optional): API key for authentication
+        """
         self.db_manager = db_manager
         self.abuse_detector = abuse_detector
         self.multi_api_validator = MultiAPIValidator()
+        self.grinder_client = GrinderReportClient()
+        self.api_key = api_key
+
+        # Initialize Flask app
         self.app = Flask(__name__)
         self.app.config["JSON_SORT_KEYS"] = False
+        self.app.api_key = api_key  # Store API key in app config
 
         # Configure Flask logging to be less verbose
         flask_logging.getLogger("werkzeug").setLevel(flask_logging.WARNING)
@@ -1661,13 +1993,22 @@ class PhishingAPI:
 
         self.setup_routes()
 
+        # Test Grinder connection on startup
+        if GRINDER_INTEGRATION_ENABLED:
+            connection_test = self.grinder_client.test_connection()
+            if connection_test["status"] == "success":
+                logger.info("🔗 Grinder integration ready for IP reporting")
+            else:
+                logger.warning(f"⚠️  Grinder connection issue: {connection_test['message']}")
+
     def setup_routes(self):
-        """Setup API routes."""
+        """Setup API routes with authentication and Grinder integration."""
 
         @self.app.route("/api/v1/report", methods=["POST"])
         @self.limiter.limit("5 per minute")
+        @require_api_key
         def report_phishing():
-            """Report a phishing site via API."""
+            """Report a phishing site via API with authentication."""
             try:
                 data = request.get_json()
 
@@ -1683,7 +2024,7 @@ class PhishingAPI:
                     return jsonify({"error": "Invalid URL format"}), 400
 
                 abuse_email = data.get("abuse_email")
-                source = data.get("source", "api")
+                source = data.get("source", "external_api")
                 priority = data.get("priority", "medium")
                 description = data.get("description", "")
 
@@ -1696,6 +2037,38 @@ class PhishingAPI:
                     url, abuse_email, source, priority, description
                 )
 
+                # If successful, also try to report the IP to Grinder
+                if result.get("status") in ["created", "updated"] and GRINDER_INTEGRATION_ENABLED:
+                    try:
+                        domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+                        ip_address = socket.gethostbyname(domain)
+
+                        detection_context = {
+                            "method": "external_report",
+                            "domains": [domain],
+                            "severity": "high" if priority == "high" else "medium",
+                            "threat_level": "high",
+                            "keywords": ["external_report"],
+                            "api_confidence": 85,  # Default confidence for external reports
+                        }
+
+                        grinder_result = self.grinder_client.report_malicious_ip(
+                            ip_address, detection_context, confidence=85
+                        )
+
+                        if grinder_result.get("status") == "success":
+                            result["grinder_report"] = grinder_result
+                            logger.info(
+                                f"✅ Successfully reported IP {ip_address} to Grinder via API"
+                            )
+                        else:
+                            logger.warning(f"⚠️  Failed to report IP to Grinder: {grinder_result}")
+                            result["grinder_report"] = grinder_result
+
+                    except Exception as e:
+                        logger.warning(f"⚠️  Could not report IP to Grinder: {e}")
+                        result["grinder_report"] = {"status": "error", "message": str(e)}
+
                 return jsonify(result), 200
 
             except Exception as e:
@@ -1704,8 +2077,9 @@ class PhishingAPI:
 
         @self.app.route("/api/v1/multi-scan", methods=["POST"])
         @self.limiter.limit("3 per minute")
+        @require_api_key
         def multi_api_scan():
-            """Perform multi-API validation scan."""
+            """Perform multi-API validation scan with authentication."""
             try:
                 data = request.get_json()
 
@@ -1731,8 +2105,9 @@ class PhishingAPI:
 
         @self.app.route("/api/v1/status/<path:url>", methods=["GET"])
         @self.limiter.limit("10 per minute")
+        @require_api_key
         def get_report_status(url):
-            """Get the status of a reported URL."""
+            """Get the status of a reported URL with authentication."""
             try:
                 if not validators.url(url):
                     return jsonify({"error": "Invalid URL format"}), 400
@@ -1777,10 +2152,34 @@ class PhishingAPI:
                 logger.error(f"❌ API error in get_report_status: {e}")
                 return jsonify({"error": "Internal server error"}), 500
 
+        @self.app.route("/api/v1/grinder/test", methods=["POST"])
+        @self.limiter.limit("5 per minute")
+        @require_api_key
+        def test_grinder_integration():
+            """Test Grinder integration with authentication."""
+            try:
+                if not GRINDER_INTEGRATION_ENABLED:
+                    return (
+                        jsonify(
+                            {"status": "disabled", "message": "Grinder integration not configured"}
+                        ),
+                        200,
+                    )
+
+                connection_test = self.grinder_client.test_connection()
+
+                status_code = 200 if connection_test["status"] == "success" else 500
+                return jsonify(connection_test), status_code
+
+            except Exception as e:
+                logger.error(f"❌ API error in test_grinder_integration: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
         @self.app.route("/api/v1/stats", methods=["GET"])
         @self.limiter.limit("20 per minute")
+        @require_api_key
         def get_stats():
-            """Get statistics about phishing reports."""
+            """Get statistics about phishing reports with authentication."""
             try:
                 with self.db_manager.engine.begin() as conn:
                     stats = {
@@ -1799,6 +2198,10 @@ class PhishingAPI:
                         "manual_flags": conn.execute(
                             text("SELECT COUNT(*) FROM phishing_sites WHERE manual_flag = 1")
                         ).scalar(),
+                        "grinder_integration": {
+                            "enabled": GRINDER_INTEGRATION_ENABLED,
+                            "api_url": GRINDER0X_API_URL if GRINDER_INTEGRATION_ENABLED else None,
+                        },
                     }
 
                     # Recent activity (last 7 days)
@@ -1818,9 +2221,16 @@ class PhishingAPI:
 
         @self.app.route("/api/v1/health", methods=["GET"])
         def health_check():
-            """Health check endpoint."""
+            """Health check endpoint (no authentication required)."""
             return (
-                jsonify({"status": "healthy", "timestamp": datetime.datetime.now().isoformat()}),
+                jsonify(
+                    {
+                        "status": "healthy",
+                        "timestamp": datetime.datetime.now().isoformat(),
+                        "grinder_integration": GRINDER_INTEGRATION_ENABLED,
+                        "api_authentication": bool(self.api_key),
+                    }
+                ),
                 200,
             )
 
@@ -1915,200 +2325,27 @@ class PhishingAPI:
 
     def run(self, host: str = "0.0.0.0", port: int = 8080, debug: bool = False):
         """Run the API server."""
+        auth_status = "with API key authentication" if self.api_key else "without authentication"
+        grinder_status = (
+            "with Grinder integration"
+            if GRINDER_INTEGRATION_ENABLED
+            else "without Grinder integration"
+        )
+
         logger.info(f"🚀 Starting Enhanced Phishing API server on {host}:{port}")
+        logger.info(f"🔐 API Security: {auth_status}")
+        logger.info(f"🔗 Threat Intelligence: {grinder_status}")
+
+        if self.api_key:
+            logger.info("🔑 API endpoints require Bearer token authentication")
+        else:
+            logger.warning("⚠️  API running without authentication - not recommended for production")
+
         self.app.run(host=host, port=port, debug=debug)
 
 
-BATCH_SIZE = DynamicBatchConfig.get_batch_size()
-
-
-def generate_queries_file(keywords: List[str], domains: List[str]) -> None:
-    """Generate queries file with all keyword/domain combinations."""
-    total = 0
-    with open(QUERIES_FILE, "w") as f:
-        for i in range(1, len(keywords) + 1):
-            for p in permutations(keywords, i):
-                for q in ["-".join(p), "".join(p)]:
-                    for d in domains:
-                        f.write(f"{q}{d}\n")
-                        total += 1
-    logger.info(f"📄 Generated full query list with {total} lines.")
-
-
-def get_ip_info(domain: str) -> Tuple[Optional[str], Optional[str]]:
-    """Get IP address and ASN provider information for a domain."""
-    try:
-        resolved_ip = socket.gethostbyname(domain)
-        obj = IPWhois(resolved_ip)
-        res = obj.lookup_rdap(depth=1)
-        asn_provider = res.get("network", {}).get("name", "")
-        return resolved_ip, asn_provider
-    except Exception as e:
-        logger.error(f"❌ Failed to get IP info for {domain}: {e}")
-        return None, None
-
-
-def is_cloudflare_ip(ip: str) -> bool:
-    """Check if an IP address belongs to Cloudflare."""
-    try:
-        ip_obj = ipaddress.ip_address(ip)
-        for net in CLOUDFLARE_IP_RANGES:
-            if ip_obj in net:
-                return True
-        return False
-    except Exception as e:
-        logger.error(f"❌ Error checking Cloudflare IP: {e}")
-        return False
-
-
-class PhishingUtils:
-    """Utility functions for phishing detection and processing."""
-
-    @staticmethod
-    def store_scan_result(
-        url: str, response_code: int, found_keywords: List[str], db_file: str = DATABASE_URL
-    ) -> None:
-        """Store scan result in database."""
-        engine = create_engine(db_file, pool_pre_ping=True, echo=False)
-        with engine.begin() as conn:
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            keywords_str = ", ".join(found_keywords) if found_keywords else ""
-
-            result = conn.execute(
-                text("SELECT id, first_seen, count FROM scan_results WHERE url=:url"), {"url": url}
-            ).fetchone()
-
-            if result:
-                new_count = result[2] + 1
-                conn.execute(
-                    text(
-                        """
-                        UPDATE scan_results
-                        SET last_seen=:timestamp, response_code=:response_code,
-                            found_keywords=:keywords_str, count=:new_count
-                        WHERE url=:url
-                    """
-                    ),
-                    {
-                        "timestamp": timestamp,
-                        "response_code": response_code,
-                        "keywords_str": keywords_str,
-                        "new_count": new_count,
-                        "url": url,
-                    },
-                )
-            else:
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO scan_results
-                        (url, first_seen, last_seen, response_code, found_keywords, count)
-                        VALUES (:url, :timestamp, :timestamp, :response_code, :keywords_str, 1)
-                    """
-                    ),
-                    {
-                        "url": url,
-                        "timestamp": timestamp,
-                        "response_code": response_code,
-                        "keywords_str": keywords_str,
-                    },
-                )
-            logger.info(f"💾 Stored scan result for {url}")
-        engine.dispose()
-
-    @staticmethod
-    def update_scan_result_response_code(url: str, response_code: int) -> None:
-        """Update response code for existing scan result."""
-        with db_engine.begin() as conn:
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            result = conn.execute(
-                text("SELECT id, count FROM scan_results WHERE url=:url"), {"url": url}
-            ).fetchone()
-
-            if result:
-                new_count = result[1] + 1
-                conn.execute(
-                    text(
-                        """
-                        UPDATE scan_results
-                        SET last_seen=:timestamp, response_code=:response_code, count=:new_count
-                        WHERE url=:url
-                    """
-                    ),
-                    {
-                        "timestamp": timestamp,
-                        "response_code": response_code,
-                        "new_count": new_count,
-                        "url": url,
-                    },
-                )
-            else:
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO scan_results
-                        (url, first_seen, last_seen, response_code, found_keywords, count)
-                        VALUES (:url, :timestamp, :timestamp, :response_code, '', 1)
-                    """
-                    ),
-                    {"url": url, "timestamp": timestamp, "response_code": response_code},
-                )
-            logger.info(f"💾 Updated scan result response code for {url}")
-
-    @staticmethod
-    def log_positive_result(url: str, found_keywords: List[str]) -> None:
-        """Log positive phishing detection result."""
-        log_file = "positive_report.txt"
-        entry = (
-            f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} - {url}: {', '.join(found_keywords)}\n"
-        )
-
-        try:
-            with open(log_file, "r+") as f:
-                if url in f.read():
-                    logger.debug(f"⏭️ Duplicate entry skipped: {url}")
-                    return
-                f.write(entry)
-        except FileNotFoundError:
-            with open(log_file, "w") as f:
-                f.write(entry)
-
-        logger.info(f"🎯 Logged phishing match: {url}")
-
-    @staticmethod
-    def determine_site_status(
-        url: str,
-        resolved_ip: Optional[str],
-        current_status: str,
-        current_takedown: Optional[str],
-        timestamp: str,
-        timeout: int,
-    ) -> Tuple[str, Optional[str]]:
-        """Determine the site's status ("up" or "down") and takedown date."""
-        if not resolved_ip:
-            new_status = "down"
-            new_takedown = current_takedown if current_status == "down" else timestamp
-        else:
-            try:
-                response = requests.get(
-                    url, timeout=timeout, headers={"User-Agent": DEFAULT_USER_AGENT}
-                )
-                if response.status_code == 200:
-                    if "suspended" in response.text.lower():
-                        new_status = "down"
-                        new_takedown = current_takedown if current_status == "down" else timestamp
-                    else:
-                        new_status = "up"
-                        new_takedown = None
-                else:
-                    new_status = "down"
-                    new_takedown = current_takedown if current_status == "down" else timestamp
-            except Exception as e:
-                logger.error(f"❌ GET request failed for {url}: {e}")
-                new_status = "down"
-                new_takedown = current_takedown if current_status == "down" else timestamp
-
-        return new_status, new_takedown
+# Global variable to store flask app for decorator access
+flask_app = None
 
 
 def upgrade_phishing_db():
@@ -2573,7 +2810,7 @@ def basic_whois_lookup(url: str) -> dict:
 
 
 class AbuseReportManager:
-    """Enhanced abuse report manager with improved email detection and multi-API integration."""
+    """Enhanced abuse report manager with Grinder integration for IP reporting."""
 
     def __init__(
         self,
@@ -2586,6 +2823,8 @@ class AbuseReportManager:
         self.db_manager = db_manager
         self.abuse_detector = abuse_detector
         self.multi_api_validator = MultiAPIValidator()
+        self.grinder_client = GrinderReportClient()
+
         if cc_emails is None:
             default_cc = getattr(settings, "DEFAULT_CC_ESCALATION_LEVEL2", "")
             self.cc_emails = (
@@ -2595,6 +2834,63 @@ class AbuseReportManager:
             self.cc_emails = cc_emails
         self.timeout = timeout
         self.monitoring_event = monitoring_event
+
+    def report_ip_to_grinder(
+        self, ip_address: str, url: str, detection_context: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Report malicious IP to Grinder with comprehensive context.
+
+        Args:
+            ip_address (str): The malicious IP address
+            url (str): The phishing URL associated with this IP
+            detection_context (Dict[str, Any]): Detection context and metadata
+
+        Returns:
+            Dict[str, Any]: Report result
+        """
+        if not GRINDER_INTEGRATION_ENABLED:
+            logger.debug("🔗 Grinder integration disabled, skipping IP report")
+            return {"status": "disabled", "message": "Grinder integration not configured"}
+
+        # Enhance detection context with URL-specific information
+        enhanced_context = detection_context.copy()
+        enhanced_context.update(
+            {
+                "domains": enhanced_context.get("domains", [])
+                + [re.sub(r"^https?://", "", url).strip().split("/")[0]],
+                "source_url": url,
+                "detection_timestamp": datetime.datetime.now().isoformat(),
+            }
+        )
+
+        # Determine confidence based on available data
+        confidence = enhanced_context.get("api_confidence", 0)
+        if confidence == 0:
+            # Fallback confidence calculation
+            threat_level = enhanced_context.get("threat_level", "").lower()
+            if threat_level == "critical":
+                confidence = 95
+            elif threat_level == "high":
+                confidence = 90
+            elif threat_level == "medium":
+                confidence = 75
+            else:
+                confidence = 60
+
+        result = self.grinder_client.report_malicious_ip(
+            ip_address, enhanced_context, confidence=confidence
+        )
+
+        # Log the result
+        if result.get("status") == "success":
+            logger.info(f"🔗 Successfully reported IP {ip_address} to Grinder for URL {url}")
+        elif result.get("status") == "rate_limited":
+            logger.warning(f"⏰ Rate limited when reporting IP {ip_address} to Grinder")
+        else:
+            logger.warning(f"⚠️  Failed to report IP {ip_address} to Grinder: {result}")
+
+        return result
 
     def get_enhanced_abuse_emails(self, whois_data, domain: str) -> List[str]:
         """Get abuse emails using enhanced detection methods."""
@@ -2625,7 +2921,7 @@ class AbuseReportManager:
         multi_api_results: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """
-        Send abuse report with enhanced error handling, multiple attachments support, and multi-API results.
+        Send abuse report with enhanced error handling and Grinder IP reporting integration.
 
         Args:
             abuse_emails (List[str]): List of abuse email addresses
@@ -2648,6 +2944,57 @@ class AbuseReportManager:
         smtp_pass = getattr(settings, "SMTP_PASS", "")
         sender_email = getattr(settings, "ABUSE_EMAIL_SENDER")
         subject = f"{getattr(settings, 'ABUSE_EMAIL_SUBJECT')} for {site_url}"
+
+        # Report IP to Grinder if not in test mode and integration is enabled
+        grinder_report_result = None
+        if not test_mode and GRINDER_INTEGRATION_ENABLED:
+            try:
+                domain = re.sub(r"^https?://", "", site_url).strip().split("/")[0]
+                ip_address = socket.gethostbyname(domain)
+
+                # Build detection context for Grinder reporting
+                detection_context = {
+                    "method": "abuse_report_pipeline",
+                    "domains": [domain],
+                    "severity": "high",
+                    "threat_level": (
+                        multi_api_results.get("aggregated_threat_level", "high")
+                        if multi_api_results
+                        else "high"
+                    ),
+                    "keywords": ["phishing", "abuse_report"],
+                    "api_confidence": (
+                        multi_api_results.get("confidence_score", 0) if multi_api_results else 0
+                    ),
+                }
+
+                # Add multi-API context if available
+                if multi_api_results:
+                    vt_result = multi_api_results.get("virustotal", {})
+                    if not vt_result.get("error") and vt_result.get("malicious", 0) > 0:
+                        detection_context["virustotal_detections"] = vt_result.get("malicious", 0)
+                        detection_context["virustotal_total"] = vt_result.get("total_engines", 0)
+
+                    uv_result = multi_api_results.get("urlvoid", {})
+                    if not uv_result.get("error"):
+                        detection_context["urlvoid_safety_score"] = uv_result.get(
+                            "safety_score", 100
+                        )
+                        detection_context["urlvoid_blacklists"] = len(
+                            uv_result.get("blacklists", [])
+                        )
+
+                    pt_result = multi_api_results.get("phishtank", {})
+                    if not pt_result.get("error") and pt_result.get("is_phishing"):
+                        detection_context["phishtank_verified"] = pt_result.get("verified", False)
+
+                grinder_report_result = self.report_ip_to_grinder(
+                    ip_address, site_url, detection_context
+                )
+
+            except Exception as e:
+                logger.warning(f"⚠️  Could not report IP to Grinder during abuse report: {e}")
+                grinder_report_result = {"status": "error", "message": str(e)}
 
         # Prepare attachment filenames for template
         attachment_filenames = (
@@ -2723,6 +3070,20 @@ class AbuseReportManager:
 
             api_summary += "\n"
 
+        # Add Grinder integration information to API summary
+        if grinder_report_result and GRINDER_INTEGRATION_ENABLED:
+            api_summary += f"🔗 **Threat Intelligence Integration**\n"
+            if grinder_report_result.get("status") == "success":
+                categories = grinder_report_result.get("categories", [])
+                api_summary += f"✅ **IP reported to threat intelligence system**\n"
+                api_summary += f"📊 **Categories**: {', '.join(map(str, categories))}\n"
+                api_summary += f"🎯 **Confidence**: {grinder_report_result.get('confidence', 0)}%\n"
+            elif grinder_report_result.get("status") == "rate_limited":
+                api_summary += f"⏰ **Rate limited** - IP will be reported later\n"
+            else:
+                api_summary += f"⚠️ **IP reporting failed**: {grinder_report_result.get('message', 'Unknown error')}\n"
+            api_summary += "\n"
+
         # Render email template
         try:
             env_jinja = Environment(
@@ -2739,6 +3100,8 @@ class AbuseReportManager:
                 threat_level=threat_level,
                 confidence_score=confidence_score,
                 multi_api_results=multi_api_results,
+                grinder_integration=GRINDER_INTEGRATION_ENABLED,
+                grinder_report=grinder_report_result,
             )
             logger.debug("📧 Rendered email content (first 300 chars): " + html_content[:300])
         except Exception as render_err:
@@ -2832,6 +3195,8 @@ class AbuseReportManager:
                 # Send email
                 attachment_info = ""
                 api_info = ""
+                grinder_info = ""
+
                 if attached_files:
                     if len(attached_files) == 1:
                         attachment_info = f" with attachment {attached_files[0]}"
@@ -2843,13 +3208,16 @@ class AbuseReportManager:
                 if multi_api_results:
                     api_info = f" [Threat: {threat_level}, Confidence: {confidence_score}%]"
 
+                if grinder_report_result and grinder_report_result.get("status") == "success":
+                    grinder_info = " [IP reported to threat intelligence]"
+
                 with smtplib.SMTP(smtp_host, smtp_port) as server:
                     if smtp_user and smtp_pass:
                         server.login(smtp_user, smtp_pass)
                     server.sendmail(sender_email, recipients, msg.as_string())
 
                 logger.info(
-                    f"✅ Enhanced abuse report sent to {primary} for site {site_url}{attachment_info}{api_info}; "
+                    f"✅ Enhanced abuse report sent to {primary} for site {site_url}{attachment_info}{api_info}{grinder_info}; "
                     f"CC: {final_cc if final_cc else 'None'}"
                 )
                 success_count += 1
@@ -3677,7 +4045,7 @@ class AutoPhishingAnalyzer:
 
         # High threat level with high confidence
         elif (
-            threat_level in AUTO_REPORT_THREAT_LEVELS
+            threat_level in ["critical", "high"]
             and confidence_score >= AUTO_REPORT_THRESHOLD_CONFIDENCE
         ):
             decision["auto_report"] = True
@@ -3897,6 +4265,195 @@ class AutoPhishingAnalyzer:
         except Exception as e:
             logger.error(f"❌ Error in process_auto_reports: {e}")
             return 0
+
+
+def get_ip_info(domain: str) -> Tuple[Optional[str], Optional[str]]:
+    """Get IP address and ASN provider information for a domain."""
+    try:
+        resolved_ip = socket.gethostbyname(domain)
+        obj = IPWhois(resolved_ip)
+        res = obj.lookup_rdap(depth=1)
+        asn_provider = res.get("network", {}).get("name", "")
+        return resolved_ip, asn_provider
+    except Exception as e:
+        logger.error(f"❌ Failed to get IP info for {domain}: {e}")
+        return None, None
+
+
+def is_cloudflare_ip(ip: str) -> bool:
+    """Check if an IP address belongs to Cloudflare."""
+    try:
+        ip_obj = ipaddress.ip_address(ip)
+        for net in CLOUDFLARE_IP_RANGES:
+            if ip_obj in net:
+                return True
+        return False
+    except Exception as e:
+        logger.error(f"❌ Error checking Cloudflare IP: {e}")
+        return False
+
+
+class PhishingUtils:
+    """Utility functions for phishing detection and processing."""
+
+    @staticmethod
+    def store_scan_result(
+        url: str, response_code: int, found_keywords: List[str], db_file: str = DATABASE_URL
+    ) -> None:
+        """Store scan result in database."""
+        engine = create_engine(db_file, pool_pre_ping=True, echo=False)
+        with engine.begin() as conn:
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            keywords_str = ", ".join(found_keywords) if found_keywords else ""
+
+            result = conn.execute(
+                text("SELECT id, first_seen, count FROM scan_results WHERE url=:url"), {"url": url}
+            ).fetchone()
+
+            if result:
+                new_count = result[2] + 1
+                conn.execute(
+                    text(
+                        """
+                        UPDATE scan_results
+                        SET last_seen=:timestamp, response_code=:response_code,
+                            found_keywords=:keywords_str, count=:new_count
+                        WHERE url=:url
+                    """
+                    ),
+                    {
+                        "timestamp": timestamp,
+                        "response_code": response_code,
+                        "keywords_str": keywords_str,
+                        "new_count": new_count,
+                        "url": url,
+                    },
+                )
+            else:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO scan_results
+                        (url, first_seen, last_seen, response_code, found_keywords, count)
+                        VALUES (:url, :timestamp, :timestamp, :response_code, :keywords_str, 1)
+                    """
+                    ),
+                    {
+                        "url": url,
+                        "timestamp": timestamp,
+                        "response_code": response_code,
+                        "keywords_str": keywords_str,
+                    },
+                )
+            logger.info(f"💾 Stored scan result for {url}")
+        engine.dispose()
+
+    @staticmethod
+    def update_scan_result_response_code(url: str, response_code: int) -> None:
+        """Update response code for existing scan result."""
+        with db_engine.begin() as conn:
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            result = conn.execute(
+                text("SELECT id, count FROM scan_results WHERE url=:url"), {"url": url}
+            ).fetchone()
+
+            if result:
+                new_count = result[1] + 1
+                conn.execute(
+                    text(
+                        """
+                        UPDATE scan_results
+                        SET last_seen=:timestamp, response_code=:response_code, count=:new_count
+                        WHERE url=:url
+                    """
+                    ),
+                    {
+                        "timestamp": timestamp,
+                        "response_code": response_code,
+                        "new_count": new_count,
+                        "url": url,
+                    },
+                )
+            else:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO scan_results
+                        (url, first_seen, last_seen, response_code, found_keywords, count)
+                        VALUES (:url, :timestamp, :timestamp, :response_code, '', 1)
+                    """
+                    ),
+                    {"url": url, "timestamp": timestamp, "response_code": response_code},
+                )
+            logger.info(f"💾 Updated scan result response code for {url}")
+
+    @staticmethod
+    def log_positive_result(url: str, found_keywords: List[str]) -> None:
+        """Log positive phishing detection result."""
+        log_file = "positive_report.txt"
+        entry = (
+            f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} - {url}: {', '.join(found_keywords)}\n"
+        )
+
+        try:
+            with open(log_file, "r+") as f:
+                if url in f.read():
+                    logger.debug(f"⏭️ Duplicate entry skipped: {url}")
+                    return
+                f.write(entry)
+        except FileNotFoundError:
+            with open(log_file, "w") as f:
+                f.write(entry)
+
+        logger.info(f"🎯 Logged phishing match: {url}")
+
+    @staticmethod
+    def determine_site_status(
+        url: str,
+        resolved_ip: Optional[str],
+        current_status: str,
+        current_takedown: Optional[str],
+        timestamp: str,
+        timeout: int,
+    ) -> Tuple[str, Optional[str]]:
+        """Determine the site's status ("up" or "down") and takedown date."""
+        if not resolved_ip:
+            new_status = "down"
+            new_takedown = current_takedown if current_status == "down" else timestamp
+        else:
+            try:
+                response = requests.get(
+                    url, timeout=timeout, headers={"User-Agent": DEFAULT_USER_AGENT}
+                )
+                if response.status_code == 200:
+                    if "suspended" in response.text.lower():
+                        new_status = "down"
+                        new_takedown = current_takedown if current_status == "down" else timestamp
+                    else:
+                        new_status = "up"
+                        new_takedown = None
+                else:
+                    new_status = "down"
+                    new_takedown = current_takedown if current_status == "down" else timestamp
+            except Exception as e:
+                logger.error(f"❌ GET request failed for {url}: {e}")
+                new_status = "down"
+                new_takedown = current_takedown if current_status == "down" else timestamp
+
+        return new_status, new_takedown
+
+
+def generate_queries_file(keywords: List[str], domains: List[str]) -> None:
+    """Generate queries file with all keyword/domain combinations."""
+    total = 0
+    with open(QUERIES_FILE, "w") as f:
+        for i in range(1, len(keywords) + 1):
+            for p in permutations(keywords, i):
+                for q in ["-".join(p), "".join(p)]:
+                    for d in domains:
+                        f.write(f"{q}{d}\n")
+                        total += 1
+    logger.info(f"📄 Generated full query list with {total} lines.")
 
 
 class PhishingScanner:
@@ -4565,7 +5122,18 @@ class Engine:
 
         if getattr(self.args, "start_api", False):
             # Start API server
-            api = PhishingAPI(self.db_manager, self.abuse_detector)
+            api_key = getattr(self.args, "api_key", None)
+            if not api_key:
+                logger.error("❌ API key is required when starting API server")
+                logger.error("   Use --api-key parameter to provide authentication key")
+                return
+
+            # Store the API key globally for decorator access
+            global flask_app
+
+            api = PhishingAPI(self.db_manager, self.abuse_detector, api_key=api_key)
+            flask_app = api.app
+
             api.run(
                 host=getattr(self.args, "api_host", "0.0.0.0"),
                 port=getattr(self.args, "api_port", 8080),
@@ -4705,49 +5273,27 @@ class Engine:
 
 
 def parse_arguments() -> argparse.Namespace:
-    """Parse command line arguments."""
+    """Parse command line arguments with Grinder integration options."""
     parser = argparse.ArgumentParser(
-        description="Enhanced Anisakys Phishing Detection Engine with Intelligent Auto-Analysis & Auto-Reporting",
+        description="Enhanced Anisakys Phishing Detection Engine with Grinder Integration",
         epilog=(
             "Example usages:\n"
             "  ./anisakys.py --timeout 30 --log-level DEBUG\n"
-            "  ./anisakys.py --reset-offset  # Reset scanning to start from beginning\n"
-            "  ./anisakys.py --report https://site.domain.com --abuse-email abuse@domain.com\n"
-            '  ./anisakys.py --process-reports --attachment /path/to/file.pdf --cc "cc1@example.com, cc2@example.com"\n'
-            "  ./anisakys.py --process-reports --attachments-folder /path/to/attachments/\n"
-            "  ./anisakys.py --threads-only --log-level DEBUG  # Only monitoring + auto-analysis, no scanning\n"
-            "  ./anisakys.py --start-api --api-port 8080\n"
-            "  ./anisakys.py --test-report --abuse-email your-test@example.com --attachments-folder /path/to/attachments/\n"
-            "  ./anisakys.py --multi-api-scan --url https://suspicious-site.com  # Multi-API validation\n"
-            "  ./anisakys.py --show-auto-status  # Show auto-analysis and auto-reporting status\n"
+            "  ./anisakys.py --start-api --api-port 8080 --api-key your_secure_api_key\n"
+            "  ./anisakys.py --multi-api-scan --url https://suspicious-site.com\n"
+            "  ./anisakys.py --test-grinder-integration\n"
             "\n"
-            "🚀 INTELLIGENT AUTO-ANALYSIS FEATURES:\n"
-            "  ✅ VirusTotal API v3 integration (70+ engines)\n"
-            "  ✅ URLVoid API integration (30+ reputation engines)\n"
-            "  ✅ PhishTank community database integration\n"
-            "  ✅ Multi-API validation pipeline with threat aggregation\n"
-            "  ✅ Intelligent auto-reporting based on confidence thresholds\n"
-            "  ✅ Real-time threat scoring and confidence levels\n"
-            "  ✅ Automatic detection → analysis → reporting pipeline\n"
-            "  ✅ Provider-specific abuse contact detection\n"
-            "  ✅ Cloudflare real hosting detection\n"
-            "  ✅ Same-domain validation (prevents reporting abuse@malicious.com)\n"
-            "  ✅ Critical keyword immediate analysis\n"
-            "  ✅ Automated evidence collection and enhanced reporting\n"
+            "🔗 GRINDER INTEGRATION FEATURES:\n"
+            "  ✅ Bidirectional threat intelligence sharing\n"
+            "  ✅ Automatic IP reporting for detected phishing infrastructure\n"
+            "  ✅ API key authentication for secure communications\n"
+            "  ✅ Real-time threat intelligence pipeline integration\n"
+            "  ✅ Enhanced abuse reporting with IP context\n"
             "\n"
-            "🤖 AUTO-ANALYSIS WORKFLOW:\n"
-            "  1. Scanner detects phishing keywords → Stores in database\n"
-            "  2. Auto-analyzer performs multi-API validation → Calculates threat level\n"
-            "  3. Intelligence engine decides auto-report eligibility → Flags high-confidence threats\n"
-            "  4. Report manager sends enhanced abuse reports with API evidence\n"
-            "  5. Continuous monitoring for takedowns and status updates\n"
-            "\n"
-            "⚙️  CONFIGURATION VARIABLES (.env file):\n"
-            "  AUTO_MULTI_API_SCAN=true                    # Enable/disable auto-analysis\n"
-            "  AUTO_REPORT_THRESHOLD_CONFIDENCE=85         # Confidence % for auto-reporting\n"
-            "  AUTO_REPORT_THREAT_LEVELS=critical,high     # Threat levels eligible for auto-reporting\n"
-            "  MANUAL_REVIEW_THRESHOLD_CONFIDENCE=70       # Confidence % for manual review flag\n"
-            "  AUTO_ANALYSIS_DELAY_SECONDS=30              # Delay between API calls\n"
+            "🔐 API AUTHENTICATION:\n"
+            "  All API endpoints now require Bearer token authentication\n"
+            "  Use --api-key parameter when starting API server\n"
+            "  External clients must include Authorization: Bearer <key> header\n"
         ),
         formatter_class=argparse.RawTextHelpFormatter,
     )
@@ -4817,6 +5363,9 @@ def parse_arguments() -> argparse.Namespace:
         "--api-host", type=str, default="0.0.0.0", help="Host for the API server (default: 0.0.0.0)"
     )
     parser.add_argument(
+        "--api-key", type=str, help="API key for authentication when starting API server"
+    )
+    parser.add_argument(
         "--reset-offset",
         action="store_true",
         help="Reset scanning offset to 0 (start from beginning of queries file)",
@@ -4841,6 +5390,11 @@ def parse_arguments() -> argparse.Namespace:
         "--auto-report-now",
         action="store_true",
         help="Force immediate processing of all auto-report eligible sites",
+    )
+    parser.add_argument(
+        "--test-grinder-integration",
+        action="store_true",
+        help="Test connection to Grinder API and exit",
     )
 
     return parser.parse_args()
@@ -4952,7 +5506,7 @@ def show_auto_status():
                 print(
                     f"   👀 Manual Review Confidence Threshold: {MANUAL_REVIEW_THRESHOLD_CONFIDENCE}%"
                 )
-                print(f"   🎯 Auto-Report Threat Levels: {', '.join(AUTO_REPORT_THREAT_LEVELS)}")
+                print(f"   🎯 Auto-Report Threat Levels: {["critical", "high"]}")
                 print(f"   ⏱️  Analysis Delay: {AUTO_ANALYSIS_DELAY_SECONDS} seconds")
             else:
                 print(f"   ❌ Reason: No API keys configured or AUTO_MULTI_API_SCAN disabled")
@@ -4977,6 +5531,15 @@ def show_auto_status():
 
             for config in api_configs:
                 print(f"   {config}")
+
+            # Grinder integration status
+            print(f"\n🔗 GRINDER INTEGRATION STATUS:")
+            if GRINDER_INTEGRATION_ENABLED:
+                print(f"   ✅ Enabled: {GRINDER0X_API_URL}")
+                print(f"   🔄 Automatic IP reporting: Active")
+            else:
+                print(f"   ❌ Disabled: Missing configuration")
+                print(f"   ⚙️  Configure GRINDER0X_API_URL and GRINDER0X_API_KEY to enable")
 
             # Recent pending sites for analysis
             if pending_analysis > 0:
@@ -5027,15 +5590,74 @@ def show_auto_status():
     print("\n" + "=" * 80)
 
 
+def test_grinder_integration():
+    """Test Grinder integration connectivity and functionality."""
+    print("\n" + "=" * 80)
+    print("🔗 TESTING GRINDER INTEGRATION")
+    print("=" * 80)
+
+    # Test configuration
+    print(f"📋 Configuration:")
+    print(f"   API URL: {GRINDER0X_API_URL or 'Not configured'}")
+    print(f"   API Key: {'Configured' if GRINDER0X_API_KEY else 'Not configured'}")
+    print(f"   Integration Enabled: {GRINDER_INTEGRATION_ENABLED}")
+
+    if not GRINDER_INTEGRATION_ENABLED:
+        print("\n❌ Grinder integration is not properly configured.")
+        print("   Please check GRINDER0X_API_URL and GRINDER0X_API_KEY in your .env file")
+        return
+
+    # Test connection
+    print(f"\n🔗 Testing connection to Grinder API...")
+    grinder_client = GrinderReportClient()
+    connection_result = grinder_client.test_connection()
+
+    if connection_result["status"] == "success":
+        print(f"✅ Connection successful!")
+    else:
+        print(f"❌ Connection failed: {connection_result['message']}")
+        return
+
+    # Test IP reporting (with test data)
+    print(f"\n📤 Testing IP reporting functionality...")
+    test_ip = "192.0.2.1"  # RFC 5737 test IP
+    test_context = {
+        "method": "test_integration",
+        "domains": ["test.example.com"],
+        "severity": "high",
+        "threat_level": "high",
+        "keywords": ["test", "integration"],
+        "api_confidence": 95,
+    }
+
+    report_result = grinder_client.report_malicious_ip(test_ip, test_context, confidence=95)
+
+    if report_result["status"] == "success":
+        print(f"✅ Test IP report sent successfully!")
+        print(f"   Categories: {report_result.get('categories', [])}")
+        print(f"   Confidence: {report_result.get('confidence', 0)}%")
+    elif report_result["status"] == "rate_limited":
+        print(f"⏰ Rate limited - this is normal for testing")
+    else:
+        print(f"❌ Test report failed: {report_result['message']}")
+
+    print("\n" + "=" * 80)
+
+
 def main():
-    """Main entry point with enhanced auto-analysis capabilities."""
+    """Main entry point with enhanced Grinder integration."""
     args = parse_arguments()
     logger.setLevel(
         args.log_level if args.log_level is not None else getattr(settings, "LOG_LEVEL", "INFO")
     )
 
-    logger.debug("🚀 Anisakys starting up...")
+    logger.debug("🚀 Anisakys with Grinder integration starting up...")
     logger.debug(f"⚙️  Arguments: {vars(args)}")
+
+    # Handle test Grinder integration command
+    if getattr(args, "test_grinder_integration", False):
+        test_grinder_integration()
+        return
 
     # Handle reset offset command
     if args.reset_offset:
@@ -5087,6 +5709,16 @@ def main():
         logger.info(f"📊 Auto-reporting completed: {processed} sites processed")
         return
 
+    # Print enhanced integration status
+    logger.info("🔗 Grinder Integration Status:")
+    if GRINDER_INTEGRATION_ENABLED:
+        logger.info(f"   ✅ Enabled: {GRINDER0X_API_URL}")
+        logger.info("   🔄 Automatic IP reporting: Active")
+        logger.info("   📊 Threat intelligence sharing: Bidirectional")
+    else:
+        logger.info("   ❌ Disabled: Missing configuration")
+        logger.info("   ⚙️  Configure GRINDER0X_API_URL and GRINDER0X_API_KEY to enable")
+
     # Print enhanced API configuration status
     api_configs = []
     if VIRUSTOTAL_API_KEY:
@@ -5113,15 +5745,15 @@ def main():
     if AUTO_ANALYSIS_ENABLED:
         logger.info(f"   Auto-Report Threshold: {AUTO_REPORT_THRESHOLD_CONFIDENCE}% confidence")
         logger.info(f"   Manual Review Threshold: {MANUAL_REVIEW_THRESHOLD_CONFIDENCE}% confidence")
-        logger.info(f"   Auto-Report Threat Levels: {', '.join(AUTO_REPORT_THREAT_LEVELS)}")
+        logger.info(f"   Auto-Report Threat Levels: {["critical", "high"]}")
     else:
         logger.info("   Reason: No API keys configured or AUTO_MULTI_API_SCAN=False")
 
-    logger.debug("⚙️  Creating engine instance...")
+    logger.debug("⚙️  Creating engine instance with Grinder integration...")
     try:
         engine_instance = Engine(args)
         logger.debug("✅ Engine instance created successfully")
-        logger.debug("🚀 Starting engine...")
+        logger.debug("🚀 Starting engine with enhanced threat intelligence...")
         engine_instance.start()
     except Exception as e:
         logger.error(f"❌ Failed to create or start engine: {e}")
