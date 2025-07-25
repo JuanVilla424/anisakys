@@ -22,15 +22,14 @@ import re
 import time
 import argparse
 import requests
-from itertools import permutations, islice
+from itertools import permutations
 import datetime
-from typing import List, Optional, Tuple, Dict, Any, Union
+from typing import List, Optional, Tuple, Dict, Any
 import threading
 import smtplib
 import psutil
 import json
 import subprocess
-import hashlib
 import base64
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -134,7 +133,6 @@ ASN_ABUSE_EMAIL_DB = {
     "39561": "abuse@contabo.com",  # Contabo
     "51167": "abuse@contabo.com",  # Contabo
     "8560": "abuse@oneandone.net",  # IONOS (1&1)
-    "8075": "abuse@microsoft.com",  # Microsoft
     "29066": "abuse@velianet.com",  # Velia.net
     # European Providers
     "12876": "abuse@online.net",  # Online.net (Scaleway)
@@ -348,7 +346,7 @@ class VirusTotalIntegration:
             Dict[str, Any]: Detailed threat assessment including detection ratios
         """
         if not self.api_key:
-            logger.warning("VirusTotal API key not configured, skipping scan")
+            logger.warning("⚠️  VirusTotal API key not configured, skipping scan")
             return {"error": "API key not configured"}
 
         try:
@@ -380,7 +378,7 @@ class VirusTotalIntegration:
                 }
 
                 logger.info(
-                    f"VirusTotal scan for {url}: {result['malicious']}/{result['total_engines']} engines detected threats"
+                    f"🛡️  VirusTotal scan for {url}: {result['malicious']}/{result['total_engines']} engines detected threats"
                 )
                 return result
 
@@ -389,23 +387,23 @@ class VirusTotalIntegration:
                 scan_response = self.session.post(f"{self.base_url}/urls", data={"url": url})
 
                 if scan_response.status_code == 200:
-                    logger.info(f"Submitted {url} to VirusTotal for analysis")
+                    logger.info(f"📤 Submitted {url} to VirusTotal for analysis")
                     return {
                         "status": "submitted",
                         "message": "URL submitted for analysis, check back later",
                     }
                 else:
                     logger.error(
-                        f"Failed to submit {url} to VirusTotal: {scan_response.status_code}"
+                        f"❌ Failed to submit {url} to VirusTotal: {scan_response.status_code}"
                     )
                     return {"error": f"Failed to submit URL: {scan_response.status_code}"}
 
             else:
-                logger.error(f"VirusTotal API error: {response.status_code}")
+                logger.error(f"❌ VirusTotal API error: {response.status_code}")
                 return {"error": f"API error: {response.status_code}"}
 
         except Exception as e:
-            logger.error(f"VirusTotal scan failed for {url}: {e}")
+            logger.error(f"❌ VirusTotal scan failed for {url}: {e}")
             return {"error": str(e)}
 
     def _calculate_threat_level(self, analysis_stats: Dict[str, int]) -> str:
@@ -473,13 +471,13 @@ class VirusTotalIntegration:
                 return {"error": f"Domain analysis failed: {response.status_code}"}
 
         except Exception as e:
-            logger.error(f"VirusTotal domain analysis failed for {domain}: {e}")
+            logger.error(f"❌ VirusTotal domain analysis failed for {domain}: {e}")
             return {"error": str(e)}
 
 
 class URLVoidIntegration:
     """
-    URLVoid API Integration for multi-blacklist checking.
+    URLVoid API Integration for multi-blocklist checking.
 
     Queries against 30+ reputation engines and blocklist services for
     comprehensive domain reputation analysis.
@@ -507,7 +505,7 @@ class URLVoidIntegration:
             Dict[str, Any]: Comprehensive safety score and reputation analysis
         """
         if not self.api_key:
-            logger.warning("URLVoid API key not configured, skipping analysis")
+            logger.warning("⚠️  URLVoid API key not configured, skipping analysis")
             return {"error": "API key not configured"}
 
         try:
@@ -538,15 +536,17 @@ class URLVoidIntegration:
                     "redirects": details.get("redirects", []),
                 }
 
-                logger.info(f"URLVoid analysis for {domain}: Safety score {result['safety_score']}")
+                logger.info(
+                    f"🔍 URLVoid analysis for {domain}: Safety score {result['safety_score']}"
+                )
                 return result
 
             else:
-                logger.error(f"URLVoid API error for {domain}: {response.status_code}")
+                logger.error(f"❌ URLVoid API error for {domain}: {response.status_code}")
                 return {"error": f"API error: {response.status_code}"}
 
         except Exception as e:
-            logger.error(f"URLVoid analysis failed for {domain}: {e}")
+            logger.error(f"❌ URLVoid analysis failed for {domain}: {e}")
             return {"error": str(e)}
 
     def _calculate_urlvoid_threat_level(self, details: Dict[str, Any]) -> str:
@@ -638,11 +638,11 @@ class PhishTankIntegration:
                     }
 
             else:
-                logger.error(f"PhishTank API error for {url}: {response.status_code}")
+                logger.error(f"❌ PhishTank API error for {url}: {response.status_code}")
                 return {"error": f"API error: {response.status_code}"}
 
         except Exception as e:
-            logger.error(f"PhishTank check failed for {url}: {e}")
+            logger.error(f"❌ PhishTank check failed for {url}: {e}")
             return {"error": str(e)}
 
     def submit_phishing_url(self, url: str) -> Dict[str, Any]:
@@ -656,7 +656,7 @@ class PhishTankIntegration:
             Dict[str, Any]: Submission result
         """
         if not self.api_key:
-            logger.warning("PhishTank API key not configured, cannot submit URLs")
+            logger.warning("⚠️  PhishTank API key not configured, cannot submit URLs")
             return {"error": "API key required for submissions"}
 
         try:
@@ -666,14 +666,14 @@ class PhishTankIntegration:
             response = self.session.post(submit_url, data=data)
 
             if response.status_code == 200:
-                logger.info(f"Successfully submitted {url} to PhishTank")
+                logger.info(f"✅ Successfully submitted {url} to PhishTank")
                 return {"status": "submitted", "url": url}
             else:
-                logger.error(f"Failed to submit {url} to PhishTank: {response.status_code}")
+                logger.error(f"❌ Failed to submit {url} to PhishTank: {response.status_code}")
                 return {"error": f"Submission failed: {response.status_code}"}
 
         except Exception as e:
-            logger.error(f"PhishTank submission failed for {url}: {e}")
+            logger.error(f"❌ PhishTank submission failed for {url}: {e}")
             return {"error": str(e)}
 
 
@@ -701,7 +701,7 @@ class MultiAPIValidator:
         Returns:
             Dict[str, Any]: Comprehensive validation report with aggregated results
         """
-        logger.info(f"Starting comprehensive multi-API scan for {url}")
+        logger.info(f"🔍 Starting comprehensive multi-API scan for {url}")
 
         # Extract domain for domain-specific checks
         domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
@@ -719,17 +719,17 @@ class MultiAPIValidator:
         }
 
         # Step 1: VirusTotal URL scan
-        logger.info(f"Step 1: VirusTotal URL analysis for {url}")
+        logger.info(f"📊 Step 1: VirusTotal URL analysis for {url}")
         vt_result = self.virustotal.scan_url(url)
         results["virustotal"] = vt_result
 
         # Step 2: URLVoid domain analysis
-        logger.info(f"Step 2: URLVoid domain analysis for {domain}")
+        logger.info(f"📊 Step 2: URLVoid domain analysis for {domain}")
         uv_result = self.urlvoid.analyze_domain(domain)
         results["urlvoid"] = uv_result
 
         # Step 3: PhishTank community check
-        logger.info(f"Step 3: PhishTank community database check for {url}")
+        logger.info(f"📊 Step 3: PhishTank community database check for {url}")
         pt_result = self.phishtank.check_phishing_status(url)
         results["phishtank"] = pt_result
 
@@ -743,7 +743,7 @@ class MultiAPIValidator:
         results["recommendations"] = self._generate_recommendations(vt_result, uv_result, pt_result)
 
         logger.info(
-            f"Multi-API scan complete for {url}: "
+            f"✅ Multi-API scan complete for {url}: "
             f"Threat level: {results['aggregated_threat_level']}, "
             f"Confidence: {results['confidence_score']}%"
         )
@@ -932,11 +932,11 @@ class AttachmentConfig:
         path = getattr(settings, "DEFAULT_ATTACHMENT", None)
         if path and os.path.exists(path):
             abs_path = os.path.abspath(path)
-            logger.info(f"Using default attachment from settings: {abs_path}")
+            logger.info(f"📎 Using default attachment from settings: {abs_path}")
             return path
         else:
             if path:
-                logger.error(f"DEFAULT_ATTACHMENT file '{path}' does not exist.")
+                logger.error(f"❌ DEFAULT_ATTACHMENT file '{path}' does not exist.")
         return None
 
     @staticmethod
@@ -956,7 +956,7 @@ class AttachmentConfig:
             and os.path.exists(attachments_folder)
             and os.path.isdir(attachments_folder)
         ):
-            logger.info(f"Using attachments folder: {attachments_folder}")
+            logger.info(f"📁 Using attachments folder: {attachments_folder}")
 
             # Get all files from the folder
             for filename in os.listdir(attachments_folder):
@@ -971,14 +971,14 @@ class AttachmentConfig:
 
                     if any(file_path.lower().endswith(ext) for ext in allowed_extensions):
                         attachments.append(file_path)
-                        logger.debug(f"Added attachment: {file_path}")
+                        logger.debug(f"📎 Added attachment: {file_path}")
                     else:
-                        logger.debug(f"Skipped file (not allowed extension): {file_path}")
+                        logger.debug(f"⏭️ Skipped file (not allowed extension): {file_path}")
 
             if attachments:
-                logger.info(f"Found {len(attachments)} attachment(s) in folder")
+                logger.info(f"📁 Found {len(attachments)} attachment(s) in folder")
             else:
-                logger.warning(f"No valid attachments found in folder: {attachments_folder}")
+                logger.warning(f"⚠️  No valid attachments found in folder: {attachments_folder}")
 
         return attachments
 
@@ -1090,7 +1090,7 @@ class EnhancedAbuseEmailDetector:
                     )
                     if email_match and self.validate_email(email_match.group(1)):
                         logger.info(
-                            f"Found abuse email in DNS TXT for {domain}: {email_match.group(1)}"
+                            f"🔍 Found abuse email in DNS TXT for {domain}: {email_match.group(1)}"
                         )
                         return email_match.group(1)
         except dns.exception.DNSException:
@@ -1117,7 +1117,7 @@ class EnhancedAbuseEmailDetector:
                 if result.returncode == 0:
                     emails = self.extract_emails_from_whois(result.stdout)
                     if emails:
-                        logger.info(f"Found abuse email from WHOIS server {server}: {emails[0]}")
+                        logger.info(f"🔍 Found abuse email from WHOIS server {server}: {emails[0]}")
                         return emails[0]
             except (subprocess.TimeoutExpired, FileNotFoundError):
                 continue
@@ -1132,7 +1132,7 @@ class EnhancedAbuseEmailDetector:
                 {"param": "%" + registrar.lower() + "%"},
             ).fetchone()
             if result:
-                logger.info(f"Found cached abuse email for registrar '{registrar}': {result[0]}")
+                logger.info(f"📚 Found cached abuse email for registrar '{registrar}': {result[0]}")
                 return result[0]
 
         # Check enhanced static database
@@ -1150,7 +1150,7 @@ class EnhancedAbuseEmailDetector:
                 except Exception as e:
                     # If ON CONFLICT is not supported, handle duplicate key error
                     logger.debug(f"Failed to cache registrar abuse email (likely duplicate): {e}")
-                logger.info(f"Found enhanced abuse email for registrar '{registrar}': {email}")
+                logger.info(f"📚 Found enhanced abuse email for registrar '{registrar}': {email}")
                 return email
 
         return None
@@ -1159,6 +1159,7 @@ class EnhancedAbuseEmailDetector:
         self, domain: str, whois_data: Any = None, registrar: str = None
     ) -> List[str]:
         """Get abuse email using multiple enhanced detection methods."""
+        logger.info(f"🔍 Starting enhanced abuse email detection for domain: {domain}")
         abuse_emails = []
 
         # 1. Check cached registrar database
@@ -1166,6 +1167,7 @@ class EnhancedAbuseEmailDetector:
             registrar_email = self.get_abuse_email_by_registrar(registrar)
             if registrar_email and self.validate_abuse_email_domain(registrar_email, domain):
                 abuse_emails.append(registrar_email)
+                logger.info(f"✅ Added registrar abuse email: {registrar_email}")
 
         # 2. Extract from WHOIS data (exclude same domain)
         if whois_data:
@@ -1173,6 +1175,7 @@ class EnhancedAbuseEmailDetector:
             for email in whois_emails:
                 if self.validate_abuse_email_domain(email, domain):
                     abuse_emails.append(email)
+                    logger.info(f"✅ Added WHOIS abuse email: {email}")
 
         # 3. Try DNS TXT records
         dns_email = self.get_abuse_email_from_dns(domain)
@@ -1188,12 +1191,17 @@ class EnhancedAbuseEmailDetector:
         # 5. Check hosting provider and ASN information
         try:
             domain_ip = socket.gethostbyname(domain)
+            logger.info(f"🌐 Resolved {domain} to IP: {domain_ip}")
+
             if is_cloudflare_ip(domain_ip):
-                logger.info(f"Domain {domain} is behind Cloudflare, investigating real hosting...")
+                logger.info(
+                    f"☁️  Domain {domain} is behind Cloudflare, investigating real hosting..."
+                )
 
                 # Try to find real IP behind Cloudflare
                 real_ip = self.get_real_ip_behind_cloudflare(domain)
                 if real_ip:
+                    logger.info(f"🔍 Found potential real IP behind Cloudflare: {real_ip}")
                     provider_name, provider_abuse, asn, asn_abuse_email = (
                         self.get_hosting_provider_info(real_ip)
                     )
@@ -1202,7 +1210,7 @@ class EnhancedAbuseEmailDetector:
                     if provider_abuse and self.validate_abuse_email_domain(provider_abuse, domain):
                         abuse_emails.append(provider_abuse)
                         logger.info(
-                            f"Found hosting provider abuse email: {provider_abuse} (Provider: {provider_name})"
+                            f"🏢 Found hosting provider abuse email: {provider_abuse} (Provider: {provider_name})"
                         )
 
                     # Add ASN abuse email
@@ -1210,37 +1218,59 @@ class EnhancedAbuseEmailDetector:
                         asn_abuse_email, domain
                     ):
                         abuse_emails.append(asn_abuse_email)
-                        logger.info(f"Found ASN abuse email: {asn_abuse_email} (ASN: {asn})")
+                        logger.info(f"🏷️  Found ASN abuse email: {asn_abuse_email} (ASN: {asn})")
+                else:
+                    logger.warning(f"⚠️  Could not find real IP behind Cloudflare for {domain}")
 
                 # Always add Cloudflare as secondary option
                 cloudflare_email = "abuse@cloudflare.com"
                 if cloudflare_email not in abuse_emails:
                     abuse_emails.append(cloudflare_email)
-                    logger.info(f"Added Cloudflare abuse email as secondary option")
+                    logger.info(
+                        f"☁️  Added Cloudflare abuse email as secondary option: {cloudflare_email}"
+                    )
             else:
                 # Not behind Cloudflare, check hosting provider directly
+                logger.info(f"🏢 Checking hosting provider for IP: {domain_ip}")
                 provider_name, provider_abuse, asn, asn_abuse_email = (
                     self.get_hosting_provider_info(domain_ip)
                 )
+
+                logger.info(f"🏢 Hosting Provider: {provider_name or 'Unknown'}")
+                logger.info(f"🏷️  ASN: {asn or 'Unknown'}")
 
                 # Add provider abuse email
                 if provider_abuse and self.validate_abuse_email_domain(provider_abuse, domain):
                     abuse_emails.append(provider_abuse)
                     logger.info(
-                        f"Found hosting provider abuse email: {provider_abuse} (Provider: {provider_name})"
+                        f"✅ Found hosting provider abuse email: {provider_abuse} (Provider: {provider_name})"
                     )
+                else:
+                    if provider_abuse:
+                        logger.warning(
+                            f"❌ Provider abuse email rejected (same domain): {provider_abuse}"
+                        )
+                    else:
+                        logger.warning(f"⚠️  No provider abuse email found in WHOIS data")
 
-                # *** AQUÍ ESTABA EL PROBLEMA - FALTABA AGREGAR EL ASN EMAIL ***
                 # Add ASN abuse email
                 if asn_abuse_email and self.validate_abuse_email_domain(asn_abuse_email, domain):
                     abuse_emails.append(asn_abuse_email)
-                    logger.info(f"Found ASN abuse email: {asn_abuse_email} (ASN: {asn})")
+                    logger.info(f"✅ Found ASN abuse email: {asn_abuse_email} (ASN: {asn})")
+                else:
+                    if asn_abuse_email:
+                        logger.warning(
+                            f"❌ ASN abuse email rejected (same domain): {asn_abuse_email}"
+                        )
+                    else:
+                        logger.warning(f"⚠️  No ASN abuse email found for ASN: {asn}")
 
         except Exception as e:
             logger.debug(f"Failed to get IP/hosting info for {domain}: {e}")
 
         # 6. Generate common abuse email patterns (exclude same domain)
         if not abuse_emails:
+            logger.warning(f"⚠️  No abuse emails found through other methods for {domain}")
             # Try parent domain or known hosting providers
             try:
                 # Get hosting info from IP WHOIS
@@ -1267,13 +1297,13 @@ class EnhancedAbuseEmailDetector:
                 unique_emails.append(email)
                 seen.add(email)
 
-        # Enhanced logging with ASN information
+        # Enhanced logging with final results
         if unique_emails:
             logger.info(
-                f"Found {len(unique_emails)} valid abuse email(s) for {domain}: {unique_emails}"
+                f"✅ Found {len(unique_emails)} valid abuse email(s) for {domain}: {unique_emails}"
             )
         else:
-            logger.warning(f"No valid abuse emails found for {domain}")
+            logger.warning(f"❌ No valid abuse emails found for {domain}")
 
         return unique_emails
 
@@ -1311,14 +1341,14 @@ class EnhancedAbuseEmailDetector:
             # Check if it's the same domain
             if email_domain == reported_domain_clean:
                 logger.warning(
-                    f"Cannot send abuse report to same domain: {email} for {reported_domain}"
+                    f"❌ Cannot send abuse report to same domain: {email} for {reported_domain}"
                 )
                 return False
 
             # Check if it's a subdomain of the reported domain
             if email_domain.endswith("." + reported_domain_clean):
                 logger.warning(
-                    f"Cannot send abuse report to subdomain: {email} for {reported_domain}"
+                    f"❌ Cannot send abuse report to subdomain: {email} for {reported_domain}"
                 )
                 return False
 
@@ -1347,7 +1377,7 @@ class EnhancedAbuseEmailDetector:
                 ip = socket.gethostbyname(test_domain)
                 if not is_cloudflare_ip(ip):
                     real_ips.append(ip)
-                    logger.info(f"Found potential real IP via subdomain {test_domain}: {ip}")
+                    logger.info(f"🔍 Found potential real IP via subdomain {test_domain}: {ip}")
             except:
                 continue
 
@@ -1360,16 +1390,153 @@ class EnhancedAbuseEmailDetector:
                     ip = socket.gethostbyname(mx_domain)
                     if not is_cloudflare_ip(ip):
                         real_ips.append(ip)
-                        logger.info(f"Found potential real IP via MX record {mx_domain}: {ip}")
+                        logger.info(f"🔍 Found potential real IP via MX record {mx_domain}: {ip}")
                 except:
                     continue
         except:
             pass
 
-        # Method 3: Historical DNS queries (simplified version)
-        # In production, you might want to use services like SecurityTrails API
-
         return real_ips[0] if real_ips else None
+
+    def get_hosting_provider_info(
+        self, ip: str
+    ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+        """
+        Get hosting provider information from IP address with enhanced ASN support.
+
+        Args:
+            ip (str): IP address to investigate
+
+        Returns:
+            Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+            (provider_name, provider_abuse_email, asn, asn_abuse_email)
+        """
+        try:
+            logger.info(f"🔍 Looking up hosting information for IP: {ip}")
+            obj = IPWhois(ip)
+            res = obj.lookup_rdap(depth=1)
+
+            # Get provider name - handle None values safely
+            provider_name = ""
+            network_info = res.get("network", {})
+            if network_info and isinstance(network_info, dict):
+                provider_name = network_info.get("name") or ""
+                if not provider_name:
+                    provider_name = res.get("asn_description") or ""
+
+            # Ensure provider_name is string and handle None
+            if provider_name is None:
+                provider_name = ""
+
+            # Safely convert to string and handle potential None
+            provider_name = str(provider_name) if provider_name else "Unknown"
+
+            # Get ASN information
+            asn = res.get("asn", "")
+            if asn and not str(asn).startswith("AS"):
+                asn = f"AS{asn}"
+
+            # Clean ASN format for lookup
+            asn_clean = str(asn).replace("AS", "").strip() if asn else ""
+
+            logger.info(f"🏢 Provider: {provider_name}, ASN: {asn}")
+
+            # Get ASN abuse email from our database
+            asn_abuse_email = None
+            if asn_clean:
+                asn_abuse_email = self.get_abuse_email_by_asn(asn_clean)
+                if asn_abuse_email:
+                    logger.info(
+                        f"🏷️  Found ASN abuse email in database for {asn}: {asn_abuse_email}"
+                    )
+                else:
+                    logger.warning(f"⚠️  No ASN abuse email found in database for {asn}")
+
+            # Look for provider abuse emails in the WHOIS data
+            provider_abuse_emails = []
+
+            # Check abuse contacts in RDAP objects
+            objects = res.get("objects", {})
+            if objects and isinstance(objects, dict):
+                for contact_id, contact_data in objects.items():
+                    if isinstance(contact_data, dict):
+                        contact_info = contact_data.get("contact", {})
+                        if contact_info and isinstance(contact_info, dict):
+                            # Check role for abuse
+                            role = str(contact_info.get("role", "")).lower()
+                            if "abuse" in role:
+                                email = contact_info.get("email")
+                                if email:
+                                    if isinstance(email, list):
+                                        provider_abuse_emails.extend(email)
+                                    else:
+                                        provider_abuse_emails.append(email)
+                                    logger.info(f"🔍 Found abuse contact in RDAP objects: {email}")
+
+            # Look for abuse emails in remarks or other fields
+            if network_info and isinstance(network_info, dict):
+                remarks = network_info.get("remarks", [])
+                if remarks and isinstance(remarks, list):
+                    for remark in remarks:
+                        if isinstance(remark, dict):
+                            title = remark.get("title") or ""
+                            description = remark.get("description", [])
+                            if title and "abuse" in str(title).lower():
+                                if isinstance(description, list):
+                                    for desc in description:
+                                        if desc:
+                                            emails = re.findall(
+                                                r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
+                                                str(desc),
+                                            )
+                                            provider_abuse_emails.extend(emails)
+                                            if emails:
+                                                logger.info(
+                                                    f"🔍 Found abuse email in remarks: {emails}"
+                                                )
+
+            # Look for abuse emails in events or entities
+            entities = res.get("entities", [])
+            if entities and isinstance(entities, list):
+                for entity in entities:
+                    if isinstance(entity, dict):
+                        roles = entity.get("roles", [])
+                        if roles and isinstance(roles, list) and "abuse" in roles:
+                            # This entity has abuse role
+                            events = entity.get("events", [])
+                            contact = entity.get("contact", {})
+                            if contact and isinstance(contact, dict):
+                                email = contact.get("email")
+                                if email:
+                                    if isinstance(email, list):
+                                        provider_abuse_emails.extend(email)
+                                    else:
+                                        provider_abuse_emails.append(email)
+                                    logger.info(f"🔍 Found abuse entity contact: {email}")
+
+            # Filter and validate provider emails
+            valid_provider_emails = []
+            for email in provider_abuse_emails:
+                if email and self.validate_email(str(email)):
+                    valid_provider_emails.append(str(email))
+
+            provider_abuse_email = valid_provider_emails[0] if valid_provider_emails else None
+
+            if provider_abuse_email:
+                logger.info(f"✅ Final provider abuse email: {provider_abuse_email}")
+            else:
+                logger.warning(f"⚠️  No valid provider abuse email found in WHOIS data")
+
+            logger.info(
+                f"📊 IP {ip} analysis complete: Provider={provider_name}, ASN={asn}, "
+                f"Provider abuse={provider_abuse_email}, ASN abuse={asn_abuse_email}"
+            )
+
+            return provider_name, provider_abuse_email, asn, asn_abuse_email
+
+        except Exception as e:
+            logger.error(f"❌ Failed to get hosting provider info for IP {ip}: {e}")
+            return None, None, None, None
 
     def get_abuse_email_by_asn(self, asn: str) -> Optional[str]:
         """
@@ -1386,14 +1553,21 @@ class EnhancedAbuseEmailDetector:
 
         abuse_email = ASN_ABUSE_EMAIL_DB.get(asn_clean)
         if abuse_email:
-            logger.info(f"Found ASN abuse email for AS{asn_clean}: {abuse_email}")
+            logger.info(f"🏷️  Found ASN abuse email for AS{asn_clean}: {abuse_email}")
             return abuse_email
 
+        # Also try with AS prefix in case the database has inconsistent keys
+        abuse_email = ASN_ABUSE_EMAIL_DB.get(f"AS{asn_clean}")
+        if abuse_email:
+            logger.info(f"🏷️  Found ASN abuse email for AS{asn_clean}: {abuse_email}")
+            return abuse_email
+
+        logger.debug(f"⚠️  No ASN abuse email found for AS{asn_clean}")
         return None
 
     def get_enhanced_whois_data(self, domain: str) -> dict:
         """
-        Get WHOIS data using appropriate server based on TLD.
+        Get WHOIS data using appropriate server based on TLD with enhanced parsing.
 
         Args:
             domain (str): Domain to query
@@ -1405,7 +1579,7 @@ class EnhancedAbuseEmailDetector:
             # First try with python-whois library
             data = whois.whois(domain)
             if data and (data.domain_name or data.registrar):
-                logger.debug(f"Got WHOIS data for {domain} using python-whois")
+                logger.debug(f"📋 Got WHOIS data for {domain} using python-whois")
                 return data
         except Exception as e:
             logger.debug(f"Python-whois failed for {domain}: {e}")
@@ -1416,7 +1590,7 @@ class EnhancedAbuseEmailDetector:
             whois_server = TLD_WHOIS_SERVERS.get(tld)
 
             if whois_server:
-                logger.debug(f"Trying WHOIS server {whois_server} for {domain}")
+                logger.debug(f"🔍 Trying WHOIS server {whois_server} for {domain}")
                 result = subprocess.run(
                     ["whois", "-h", whois_server, domain],
                     capture_output=True,
@@ -1438,14 +1612,14 @@ class EnhancedAbuseEmailDetector:
                     if domain_match:
                         whois_dict["domain_name"] = domain_match.group(1).strip()
 
-                    logger.info(f"Got WHOIS data for {domain} using {whois_server}")
+                    logger.info(f"📋 Got WHOIS data for {domain} using {whois_server}")
                     return whois_dict
         except Exception as e:
             logger.debug(f"Direct WHOIS query failed for {domain}: {e}")
 
         # Final fallback - try generic whois command
         try:
-            logger.debug(f"Trying generic whois command for {domain}")
+            logger.debug(f"📋 Trying generic whois command for {domain}")
             result = subprocess.run(["whois", domain], capture_output=True, text=True, timeout=15)
 
             if result.returncode == 0 and result.stdout:
@@ -1456,145 +1630,13 @@ class EnhancedAbuseEmailDetector:
                 if registrar_match:
                     whois_dict["registrar"] = registrar_match.group(1).strip()
 
-                logger.info(f"Got WHOIS data for {domain} using generic whois")
+                logger.info(f"📋 Got WHOIS data for {domain} using generic whois")
                 return whois_dict
         except Exception as e:
             logger.debug(f"Generic whois failed for {domain}: {e}")
 
-        logger.warning(f"All WHOIS methods failed for {domain}")
+        logger.warning(f"⚠️  All WHOIS methods failed for {domain}")
         return {}
-
-        def get_hosting_provider_info(
-            self, ip: str
-        ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
-            """
-            Get hosting provider information from IP address with enhanced ASN support.
-
-            Args:
-                ip (str): IP address to investigate
-
-            Returns:
-                Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
-                (provider_name, provider_abuse_email, asn, asn_abuse_email)
-            """
-            try:
-                obj = IPWhois(ip)
-                res = obj.lookup_rdap(depth=1)
-
-                # Get provider name - handle None values safely
-                provider_name = ""
-                network_info = res.get("network", {})
-                if network_info and isinstance(network_info, dict):
-                    provider_name = network_info.get("name") or ""
-                    if not provider_name:
-                        provider_name = res.get("asn_description") or ""
-
-                # Ensure provider_name is string and handle None
-                if provider_name is None:
-                    provider_name = ""
-
-                # Safely convert to string and handle potential None
-                provider_name = str(provider_name) if provider_name else ""
-
-                # Get ASN information
-                asn = res.get("asn", "")
-                if asn and not str(asn).startswith("AS"):
-                    asn = f"AS{asn}"
-
-                # Clean ASN format for lookup
-                asn_clean = str(asn).replace("AS", "").strip() if asn else ""
-
-                # Get ASN abuse email from our database
-                asn_abuse_email = None
-                if asn_clean:
-                    asn_abuse_email = self.get_abuse_email_by_asn(asn_clean)
-                    if asn_abuse_email:
-                        logger.info(f"Found ASN abuse email for {asn}: {asn_abuse_email}")
-
-                # Look for provider abuse emails in the WHOIS data
-                provider_abuse_emails = []
-
-                # Check abuse contacts
-                objects = res.get("objects", {})
-                if objects and isinstance(objects, dict):
-                    for contact_id, contact_data in objects.items():
-                        if isinstance(contact_data, dict):
-                            contact_info = contact_data.get("contact", {})
-                            if (
-                                contact_info
-                                and isinstance(contact_info, dict)
-                                and str(contact_info.get("role", "")).lower() == "abuse"
-                            ):
-                                email = contact_info.get("email")
-                                if email:
-                                    if isinstance(email, list):
-                                        provider_abuse_emails.extend(email)
-                                    else:
-                                        provider_abuse_emails.append(email)
-
-                # Look for abuse emails in remarks or other fields
-                if network_info and isinstance(network_info, dict):
-                    remarks = network_info.get("remarks", [])
-                    if remarks and isinstance(remarks, list):
-                        for remark in remarks:
-                            if isinstance(remark, dict):
-                                title = remark.get("title") or ""
-                                description = remark.get("description", [])
-                                if title and "abuse" in str(title).lower():
-                                    if isinstance(description, list):
-                                        for desc in description:
-                                            if desc:
-                                                emails = re.findall(
-                                                    r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
-                                                    str(desc),
-                                                )
-                                                provider_abuse_emails.extend(emails)
-
-                # Filter and validate provider emails
-                valid_provider_emails = []
-                for email in provider_abuse_emails:
-                    if email and self.validate_email(str(email)):
-                        valid_provider_emails.append(str(email))
-
-                provider_abuse_email = valid_provider_emails[0] if valid_provider_emails else None
-
-                logger.debug(
-                    f"IP {ip} info: Provider={provider_name}, ASN={asn}, "
-                    f"Provider abuse={provider_abuse_email}, ASN abuse={asn_abuse_email}"
-                )
-
-                return provider_name, provider_abuse_email, asn, asn_abuse_email
-
-            except Exception as e:
-                logger.error(f"Failed to get hosting provider info for IP {ip}: {e}")
-                return None, None, None, None
-
-    def get_abuse_email_by_asn(self, asn: str) -> Optional[str]:
-        """
-        Get abuse email from ASN database.
-
-        Args:
-            asn (str): ASN number (with or without 'AS' prefix)
-
-        Returns:
-            Optional[str]: Abuse email if found, None otherwise
-        """
-        # Normalize ASN (remove AS prefix if present)
-        asn_clean = asn.replace("AS", "").strip()
-
-        abuse_email = ASN_ABUSE_EMAIL_DB.get(asn_clean)
-        if abuse_email:
-            logger.info(f"Found ASN abuse email for AS{asn_clean}: {abuse_email}")
-            return abuse_email
-
-        # Also try with AS prefix in case the database has inconsistent keys
-        abuse_email = ASN_ABUSE_EMAIL_DB.get(f"AS{asn_clean}")
-        if abuse_email:
-            logger.info(f"Found ASN abuse email for AS{asn_clean}: {abuse_email}")
-            return abuse_email
-
-        logger.debug(f"No ASN abuse email found for AS{asn_clean}")
-        return None
 
 
 class PhishingAPI:
@@ -1657,7 +1699,7 @@ class PhishingAPI:
                 return jsonify(result), 200
 
             except Exception as e:
-                logger.error(f"API error in report_phishing: {e}")
+                logger.error(f"❌ API error in report_phishing: {e}")
                 return jsonify({"error": "Internal server error"}), 500
 
         @self.app.route("/api/v1/multi-scan", methods=["POST"])
@@ -1684,7 +1726,7 @@ class PhishingAPI:
                 return jsonify(scan_result), 200
 
             except Exception as e:
-                logger.error(f"API error in multi_api_scan: {e}")
+                logger.error(f"❌ API error in multi_api_scan: {e}")
                 return jsonify({"error": "Internal server error"}), 500
 
         @self.app.route("/api/v1/status/<path:url>", methods=["GET"])
@@ -1732,7 +1774,7 @@ class PhishingAPI:
                     )
 
             except Exception as e:
-                logger.error(f"API error in get_report_status: {e}")
+                logger.error(f"❌ API error in get_report_status: {e}")
                 return jsonify({"error": "Internal server error"}), 500
 
         @self.app.route("/api/v1/stats", methods=["GET"])
@@ -1771,7 +1813,7 @@ class PhishingAPI:
                     return jsonify(stats), 200
 
             except Exception as e:
-                logger.error(f"API error in get_stats: {e}")
+                logger.error(f"❌ API error in get_stats: {e}")
                 return jsonify({"error": "Internal server error"}), 500
 
         @self.app.route("/api/v1/health", methods=["GET"])
@@ -1817,7 +1859,7 @@ class PhishingAPI:
                             "url": url,
                         },
                     )
-                    logger.info(f"Updated existing phishing report for {url}")
+                    logger.info(f"✅ Updated existing phishing report for {url}")
                     return {
                         "status": "updated",
                         "message": f"Updated existing report for {url}",
@@ -1836,7 +1878,7 @@ class PhishingAPI:
                             )
                             abuse_email = abuse_emails[0] if abuse_emails else None
                         except Exception as e:
-                            logger.warning(f"Failed to auto-detect abuse email for {url}: {e}")
+                            logger.warning(f"⚠️  Failed to auto-detect abuse email for {url}: {e}")
 
                     # Create new record
                     conn.execute(
@@ -1858,7 +1900,7 @@ class PhishingAPI:
                             "description": description,
                         },
                     )
-                    logger.info(f"Created new phishing report for {url}")
+                    logger.info(f"✅ Created new phishing report for {url}")
                     return {
                         "status": "created",
                         "message": f"Created new report for {url}",
@@ -1868,12 +1910,12 @@ class PhishingAPI:
                     }
 
         except Exception as e:
-            logger.error(f"Failed to process phishing report for {url}: {e}")
+            logger.error(f"❌ Failed to process phishing report for {url}: {e}")
             return {"status": "error", "message": f"Failed to process report: {str(e)}", "url": url}
 
     def run(self, host: str = "0.0.0.0", port: int = 8080, debug: bool = False):
         """Run the API server."""
-        logger.info(f"Starting Enhanced Phishing API server on {host}:{port}")
+        logger.info(f"🚀 Starting Enhanced Phishing API server on {host}:{port}")
         self.app.run(host=host, port=port, debug=debug)
 
 
@@ -1890,7 +1932,7 @@ def generate_queries_file(keywords: List[str], domains: List[str]) -> None:
                     for d in domains:
                         f.write(f"{q}{d}\n")
                         total += 1
-    logger.info(f"Generated full query list with {total} lines.")
+    logger.info(f"📄 Generated full query list with {total} lines.")
 
 
 def get_ip_info(domain: str) -> Tuple[Optional[str], Optional[str]]:
@@ -1902,7 +1944,7 @@ def get_ip_info(domain: str) -> Tuple[Optional[str], Optional[str]]:
         asn_provider = res.get("network", {}).get("name", "")
         return resolved_ip, asn_provider
     except Exception as e:
-        logger.error(f"Failed to get IP info for {domain}: {e}")
+        logger.error(f"❌ Failed to get IP info for {domain}: {e}")
         return None, None
 
 
@@ -1915,7 +1957,7 @@ def is_cloudflare_ip(ip: str) -> bool:
                 return True
         return False
     except Exception as e:
-        logger.error(f"Error checking Cloudflare IP: {e}")
+        logger.error(f"❌ Error checking Cloudflare IP: {e}")
         return False
 
 
@@ -1971,7 +2013,7 @@ class PhishingUtils:
                         "keywords_str": keywords_str,
                     },
                 )
-            logger.info(f"Stored scan result for {url}")
+            logger.info(f"💾 Stored scan result for {url}")
         engine.dispose()
 
     @staticmethod
@@ -2011,7 +2053,7 @@ class PhishingUtils:
                     ),
                     {"url": url, "timestamp": timestamp, "response_code": response_code},
                 )
-            logger.info(f"Updated scan result response code for {url}")
+            logger.info(f"💾 Updated scan result response code for {url}")
 
     @staticmethod
     def log_positive_result(url: str, found_keywords: List[str]) -> None:
@@ -2024,14 +2066,14 @@ class PhishingUtils:
         try:
             with open(log_file, "r+") as f:
                 if url in f.read():
-                    logger.debug(f"Duplicate entry skipped: {url}")
+                    logger.debug(f"⏭️ Duplicate entry skipped: {url}")
                     return
                 f.write(entry)
         except FileNotFoundError:
             with open(log_file, "w") as f:
                 f.write(entry)
 
-        logger.info(f"Logged phishing match: {url}")
+        logger.info(f"🎯 Logged phishing match: {url}")
 
     @staticmethod
     def determine_site_status(
@@ -2062,7 +2104,7 @@ class PhishingUtils:
                     new_status = "down"
                     new_takedown = current_takedown if current_status == "down" else timestamp
             except Exception as e:
-                logger.error(f"GET request failed for {url}: {e}")
+                logger.error(f"❌ GET request failed for {url}: {e}")
                 new_status = "down"
                 new_takedown = current_takedown if current_status == "down" else timestamp
 
@@ -2169,7 +2211,7 @@ def upgrade_phishing_db():
             pass
 
     logger.info(
-        "Upgraded phishing_sites table with multi-API and auto-analysis support if necessary."
+        "🔧 Upgraded phishing_sites table with multi-API and auto-analysis support if necessary."
     )
 
 
@@ -2198,7 +2240,7 @@ class DatabaseManager:
                 """
                 )
             )
-            logger.info("Initialized scan_results table.")
+            logger.info("🗄️  Initialized scan_results table.")
 
     def init_phishing_db(self):
         """Initialize phishing sites table with enhanced multi-API support."""
@@ -2245,7 +2287,7 @@ class DatabaseManager:
                 """
                 )
             )
-            logger.info("Initialized phishing_sites table with enhanced multi-API support.")
+            logger.info("🗄️  Initialized phishing_sites table with enhanced multi-API support.")
 
     def init_registrar_abuse_db(self):
         """Initialize registrar abuse table."""
@@ -2260,7 +2302,7 @@ class DatabaseManager:
                 """
                 )
             )
-            logger.info("Initialized registrar_abuse table.")
+            logger.info("🗄️  Initialized registrar_abuse table.")
 
     def store_detected_phishing_site(
         self, url: str, keywords: List[str], source: str = "auto_detection"
@@ -2306,7 +2348,7 @@ class DatabaseManager:
                             "url": url,
                         },
                     )
-                    logger.info(f"Updated existing phishing detection for {url}")
+                    logger.info(f"🔄 Updated existing phishing detection for {url}")
                     return False
                 else:
                     # Insert new detection
@@ -2327,11 +2369,11 @@ class DatabaseManager:
                             "source": source,
                         },
                     )
-                    logger.info(f"NEW PHISHING DETECTION: {url} - Keywords: {keywords_str}")
+                    logger.info(f"🚨 NEW PHISHING DETECTION: {url} - Keywords: {keywords_str}")
                     return True
 
         except Exception as e:
-            logger.error(f"Failed to store detected phishing site {url}: {e}")
+            logger.error(f"❌ Failed to store detected phishing site {url}: {e}")
             return False
 
     def get_pending_analysis_sites(self, limit: int = 10) -> List[Dict[str, Any]]:
@@ -2382,7 +2424,7 @@ class DatabaseManager:
                 return sites
 
         except Exception as e:
-            logger.error(f"Failed to get pending analysis sites: {e}")
+            logger.error(f"❌ Failed to get pending analysis sites: {e}")
             return []
 
     def update_analysis_results(
@@ -2438,12 +2480,12 @@ class DatabaseManager:
                 )
 
                 logger.info(
-                    f"Analysis completed for {url}: Threat={multi_api_results.get('aggregated_threat_level')}, Confidence={multi_api_results.get('confidence_score')}%"
+                    f"✅ Analysis completed for {url}: Threat={multi_api_results.get('aggregated_threat_level')}, Confidence={multi_api_results.get('confidence_score')}%"
                 )
                 return True
 
         except Exception as e:
-            logger.error(f"Failed to update analysis results for {url}: {e}")
+            logger.error(f"❌ Failed to update analysis results for {url}: {e}")
             return False
 
     def get_auto_report_eligible_sites(self, limit: int = 5) -> List[Dict[str, Any]]:
@@ -2498,7 +2540,7 @@ class DatabaseManager:
                 return sites
 
         except Exception as e:
-            logger.error(f"Failed to get auto-report eligible sites: {e}")
+            logger.error(f"❌ Failed to get auto-report eligible sites: {e}")
             return []
 
 
@@ -2514,9 +2556,9 @@ def basic_whois_lookup(url: str) -> dict:
     """
     try:
         domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
-        logger.debug(f"Performing enhanced WHOIS lookup for: {domain}")
+        logger.debug(f"🔍 Performing enhanced WHOIS lookup for: {domain}")
 
-        # Use a dummy detector to access the enhanced WHOIS method
+        # Use a fake detector to access the enhanced WHOIS method
         # In production, you might want to refactor this
         from sqlalchemy import create_engine
 
@@ -2526,7 +2568,7 @@ def basic_whois_lookup(url: str) -> dict:
 
         return data
     except Exception as e:
-        logger.error(f"Enhanced WHOIS lookup failed for {url}: {e}")
+        logger.error(f"❌ Enhanced WHOIS lookup failed for {url}: {e}")
         return {}
 
 
@@ -2698,9 +2740,9 @@ class AbuseReportManager:
                 confidence_score=confidence_score,
                 multi_api_results=multi_api_results,
             )
-            logger.debug("Rendered email content (first 300 chars): " + html_content[:300])
+            logger.debug("📧 Rendered email content (first 300 chars): " + html_content[:300])
         except Exception as render_err:
-            logger.error(f"Template rendering failed: {render_err}")
+            logger.error(f"❌ Template rendering failed: {render_err}")
             return False
 
         # Filter out non-primary abuse emails
@@ -2719,13 +2761,13 @@ class AbuseReportManager:
             try:
                 # Validate email format
                 if not self.abuse_detector.validate_email(primary):
-                    logger.warning(f"Invalid email format, skipping: {primary}")
+                    logger.warning(f"⚠️  Invalid email format, skipping: {primary}")
                     continue
 
                 # Validate email is not from same domain being reported
                 if not self.abuse_detector.validate_abuse_email_domain(primary, site_domain):
                     logger.warning(
-                        f"Skipping abuse email from same domain being reported: {primary} for {site_url}"
+                        f"⚠️  Skipping abuse email from same domain being reported: {primary} for {site_url}"
                     )
                     continue
 
@@ -2757,7 +2799,7 @@ class AbuseReportManager:
                                 )
                                 if len(file_data) > max_size:
                                     logger.warning(
-                                        f"Skipping large attachment: {attachment_path} "
+                                        f"⚠️  Skipping large attachment: {attachment_path} "
                                         f"({len(file_data) / 1024 / 1024:.1f}MB > {max_size / 1024 / 1024}MB)"
                                     )
                                     continue
@@ -2767,13 +2809,15 @@ class AbuseReportManager:
                                 part["Content-Disposition"] = f'attachment; filename="{filename}"'
                                 msg.attach(part)
                                 attached_files.append(filename)
-                                logger.debug(f"Attached file: {filename} ({len(file_data)} bytes)")
+                                logger.debug(
+                                    f"📎 Attached file: {filename} ({len(file_data)} bytes)"
+                                )
                             else:
                                 logger.warning(
-                                    f"Attachment file not found or not a file: {attachment_path}"
+                                    f"⚠️  Attachment file not found or not a file: {attachment_path}"
                                 )
                         except Exception as e:
-                            logger.error(f"Failed to attach file {attachment_path}: {e}")
+                            logger.error(f"❌ Failed to attach file {attachment_path}: {e}")
                             continue
 
                 # Check total email size
@@ -2781,7 +2825,7 @@ class AbuseReportManager:
                 max_email_size = getattr(settings, "MAX_EMAIL_SIZE_MB", 25) * 1024 * 1024
                 if total_size > max_email_size:
                     logger.error(
-                        f"Email too large ({total_size / 1024 / 1024:.1f}MB), skipping send to {primary}"
+                        f"❌ Email too large ({total_size / 1024 / 1024:.1f}MB), skipping send to {primary}"
                     )
                     continue
 
@@ -2805,22 +2849,24 @@ class AbuseReportManager:
                     server.sendmail(sender_email, recipients, msg.as_string())
 
                 logger.info(
-                    f"Enhanced abuse report sent to {primary} for site {site_url}{attachment_info}{api_info}; "
+                    f"✅ Enhanced abuse report sent to {primary} for site {site_url}{attachment_info}{api_info}; "
                     f"CC: {final_cc if final_cc else 'None'}"
                 )
                 success_count += 1
 
             except Exception as e:
-                logger.error(f"Failed to send abuse report to {primary}: {e}")
+                logger.error(f"❌ Failed to send abuse report to {primary}: {e}")
                 continue
 
         # Log final summary
         if success_count > 0:
             logger.info(
-                f"SUMMARY: Successfully sent enhanced abuse reports to {success_count}/{len(abuse_emails)} recipients for {site_url}"
+                f"📊 SUMMARY: Successfully sent enhanced abuse reports to {success_count}/{len(abuse_emails)} recipients for {site_url}"
             )
         else:
-            logger.error(f"SUMMARY: Failed to send abuse reports to any recipients for {site_url}")
+            logger.error(
+                f"❌ SUMMARY: Failed to send abuse reports to any recipients for {site_url}"
+            )
 
         return success_count > 0
 
@@ -2828,10 +2874,10 @@ class AbuseReportManager:
         """Main loop for reporting phishing sites with enhanced multi-API validation and auto-reporting."""
         if self.monitoring_event:
             logger.info(
-                "Waiting for monitoring thread to complete initial cycle before sending abuse reports..."
+                "⏳ Waiting for monitoring thread to complete initial cycle before sending abuse reports..."
             )
             self.monitoring_event.wait()
-            logger.info("Monitoring thread initial cycle complete. Starting abuse reporting.")
+            logger.info("✅ Monitoring thread initial cycle complete. Starting abuse reporting.")
 
         while True:
             try:
@@ -2860,7 +2906,7 @@ class AbuseReportManager:
 
                     if sites:
                         logger.info(
-                            f"Processing {len(sites)} sites for abuse reporting (manual + auto-eligible)"
+                            f"📋 Processing {len(sites)} sites for abuse reporting (manual + auto-eligible)"
                         )
 
                     for row in sites:
@@ -2972,7 +3018,7 @@ class AbuseReportManager:
                             if manual_flag and not multi_api_results:
                                 if AUTO_ANALYSIS_ENABLED:
                                     logger.info(
-                                        f"Performing fresh multi-API analysis for manual flag: {url}"
+                                        f"🔍 Performing fresh multi-API analysis for manual flag: {url}"
                                     )
                                     multi_api_results = self.multi_api_validator.comprehensive_scan(
                                         url
@@ -3013,7 +3059,7 @@ class AbuseReportManager:
                                         )
                                     except Exception as e:
                                         logger.warning(
-                                            f"Failed to store fresh API results for {url}: {e}"
+                                            f"⚠️  Failed to store fresh API results for {url}: {e}"
                                         )
 
                             whois_data = basic_whois_lookup(url)
@@ -3066,7 +3112,9 @@ class AbuseReportManager:
                             if auto_eligible:
                                 report_type.append("AUTO-ELIGIBLE")
 
-                            logger.info(f"WHOIS data enriched for {url} [{', '.join(report_type)}]")
+                            logger.info(
+                                f"📊 WHOIS data enriched for {url} [{', '.join(report_type)}]"
+                            )
 
                             # Get abuse emails using enhanced detection
                             domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
@@ -3078,7 +3126,7 @@ class AbuseReportManager:
                             # Enhanced Cloudflare handling
                             if cloudflare_detected and not abuse_list:
                                 logger.info(
-                                    f"Cloudflare detected for {url}, no hosting provider found. Using abuse@cloudflare.com only"
+                                    f"☁️  Cloudflare detected for {url}, no hosting provider found. Using abuse@cloudflare.com only"
                                 )
                                 abuse_list = ["abuse@cloudflare.com"]
                             elif cloudflare_detected and abuse_list:
@@ -3086,15 +3134,15 @@ class AbuseReportManager:
                                 if cloudflare_email not in abuse_list:
                                     abuse_list.append(cloudflare_email)
                                 logger.info(
-                                    f"Cloudflare detected for {url}. Will report to hosting provider first, then Cloudflare: {abuse_list}"
+                                    f"☁️  Cloudflare detected for {url}. Will report to hosting provider first, then Cloudflare: {abuse_list}"
                                 )
                             elif cloudflare_detected:
                                 logger.info(
-                                    f"Cloudflare detected for {url}, using Cloudflare abuse only"
+                                    f"☁️  Cloudflare detected for {url}, using Cloudflare abuse only"
                                 )
                                 abuse_list = ["abuse@cloudflare.com"]
 
-                            # Fall back to stored abuse email if no enhanced detection result and not same domain
+                            # Fall back to stored abuse email if no enhanced detection result and different domain
                             if not abuse_list and stored_abuse:
                                 if self.abuse_detector.validate_abuse_email_domain(
                                     stored_abuse, domain
@@ -3102,7 +3150,7 @@ class AbuseReportManager:
                                     abuse_list = [stored_abuse]
                                 else:
                                     logger.warning(
-                                        f"Stored abuse email {stored_abuse} is same domain as reported site {url}, skipping"
+                                        f"⚠️  Stored abuse email {stored_abuse} is same domain as reported site {url}, skipping"
                                     )
 
                             if abuse_list:
@@ -3110,9 +3158,11 @@ class AbuseReportManager:
 
                                 # Enhanced logging for auto-reports
                                 if auto_eligible:
-                                    logger.info(f"SENDING AUTO-REPORT: {url} to {abuse_list[0]}")
+                                    logger.info(f"🚨 SENDING AUTO-REPORT: {url} to {abuse_list[0]}")
                                 else:
-                                    logger.info(f"SENDING MANUAL REPORT: {url} to {abuse_list[0]}")
+                                    logger.info(
+                                        f"📧 SENDING MANUAL REPORT: {url} to {abuse_list[0]}"
+                                    )
 
                                 if self.send_abuse_report(
                                     abuse_list,
@@ -3138,19 +3188,19 @@ class AbuseReportManager:
 
                                     # Enhanced success logging
                                     if auto_eligible:
-                                        logger.info(f"AUTO-REPORT SUCCESS: {url}")
+                                        logger.info(f"✅ AUTO-REPORT SUCCESS: {url}")
                                     else:
-                                        logger.info(f"MANUAL REPORT SUCCESS: {url}")
+                                        logger.info(f"✅ MANUAL REPORT SUCCESS: {url}")
                             else:
                                 logger.warning(
-                                    f"No valid abuse emails found for {url} - all emails were same domain or invalid"
+                                    f"❌ No valid abuse emails found for {url} - all emails were same domain or invalid"
                                 )
 
                         except Exception as e:
-                            logger.error(f"Error processing report for {url}: {e}")
+                            logger.error(f"❌ Error processing report for {url}: {e}")
 
             except Exception as e:
-                logger.error(f"Error in enhanced abuse reporting loop: {e}")
+                logger.error(f"❌ Error in enhanced abuse reporting loop: {e}")
 
             time.sleep(settings.REPORT_INTERVAL)
 
@@ -3186,7 +3236,7 @@ class AbuseReportManager:
                     # Perform multi-API validation if API keys are configured
                     multi_api_results = None
                     if AUTO_ANALYSIS_ENABLED:
-                        logger.info(f"Performing multi-API validation for {url}")
+                        logger.info(f"🔍 Performing multi-API validation for {url}")
                         multi_api_results = self.multi_api_validator.comprehensive_scan(url)
 
                         # Store API results in database
@@ -3217,7 +3267,7 @@ class AbuseReportManager:
                                 },
                             )
                         except Exception as e:
-                            logger.warning(f"Failed to store API results for {url}: {e}")
+                            logger.warning(f"⚠️  Failed to store API results for {url}: {e}")
 
                     whois_data = basic_whois_lookup(url)
                     whois_str = str(whois_data)
@@ -3244,7 +3294,7 @@ class AbuseReportManager:
                             "url": url,
                         },
                     )
-                    logger.info(f"Manually processed WHOIS data for {url}")
+                    logger.info(f"📊 Manually processed WHOIS data for {url}")
 
                     # Get abuse emails using enhanced detection
                     domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
@@ -3256,7 +3306,7 @@ class AbuseReportManager:
                     # Additional check: if Cloudflare detected, enhance the logic
                     if cloudflare_detected and not abuse_list:
                         logger.info(
-                            f"Cloudflare detected for {url}, no hosting provider found. Using abuse@cloudflare.com only"
+                            f"☁️  Cloudflare detected for {url}, no hosting provider found. Using abuse@cloudflare.com only"
                         )
                         abuse_list = ["abuse@cloudflare.com"]
                     elif cloudflare_detected and abuse_list:
@@ -3265,20 +3315,22 @@ class AbuseReportManager:
                         if cloudflare_email not in abuse_list:
                             abuse_list.append(cloudflare_email)
                         logger.info(
-                            f"Cloudflare detected for {url}. Will report to hosting provider first, then Cloudflare: {abuse_list}"
+                            f"☁️  Cloudflare detected for {url}. Will report to hosting provider first, then Cloudflare: {abuse_list}"
                         )
                     elif cloudflare_detected:
                         # Pure Cloudflare case
-                        logger.info(f"Cloudflare detected for {url}, using Cloudflare abuse only")
+                        logger.info(
+                            f"☁️  Cloudflare detected for {url}, using Cloudflare abuse only"
+                        )
                         abuse_list = ["abuse@cloudflare.com"]
 
-                    # Fall back to stored abuse email if no enhanced detection result and not same domain
+                    # Fall back to stored abuse email if no enhanced detection result and different domain
                     if not abuse_list and stored_abuse:
                         if self.abuse_detector.validate_abuse_email_domain(stored_abuse, domain):
                             abuse_list = [stored_abuse]
                         else:
                             logger.warning(
-                                f"Stored abuse email {stored_abuse} is same domain as reported site {url}, skipping"
+                                f"⚠️  Stored abuse email {stored_abuse} is same domain as reported site {url}, skipping"
                             )
 
                     if abuse_list and abuse_report_sent == 0:
@@ -3301,13 +3353,13 @@ class AbuseReportManager:
                             )
                     elif not abuse_list:
                         logger.warning(
-                            f"No valid abuse emails found for {url} - all emails were same domain or invalid"
+                            f"❌ No valid abuse emails found for {url} - all emails were same domain or invalid"
                         )
 
                 except Exception as e:
-                    logger.error(f"WHOIS query failed for {url}: {e}")
+                    logger.error(f"❌ WHOIS query failed for {url}: {e}")
 
-        logger.info("Completed manual reports processing with multi-API validation.")
+        logger.info("✅ Completed manual reports processing with multi-API validation.")
 
     def send_test_report(self, test_email: str, attachment_paths: Optional[List[str]] = None):
         """Send a test abuse report with multi-API results."""
@@ -3338,7 +3390,7 @@ class AbuseReportManager:
             ],
         }
 
-        logger.info("Sending test abuse report with multi-API validation results...")
+        logger.info("📧 Sending test abuse report with multi-API validation results...")
 
         if self.send_abuse_report(
             test_abuse_emails,
@@ -3348,9 +3400,9 @@ class AbuseReportManager:
             test_mode=True,
             multi_api_results=test_multi_api_results,
         ):
-            logger.info("Test report with multi-API results sent successfully.")
+            logger.info("✅ Test report with multi-API results sent successfully.")
         else:
-            logger.error("Failed to send test report.")
+            logger.error("❌ Failed to send test report.")
 
 
 class TakedownMonitor:
@@ -3413,11 +3465,11 @@ class TakedownMonitor:
                                     },
                                 )
                                 logger.info(
-                                    f"Updated {url}: site_status='{new_status}', takedown_date='{new_takedown}'"
+                                    f"🔄 Updated {url}: site_status='{new_status}', takedown_date='{new_takedown}'"
                                 )
 
                         except Exception as e:
-                            logger.error(f"Error checking status for {url}: {e}")
+                            logger.error(f"❌ Error checking status for {url}: {e}")
                             continue
 
                 # Signal completion of first cycle
@@ -3425,12 +3477,12 @@ class TakedownMonitor:
                     first_cycle_done = True
                     if self.monitoring_event and not self.monitoring_event.is_set():
                         logger.info(
-                            "Takedown monitor initial cycle complete, setting monitoring event."
+                            "✅ Takedown monitor initial cycle complete, setting monitoring event."
                         )
                         self.monitoring_event.set()
 
             except Exception as e:
-                logger.error(f"Error in monitoring loop: {e}")
+                logger.error(f"❌ Error in monitoring loop: {e}")
 
             time.sleep(self.check_interval)
 
@@ -3439,7 +3491,7 @@ def save_offset(offset: int):
     """Save current offset to file."""
     with open(OFFSET_FILE, "w") as f:
         f.write(str(offset))
-    logger.debug(f"Offset saved as: {offset}")
+    logger.debug(f"💾 Offset saved as: {offset}")
 
 
 def get_offset() -> int:
@@ -3448,10 +3500,10 @@ def get_offset() -> int:
         with open(OFFSET_FILE, "r") as f:
             offset_str = f.read().strip()
             offset = int(float(offset_str))
-            logger.debug(f"Retrieved offset: {offset}")
+            logger.debug(f"📖 Retrieved offset: {offset}")
             return offset
     except Exception as ex:
-        logger.error(f"Error getting offset from {OFFSET_FILE}: {ex}")
+        logger.error(f"❌ Error getting offset from {OFFSET_FILE}: {ex}")
         return 0
 
 
@@ -3482,16 +3534,16 @@ class AutoPhishingAnalyzer:
             self.running = True
             analysis_thread = threading.Thread(target=self._analysis_worker_loop, daemon=True)
             analysis_thread.start()
-            logger.info("Auto-analysis worker started")
+            logger.info("🤖 Auto-analysis worker started")
 
     def stop_analysis_worker(self):
         """Stop the background analysis worker."""
         self.running = False
-        logger.info("Auto-analysis worker stopped")
+        logger.info("🛑 Auto-analysis worker stopped")
 
     def _analysis_worker_loop(self):
         """Main loop for the analysis worker."""
-        logger.info("Auto-analysis worker loop started")
+        logger.info("🔄 Auto-analysis worker loop started")
 
         while self.running:
             try:
@@ -3499,7 +3551,7 @@ class AutoPhishingAnalyzer:
                 pending_sites = self.db_manager.get_pending_analysis_sites(limit=5)
 
                 if pending_sites:
-                    logger.info(f"Processing {len(pending_sites)} sites for auto-analysis")
+                    logger.info(f"🔍 Processing {len(pending_sites)} sites for auto-analysis")
 
                     for site_info in pending_sites:
                         if not self.running:
@@ -3515,14 +3567,14 @@ class AutoPhishingAnalyzer:
                             time.sleep(AUTO_ANALYSIS_DELAY_SECONDS)
 
                         except Exception as e:
-                            logger.error(f"Error analyzing site {site_info['url']}: {e}")
+                            logger.error(f"❌ Error analyzing site {site_info['url']}: {e}")
                             continue
                 else:
                     # No pending sites, wait longer
                     time.sleep(60)
 
             except Exception as e:
-                logger.error(f"Error in auto-analysis worker loop: {e}")
+                logger.error(f"❌ Error in auto-analysis worker loop: {e}")
                 time.sleep(30)
 
     def analyze_detected_site(self, url: str, detection_keywords: List[str]) -> Dict[str, Any]:
@@ -3536,14 +3588,14 @@ class AutoPhishingAnalyzer:
         Returns:
             Dict[str, Any]: Analysis results and auto-report decision
         """
-        logger.info(f"Starting comprehensive analysis for: {url}")
+        logger.info(f"🔍 Starting comprehensive analysis for: {url}")
 
         try:
             # Perform multi-API scan
             if AUTO_ANALYSIS_ENABLED:
                 multi_api_results = self.multi_api_validator.comprehensive_scan(url)
             else:
-                logger.warning("Auto multi-API scan disabled or no API keys configured")
+                logger.warning("⚠️  Auto multi-API scan disabled or no API keys configured")
                 multi_api_results = {
                     "aggregated_threat_level": "unknown",
                     "confidence_score": 0,
@@ -3566,19 +3618,19 @@ class AutoPhishingAnalyzer:
 
             if auto_report_decision.get("auto_report", False):
                 logger.info(
-                    f"AUTO-REPORT ELIGIBLE: {url} - "
+                    f"🚨 AUTO-REPORT ELIGIBLE: {url} - "
                     f"Threat: {threat_level}, Confidence: {confidence}%, "
                     f"Keywords: {', '.join(detection_keywords)}"
                 )
             elif auto_report_decision.get("manual_review", False):
                 logger.info(
-                    f"MANUAL REVIEW REQUIRED: {url} - "
+                    f"👀 MANUAL REVIEW REQUIRED: {url} - "
                     f"Threat: {threat_level}, Confidence: {confidence}%, "
                     f"Keywords: {', '.join(detection_keywords)}"
                 )
             else:
                 logger.info(
-                    f"ANALYSIS COMPLETE: {url} - "
+                    f"✅ ANALYSIS COMPLETE: {url} - "
                     f"Threat: {threat_level}, Confidence: {confidence}% - No action required"
                 )
 
@@ -3590,7 +3642,7 @@ class AutoPhishingAnalyzer:
             }
 
         except Exception as e:
-            logger.error(f"Failed to analyze detected site {url}: {e}")
+            logger.error(f"❌ Failed to analyze detected site {url}: {e}")
             return {"error": str(e), "url": url}
 
     def _make_auto_report_decision(
@@ -3726,7 +3778,7 @@ class AutoPhishingAnalyzer:
             if not eligible_sites:
                 return 0
 
-            logger.info(f"Processing {len(eligible_sites)} sites for auto-reporting")
+            logger.info(f"📋 Processing {len(eligible_sites)} sites for auto-reporting")
             processed_count = 0
 
             for site_info in eligible_sites:
@@ -3737,7 +3789,7 @@ class AutoPhishingAnalyzer:
                     keywords = site_info["keywords"]
 
                     logger.info(
-                        f"Auto-reporting: {url} - "
+                        f"🚨 Auto-reporting: {url} - "
                         f"Threat: {threat_level}, Confidence: {confidence}%, "
                         f"Keywords: {keywords}"
                     )
@@ -3753,7 +3805,7 @@ class AutoPhishingAnalyzer:
 
                     if not abuse_list:
                         logger.warning(
-                            f"No valid abuse emails found for {url}, marking for manual review"
+                            f"⚠️  No valid abuse emails found for {url}, marking for manual review"
                         )
                         # Mark for manual review instead
                         with self.db_manager.engine.begin() as conn:
@@ -3798,7 +3850,7 @@ class AutoPhishingAnalyzer:
                     else:
                         enhanced_results = None
 
-                    # Send abuse report with enhanced data
+                    # Send an abuse report with enhanced data
                     attachment_paths = AttachmentConfig.get_all_attachments()
                     success = report_manager.send_abuse_report(
                         abuse_list,
@@ -3826,24 +3878,24 @@ class AutoPhishingAnalyzer:
                                 {"timestamp": timestamp, "abuse_email": abuse_list[0], "url": url},
                             )
 
-                        logger.info(f"AUTO-REPORT SENT: {url} to {abuse_list[0]}")
+                        logger.info(f"✅ AUTO-REPORT SENT: {url} to {abuse_list[0]}")
                         processed_count += 1
                     else:
-                        logger.error(f"AUTO-REPORT FAILED: {url}")
+                        logger.error(f"❌ AUTO-REPORT FAILED: {url}")
 
                 except Exception as e:
-                    logger.error(f"Error processing auto-report for {url}: {e}")
+                    logger.error(f"❌ Error processing auto-report: {e}")
                     continue
 
             if processed_count > 0:
                 logger.info(
-                    f"AUTO-REPORT SUMMARY: {processed_count}/{len(eligible_sites)} sites reported successfully"
+                    f"📊 AUTO-REPORT SUMMARY: {processed_count}/{len(eligible_sites)} sites reported successfully"
                 )
 
             return processed_count
 
         except Exception as e:
-            logger.error(f"Error in process_auto_reports: {e}")
+            logger.error(f"❌ Error in process_auto_reports: {e}")
             return 0
 
 
@@ -3867,44 +3919,44 @@ class PhishingScanner:
         if AUTO_ANALYSIS_ENABLED:
             try:
                 self.db_manager = DatabaseManager(db_url=DATABASE_URL)
-                logger.debug("Database manager initialized for auto-analysis")
+                logger.debug("🗄️  Database manager initialized for auto-analysis")
             except Exception as e:
-                logger.warning(f"Could not initialize database for auto-analysis: {e}")
+                logger.warning(f"⚠️  Could not initialize database for auto-analysis: {e}")
                 self.db_manager = None
         else:
-            logger.debug("Auto-analysis disabled, skipping database manager for scanner")
+            logger.debug("ℹ️  Auto-analysis disabled, skipping database manager for scanner")
 
         if args.test_report:
-            logger.info("Test report mode active: Skipping queries file generation.")
+            logger.info("🧪 Test report mode active: Skipping queries file generation.")
             self.total_queries = 0
         else:
             if not args.threads_only:
                 if args.regen_queries or not os.path.exists(QUERIES_FILE):
-                    logger.info(f"Generating queries file {QUERIES_FILE}...")
+                    logger.info(f"📄 Generating queries file {QUERIES_FILE}...")
                     generate_queries_file(self.keywords, self.domains)
                 else:
-                    logger.info(f"Using existing {QUERIES_FILE} file.")
+                    logger.info(f"📄 Using existing {QUERIES_FILE} file.")
             else:
-                logger.info("Threads-only mode: Skipping queries file generation.")
+                logger.info("🧵 Threads-only mode: Skipping queries file generation.")
 
             try:
                 with open(QUERIES_FILE, "r") as f:
                     self.total_queries = sum(1 for _ in f)
-                logger.info(f"Total queries in file: {self.total_queries}")
+                logger.info(f"📊 Total queries in file: {self.total_queries}")
             except Exception as ex:
-                logger.error(f"Error counting total queries: {ex}")
+                logger.error(f"❌ Error counting total queries: {ex}")
                 self.total_queries = 0
 
     def get_dynamic_target_sites(self) -> List[str]:
         """Get next batch of target sites from queries file."""
         offset = get_offset()
         batch = []
-        logger.debug(f"Getting targets from offset {offset}, batch_size={self.batch_size}")
+        logger.debug(f"📖 Getting targets from offset {offset}, batch_size={self.batch_size}")
 
         # If offset is beyond file size, reset to beginning for continuous scanning
         if self.total_queries > 0 and offset >= self.total_queries:
             logger.info(
-                f"Offset {offset} beyond file size {self.total_queries}. Resetting to beginning for continuous scanning."
+                f"🔄 Offset {offset} beyond file size {self.total_queries}. Resetting to beginning for continuous scanning."
             )
             save_offset(0)
             offset = 0
@@ -3922,12 +3974,12 @@ class PhishingScanner:
                         break
                     batch.append(line.strip())
         except Exception as e:
-            logger.error(f"Error reading queries file {QUERIES_FILE}: {e}")
+            logger.error(f"❌ Error reading queries file {QUERIES_FILE}: {e}")
             return []
 
         if not batch:
             # If no batch read (shouldn't happen with reset logic above), reset anyway
-            logger.info("Empty batch read, resetting offset to 0 for continuous scanning.")
+            logger.info("🔄 Empty batch read, resetting offset to 0 for continuous scanning.")
             save_offset(0)
             return self.get_dynamic_target_sites()  # Recursive call to get batch from start
         else:
@@ -3939,13 +3991,13 @@ class PhishingScanner:
                 progress_percent = (new_offset / self.total_queries) * 100
                 remaining = self.total_queries - new_offset
                 logger.debug(
-                    f"Batch from offset {offset}: {len(batch)} queries read. "
+                    f"📊 Batch from offset {offset}: {len(batch)} queries read. "
                     f"Progress: {progress_percent:.1f}% ({remaining} remaining)"
                 )
             else:
-                logger.debug(f"Batch from offset {offset}: {len(batch)} queries read.")
+                logger.debug(f"📊 Batch from offset {offset}: {len(batch)} queries read.")
 
-        logger.debug(f"Returning batch of {len(batch)} targets")
+        logger.debug(f"📦 Returning batch of {len(batch)} targets")
         return batch
 
     @staticmethod
@@ -3955,12 +4007,12 @@ class PhishingScanner:
         return [domain, f"www.{domain}"] if len(parts) == 2 else [domain]
 
     def filter_allowed_targets(self, targets: List[str]) -> List[str]:
-        """Filter out allowed/whitelisted targets."""
+        """Filter out allowed/allowlisted targets."""
         allowed_set = {site.lower().strip() for site in self.allowed_sites}
         filtered = [target for target in targets if target.lower().strip() not in allowed_set]
         removed = len(targets) - len(filtered)
         if removed:
-            logger.info(f"Filtered out {removed} allowed target(s); {len(filtered)} remaining.")
+            logger.info(f"🚫 Filtered out {removed} allowed target(s); {len(filtered)} remaining.")
         return filtered
 
     def get_candidate_urls(self, domain: str) -> List[str]:
@@ -3983,22 +4035,22 @@ class PhishingScanner:
                         candidate_urls.append(url)
                     else:
                         logger.warning(
-                            f"HTTP {response.status_code} at {url} is not acceptable for scanning"
+                            f"⚠️  HTTP {response.status_code} at {url} is not acceptable for scanning"
                         )
 
                 except requests.exceptions.ConnectionError as e:
                     if any(phrase in str(e) for phrase in DNS_ERROR_KEY_PHRASES):
                         if not dns_error_logged:
-                            logger.debug(f"DNS resolution failed for {url}: {e}")
+                            logger.debug(f"🌐 DNS resolution failed for {url}: {e}")
                             dns_error_logged = True
                     else:
-                        logger.error(f"Connection error: {url} - {e}")
+                        logger.error(f"❌ Connection error: {url} - {e}")
 
                 except requests.exceptions.RequestException as e:
-                    logger.error(f"Protocol error: {url} - {e}")
+                    logger.error(f"❌ Protocol error: {url} - {e}")
 
         if not candidate_urls:
-            logger.debug(f"No reachable candidate URLs found for domain: {domain}")
+            logger.debug(f"ℹ️  No reachable candidate URLs found for domain: {domain}")
 
         return candidate_urls
 
@@ -4006,7 +4058,7 @@ class PhishingScanner:
         """Scan a single site for phishing indicators with automatic multi-API analysis integration."""
         code = 0
         for url in self.get_candidate_urls(domain) or []:
-            logger.info(f"Scanning {url} for keywords: {self.keywords}")
+            logger.info(f"🔍 Scanning {url} for keywords: {self.keywords}")
             try:
                 headers = {"User-Agent": DEFAULT_USER_AGENT}
                 response = requests.get(
@@ -4049,7 +4101,7 @@ class PhishingScanner:
                 PhishingUtils.store_scan_result(url, code, matches, db_file=DATABASE_URL)
 
                 if matches:
-                    logger.info(f"Phishing keywords found in {url}: {matches}")
+                    logger.info(f"🎯 Phishing keywords found in {url}: {matches}")
                     PhishingUtils.log_positive_result(url, matches)
 
                     # Auto-detection integration (optional, only if APIs are configured and DB available)
@@ -4061,7 +4113,7 @@ class PhishingScanner:
                             )
 
                             if stored:
-                                logger.info(f"Queued for auto-analysis: {url}")
+                                logger.info(f"📥 Queued for auto-analysis: {url}")
 
                             # Immediate analysis for critical keywords
                             critical_keywords = [
@@ -4078,7 +4130,7 @@ class PhishingScanner:
 
                             if has_critical:
                                 logger.warning(
-                                    f"Critical keywords detected in {url}, performing immediate analysis"
+                                    f"🚨 Critical keywords detected in {url}, performing immediate analysis"
                                 )
                                 try:
                                     immediate_results = self.multi_api_validator.comprehensive_scan(
@@ -4090,7 +4142,7 @@ class PhishingScanner:
                                     confidence = immediate_results.get("confidence_score", 0)
 
                                     logger.warning(
-                                        f"Immediate analysis complete for {url}: Threat={threat_level}, Confidence={confidence}%"
+                                        f"⚡ Immediate analysis complete for {url}: Threat={threat_level}, Confidence={confidence}%"
                                     )
 
                                     # Store immediate results
@@ -4131,51 +4183,51 @@ class PhishingScanner:
 
                                 except Exception as api_error:
                                     logger.error(
-                                        f"Immediate multi-API analysis failed for {url}: {api_error}"
+                                        f"❌ Immediate multi-API analysis failed for {url}: {api_error}"
                                     )
 
                         except Exception as auto_error:
                             logger.error(
-                                f"Auto-detection integration failed for {url}: {auto_error}"
+                                f"❌ Auto-detection integration failed for {url}: {auto_error}"
                             )
                             # Continue with normal operation even if auto-detection fails
                             pass
                 else:
-                    logger.debug(f"No keywords found in {url}")
+                    logger.debug(f"ℹ️  No keywords found in {url}")
 
                 break
 
             except requests.exceptions.Timeout:
-                logger.warning(f"Timeout scanning {url}")
+                logger.warning(f"⏰ Timeout scanning {url}")
                 PhishingUtils.update_scan_result_response_code(url, code)
 
             except requests.exceptions.ConnectionError as e:
                 if any(phrase in str(e) for phrase in DNS_ERROR_KEY_PHRASES):
-                    logger.info(f"DNS failure during scan: {url}")
+                    logger.info(f"🌐 DNS failure during scan: {url}")
                 else:
-                    logger.error(f"Connection failure: {url} - {e}")
+                    logger.error(f"❌ Connection failure: {url} - {e}")
                 PhishingUtils.update_scan_result_response_code(url, code)
 
             except Exception as e:
-                logger.error(f"Scan error: {url} - {repr(e)}")
+                logger.error(f"❌ Scan error: {url} - {repr(e)}")
                 PhishingUtils.update_scan_result_response_code(url, code)
 
     def run_scan_cycle(self) -> None:
         """Run continuous scanning cycles with integrated auto-analysis."""
-        logger.info("Starting enhanced continuous scanning with auto-analysis integration...")
+        logger.info("🚀 Starting enhanced continuous scanning with auto-analysis integration...")
         logger.debug(
-            f"Scanner configuration: timeout={self.timeout}, keywords={len(self.keywords)}, domains={len(self.domains)}"
+            f"⚙️  Scanner configuration: timeout={self.timeout}, keywords={len(self.keywords)}, domains={len(self.domains)}"
         )
-        logger.debug(f"Total queries to process: {self.total_queries}")
+        logger.debug(f"📊 Total queries to process: {self.total_queries}")
 
         cycle_count = 0
         while True:
             cycle_count += 1
-            logger.debug(f"Starting scan cycle #{cycle_count}")
+            logger.debug(f"🔄 Starting scan cycle #{cycle_count}")
 
             targets = self.get_dynamic_target_sites()
             if not targets:
-                logger.info("Reached end of queries file, resetting to beginning...")
+                logger.info("🔄 Reached end of queries file, resetting to beginning...")
                 save_offset(0)  # Reset to start
                 continue
 
@@ -4189,11 +4241,13 @@ class PhishingScanner:
                 else f"{current_offset}/∞"
             )
             logger.info(
-                f"[Cycle {cycle_count}] Processing batch: offset {progress}, batch size {len(targets)}"
+                f"🔍 [Cycle {cycle_count}] Processing batch: offset {progress}, batch size {len(targets)}"
             )
 
             # Use ThreadPoolExecutor for parallel scanning
-            logger.debug(f"Starting parallel scanning with 180 workers for {len(targets)} targets")
+            logger.debug(
+                f"🧵 Starting parallel scanning with 180 workers for {len(targets)} targets"
+            )
             with ThreadPoolExecutor(max_workers=180) as executor:
                 futures = {executor.submit(self.scan_site, target): target for target in targets}
 
@@ -4203,17 +4257,17 @@ class PhishingScanner:
                     try:
                         future.result()
                     except Exception as e:
-                        logger.error(f"Thread error for {futures[future]}: {repr(e)}")
+                        logger.error(f"❌ Thread error for {futures[future]}: {repr(e)}")
 
                     # Progress every 150 completed scans
                     if completed % 150 == 0:
                         progress_percent = (completed / len(targets)) * 100
                         logger.info(
-                            f"[Cycle {cycle_count}] Progress: {completed}/{len(targets)} ({progress_percent:.1f}%)"
+                            f"📊 [Cycle {cycle_count}] Progress: {completed}/{len(targets)} ({progress_percent:.1f}%)"
                         )
 
             logger.info(
-                f"[Cycle {cycle_count}] Completed batch of {len(targets)} targets. Moving to next batch..."
+                f"✅ [Cycle {cycle_count}] Completed batch of {len(targets)} targets. Moving to next batch..."
             )
 
             # Cleanup memory
@@ -4264,7 +4318,7 @@ class Engine:
         upgrade_phishing_db()
         self.db_manager.init_registrar_abuse_db()
 
-        logger.debug("Database initialization completed")
+        logger.debug("🗄️  Database initialization completed")
 
         # Initialize enhanced abuse detector
         self.abuse_detector = EnhancedAbuseEmailDetector(self.db_manager)
@@ -4310,10 +4364,10 @@ class Engine:
             self.scanner = PhishingScanner(
                 self.timeout, self.keywords, self.domains, self.allowed_sites, self.args
             )
-            logger.debug("Scanner initialized for scanning mode")
+            logger.debug("🔍 Scanner initialized for scanning mode")
         else:
             self.scanner = None
-            logger.debug("No scanner needed for current mode")
+            logger.debug("ℹ️  No scanner needed for current mode")
 
     def mark_site_as_phishing(self, url: str, abuse_email: Optional[str] = None):
         """Mark a site as phishing with enhanced database operations."""
@@ -4335,7 +4389,7 @@ class Engine:
                     ),
                     {"timestamp": timestamp, "abuse_email": abuse_email, "url": url},
                 )
-                logger.info(f"Updated phishing flag for {url} with abuse email {abuse_email}")
+                logger.info(f"🔄 Updated phishing flag for {url} with abuse email {abuse_email}")
             else:
                 conn.execute(
                     text(
@@ -4347,12 +4401,12 @@ class Engine:
                     ),
                     {"url": url, "timestamp": timestamp, "abuse_email": abuse_email},
                 )
-                logger.info(f"Marked {url} as phishing with abuse email {abuse_email}")
+                logger.info(f"🚨 Marked {url} as phishing with abuse email {abuse_email}")
 
     def perform_multi_api_scan(self, url: str):
         """Perform multi-API scan and display results."""
         if not validators.url(url):
-            logger.error(f"Invalid URL format: {url}")
+            logger.error(f"❌ Invalid URL format: {url}")
             return
 
         logger.info(f"🔍 Starting multi-API comprehensive scan for: {url}")
@@ -4462,26 +4516,26 @@ class Engine:
                         print(f"🔄 URL flagged in database for further processing")
 
         except Exception as e:
-            logger.error(f"Multi-API scan failed for {url}: {e}")
+            logger.error(f"❌ Multi-API scan failed for {url}: {e}")
             print(f"\n❌ Scan failed: {e}")
 
     def start(self):
         """Start the engine in the appropriate mode with enhanced auto-analysis."""
         logger.debug(
-            f"Starting engine in mode: scanning={self.mode.scanning_mode}, threads_only={self.args.threads_only}"
+            f"⚙️  Starting engine in mode: scanning={self.mode.scanning_mode}, threads_only={self.args.threads_only}"
         )
 
         if self.args.report:
             self.mark_site_as_phishing(self.args.report, abuse_email=self.abuse_email)
             logger.info(
-                f"URL {self.args.report} flagged as phishing. Exiting without sending an email."
+                f"🚨 URL {self.args.report} flagged as phishing. Exiting without sending an email."
             )
             return
 
         if getattr(self.args, "multi_api_scan", False):
             url = getattr(self.args, "url", None)
             if not url:
-                logger.error("--multi-api-scan requires --url parameter")
+                logger.error("❌ --multi-api-scan requires --url parameter")
                 return
             self.perform_multi_api_scan(url)
             return
@@ -4490,12 +4544,14 @@ class Engine:
             # Convert single attachment to list if provided
             attachment_paths = [self.attachment] if self.attachment else None
             self.report_manager.process_manual_reports(attachment_paths=attachment_paths)
-            logger.info("Manually processed flagged phishing reports. Exiting.")
+            logger.info("✅ Manually processed flagged phishing reports. Exiting.")
             return
 
         if self.args.test_report:
             if not self.abuse_email:
-                logger.error("For a test report, please provide a test email using --abuse-email")
+                logger.error(
+                    "❌ For a test report, please provide a test email using --abuse-email"
+                )
                 return
             # Convert single attachment to list if provided, otherwise get all attachments
             attachment_paths = (
@@ -4504,7 +4560,7 @@ class Engine:
             self.report_manager.send_test_report(
                 self.abuse_email, attachment_paths=attachment_paths
             )
-            logger.info("Test report sent. Exiting.")
+            logger.info("✅ Test report sent. Exiting.")
             return
 
         if getattr(self.args, "start_api", False):
@@ -4518,34 +4574,36 @@ class Engine:
             return
 
         # Start background threads for abuse reporting and monitoring
-        logger.debug("Starting background threads...")
+        logger.debug("🧵 Starting background threads...")
 
         reporting_thread = threading.Thread(
             target=self.report_manager.report_phishing_sites, daemon=True
         )
         reporting_thread.start()
-        logger.debug("Abuse reporting thread started")
+        logger.debug("📧 Abuse reporting thread started")
 
         takedown_thread = threading.Thread(target=self.takedown_monitor.run, daemon=True)
         takedown_thread.start()
-        logger.debug("Takedown monitoring thread started")
+        logger.debug("🔍 Takedown monitoring thread started")
 
         # Start auto-analysis worker if APIs are configured
         if AUTO_ANALYSIS_ENABLED:
             self.auto_analyzer.start_analysis_worker()
-            logger.info("Auto-analysis system started with multi-API integration")
+            logger.info("🤖 Auto-analysis system started with multi-API integration")
         else:
-            logger.info("Auto-analysis disabled (no API keys configured or disabled in settings)")
+            logger.info(
+                "ℹ️  Auto-analysis disabled (no API keys configured or disabled in settings)"
+            )
 
         if self.args.threads_only:
             logger.info(
-                "Running in threads-only mode. Background threads are active; skipping scanning cycle."
+                "🧵 Running in threads-only mode. Background threads are active; skipping scanning cycle."
             )
             logger.info(
-                "Active systems: Abuse reporting, Takedown monitoring"
+                "🔄 Active systems: Abuse reporting, Takedown monitoring"
                 + (", Auto-analysis" if AUTO_ANALYSIS_ENABLED else "")
             )
-            logger.info("To scan for new sites, run without --threads-only flag.")
+            logger.info("ℹ️  To scan for new sites, run without --threads-only flag.")
 
             # Show system status
             if AUTO_ANALYSIS_ENABLED:
@@ -4555,23 +4613,23 @@ class Engine:
                         self.db_manager.get_auto_report_eligible_sites(limit=100)
                     )
                     logger.info(
-                        f"System Status: {pending_count} sites pending analysis, {auto_eligible_count} sites eligible for auto-reporting"
+                        f"📊 System Status: {pending_count} sites pending analysis, {auto_eligible_count} sites eligible for auto-reporting"
                     )
                 except Exception as e:
                     logger.debug(f"Could not get system status: {e}")
             else:
-                logger.info("Auto-analysis system inactive - no API keys configured")
+                logger.info("ℹ️  Auto-analysis system inactive - no API keys configured")
 
             # Show what the threads are doing
-            logger.info("Background threads running:")
-            logger.info("  - Abuse Report Manager: Processing flagged phishing sites")
-            logger.info("  - Takedown Monitor: Monitoring site status changes")
+            logger.info("🔄 Background threads running:")
+            logger.info("  📧 Abuse Report Manager: Processing flagged phishing sites")
+            logger.info("  🔍 Takedown Monitor: Monitoring site status changes")
             if AUTO_ANALYSIS_ENABLED:
                 logger.info(
-                    "  - Auto-Analysis Worker: Analyzing detected sites with multi-API validation"
+                    "  🤖 Auto-Analysis Worker: Analyzing detected sites with multi-API validation"
                 )
 
-            logger.info("System ready. Press Ctrl+C to stop.")
+            logger.info("✅ System ready. Press Ctrl+C to stop.")
 
             while True:
                 time.sleep(60)
@@ -4579,16 +4637,16 @@ class Engine:
         elif self.mode.scanning_mode:
             # SCANNING MODE - This should always work regardless of API keys
             logger.info(
-                f"Initialized scanning engine with {len(self.keywords)} keywords and {len(self.domains)} domain extensions"
+                f"🚀 Initialized scanning engine with {len(self.keywords)} keywords and {len(self.domains)} domain extensions"
             )
-            logger.info(f"Allowed sites (whitelist): {self.allowed_sites}")
-            logger.info(f"Timeout: {self.timeout}s per request")
+            logger.info(f"🚫 Allowed sites (whitelist): {self.allowed_sites}")
+            logger.info(f"⏰ Timeout: {self.timeout}s per request")
 
             if not self.scanner:
-                logger.error("Scanner not initialized! This is a bug.")
+                logger.error("❌ Scanner not initialized! This is a bug.")
                 return
 
-            logger.debug("Scanner object exists, preparing to start scanning...")
+            logger.debug("🔍 Scanner object exists, preparing to start scanning...")
 
             # Log API configuration status for scanning
             api_status = []
@@ -4600,45 +4658,49 @@ class Engine:
                 api_status.append("PhishTank")
 
             if api_status:
-                logger.info(f"Multi-API integration enabled: {', '.join(api_status)}")
-                logger.info(f"Auto-analysis: {'Enabled' if AUTO_ANALYSIS_ENABLED else 'Disabled'}")
+                logger.info(f"🤖 Multi-API integration enabled: {', '.join(api_status)}")
+                logger.info(
+                    f"🎯 Auto-analysis: {'Enabled' if AUTO_ANALYSIS_ENABLED else 'Disabled'}"
+                )
                 if AUTO_ANALYSIS_ENABLED:
                     logger.info(
-                        f"Auto-report threshold: {AUTO_REPORT_THRESHOLD_CONFIDENCE}% confidence"
+                        f"📊 Auto-report threshold: {AUTO_REPORT_THRESHOLD_CONFIDENCE}% confidence"
                     )
                     logger.info(
-                        f"Manual review threshold: {MANUAL_REVIEW_THRESHOLD_CONFIDENCE}% confidence"
+                        f"👀 Manual review threshold: {MANUAL_REVIEW_THRESHOLD_CONFIDENCE}% confidence"
                     )
             else:
-                logger.info("Multi-API integration disabled (no API keys configured)")
-                logger.info("Running in basic scanning mode - will detect and log phishing sites")
+                logger.info("ℹ️  Multi-API integration disabled (no API keys configured)")
+                logger.info(
+                    "🔍 Running in basic scanning mode - will detect and log phishing sites"
+                )
 
             # Start continuous scanning
-            logger.info("Starting continuous scanning cycle...")
+            logger.info("🚀 Starting continuous scanning cycle...")
             logger.debug("About to call scanner.run_scan_cycle()")
 
             try:
                 self.scanner.run_scan_cycle()
             except KeyboardInterrupt:
-                logger.info("Received interrupt signal, shutting down gracefully...")
+                logger.info("🛑 Received interrupt signal, shutting down gracefully...")
                 if AUTO_ANALYSIS_ENABLED:
                     self.auto_analyzer.stop_analysis_worker()
             except Exception as e:
-                logger.error(f"Error in scan cycle: {e}")
+                logger.error(f"❌ Error in scan cycle: {e}")
                 import traceback
 
                 logger.debug(f"Full traceback: {traceback.format_exc()}")
-                logger.info("Restarting scanning in 60 seconds...")
+                logger.info("🔄 Restarting scanning in 60 seconds...")
                 time.sleep(60)
                 # Restart scanning
                 try:
                     self.scanner.run_scan_cycle()
                 except KeyboardInterrupt:
-                    logger.info("Received interrupt signal, shutting down gracefully...")
+                    logger.info("🛑 Received interrupt signal, shutting down gracefully...")
                     if AUTO_ANALYSIS_ENABLED:
                         self.auto_analyzer.stop_analysis_worker()
         else:
-            logger.error("Unknown mode - this shouldn't happen!")
+            logger.error("❌ Unknown mode - this shouldn't happen!")
             logger.debug(f"Mode details: {vars(self.mode)}")
 
 
@@ -4972,13 +5034,13 @@ def main():
         args.log_level if args.log_level is not None else getattr(settings, "LOG_LEVEL", "INFO")
     )
 
-    logger.debug("Anisakys starting up...")
-    logger.debug(f"Arguments: {vars(args)}")
+    logger.debug("🚀 Anisakys starting up...")
+    logger.debug(f"⚙️  Arguments: {vars(args)}")
 
     # Handle reset offset command
     if args.reset_offset:
         save_offset(0)
-        logger.info("Scanning offset reset to 0. Will start from beginning of queries file.")
+        logger.info("🔄 Scanning offset reset to 0. Will start from beginning of queries file.")
         return
 
     # Handle auto-status command
@@ -4988,32 +5050,32 @@ def main():
 
     # Handle force auto-analysis command
     if args.force_auto_analysis:
-        logger.info("Forcing immediate auto-analysis of all pending sites...")
+        logger.info("🔄 Forcing immediate auto-analysis of all pending sites...")
         db_manager = DatabaseManager(db_url=DATABASE_URL)
         abuse_detector = EnhancedAbuseEmailDetector(db_manager)
         auto_analyzer = AutoPhishingAnalyzer(db_manager, abuse_detector)
 
         pending_sites = db_manager.get_pending_analysis_sites(limit=50)
         if pending_sites:
-            logger.info(f"Found {len(pending_sites)} sites pending analysis")
+            logger.info(f"🔍 Found {len(pending_sites)} sites pending analysis")
             for site_info in pending_sites:
                 try:
-                    logger.info(f"Analyzing: {site_info['url']}")
+                    logger.info(f"🔍 Analyzing: {site_info['url']}")
                     auto_analyzer.analyze_detected_site(
                         site_info["url"],
                         site_info["keywords"].split(", ") if site_info["keywords"] else [],
                     )
                     time.sleep(5)  # Short delay between analyses
                 except Exception as e:
-                    logger.error(f"Error analyzing {site_info['url']}: {e}")
-            logger.info("Force auto-analysis completed")
+                    logger.error(f"❌ Error analyzing {site_info['url']}: {e}")
+            logger.info("✅ Force auto-analysis completed")
         else:
-            logger.info("No sites pending analysis")
+            logger.info("ℹ️  No sites pending analysis")
         return
 
     # Handle auto-report now command
     if args.auto_report_now:
-        logger.info("Forcing immediate processing of auto-report eligible sites...")
+        logger.info("🚨 Forcing immediate processing of auto-report eligible sites...")
         db_manager = DatabaseManager(db_url=DATABASE_URL)
         abuse_detector = EnhancedAbuseEmailDetector(db_manager)
         auto_analyzer = AutoPhishingAnalyzer(db_manager, abuse_detector)
@@ -5022,7 +5084,7 @@ def main():
         report_manager = AbuseReportManager(db_manager, abuse_detector, cc_emails=None, timeout=30)
 
         processed = auto_analyzer.process_auto_reports(report_manager)
-        logger.info(f"Auto-reporting completed: {processed} sites processed")
+        logger.info(f"📊 Auto-reporting completed: {processed} sites processed")
         return
 
     # Print enhanced API configuration status
@@ -5042,11 +5104,11 @@ def main():
     else:
         api_configs.append("PhishTank API: Not configured")
 
-    logger.info("Enhanced API Configuration Status:")
+    logger.info("🔧 Enhanced API Configuration Status:")
     for config in api_configs:
         logger.info(f"   {config}")
 
-    logger.info("Auto-Analysis Configuration:")
+    logger.info("🤖 Auto-Analysis Configuration:")
     logger.info(f"   Auto-Analysis: {'Enabled' if AUTO_ANALYSIS_ENABLED else 'Disabled'}")
     if AUTO_ANALYSIS_ENABLED:
         logger.info(f"   Auto-Report Threshold: {AUTO_REPORT_THRESHOLD_CONFIDENCE}% confidence")
@@ -5055,14 +5117,14 @@ def main():
     else:
         logger.info("   Reason: No API keys configured or AUTO_MULTI_API_SCAN=False")
 
-    logger.debug("Creating engine instance...")
+    logger.debug("⚙️  Creating engine instance...")
     try:
         engine_instance = Engine(args)
-        logger.debug("Engine instance created successfully")
-        logger.debug("Starting engine...")
+        logger.debug("✅ Engine instance created successfully")
+        logger.debug("🚀 Starting engine...")
         engine_instance.start()
     except Exception as e:
-        logger.error(f"Failed to create or start engine: {e}")
+        logger.error(f"❌ Failed to create or start engine: {e}")
         import traceback
 
         logger.debug(f"Full traceback: {traceback.format_exc()}")
