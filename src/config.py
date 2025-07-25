@@ -32,6 +32,16 @@ class Settings(BaseSettings):
     DATABASE_URL: Optional[str] = None
     QUERIES_FILE: Optional[str] = None
     OFFSET_FILE: Optional[str] = None
+    AUTO_MULTI_API_SCAN: Optional[bool] = False
+    AUTO_REPORT_THRESHOLD_CONFIDENCE: Optional[int] = None
+    AUTO_REPORT_THREAT_LEVELS: Optional[str] = None
+    MANUAL_REVIEW_THRESHOLD_CONFIDENCE: Optional[int] = None
+    AUTO_ANALYSIS_DELAY_SECONDS: Optional[int] = None
+    VIRUSTOTAL_API_KEY: Optional[str] = None
+    URLVOID_API_KEY: Optional[str] = None
+    PHISHTANK_API_KEY: Optional[str] = None
+    GRINDER0X_API_URL: Optional[str] = None
+    GRINDER0X_API_KEY: Optional[str] = None
 
     model_config = {
         "env_file": env_file,
