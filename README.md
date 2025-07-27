@@ -167,6 +167,8 @@ KEYWORDS=bank,login,verify,secure,account
 DOMAINS=.com,.net,.org,.info
 TIMEOUT=30
 LOG_LEVEL=INFO
+DEFAULT_ATTACHMENT=attachments/file.pdf
+ATTACHMENTS_FOLDER=attachments/
 
 # Email Configuration (for abuse reporting)
 SMTP_HOST=smtp.example.com
@@ -250,7 +252,6 @@ Report a confirmed phishing site:
 ```bash
 cd anisakys
 python anisakys.py --report "https://sub.domain.com" --abuse-email abuse@provider.com
-python anisakys.py --process-reports
 ```
 
 - You can specify abuse mail or not.
@@ -266,12 +267,18 @@ cd anisakys
 python anisakys.py --process-reports --attachment attachments/evidence.pdf --cc="soc@company.com,analyst@company.com"
 ```
 
+- You can specify attachment or the system will get these from env.
+- You can specify CC Mails or the system will get these from env.
+
 Use multiple attachments from a folder:
 
 ```bash
 cd anisakys
 python anisakys.py --process-reports --attachments-folder ./evidence_folder --cc="team@company.com"
 ```
+
+- You can specify attachments folder or the system will get these from env.
+- You can specify CC Mails or the system will get these from env.
 
 ### 📧 **Test Abuse Reporting**
 
