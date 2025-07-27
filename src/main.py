@@ -334,7 +334,7 @@ class GrinderReportClient:
 
     This class handles the bidirectional threat intelligence integration,
     automatically reporting detected phishing infrastructure to Grinder
-    for subsequent AbuseIPDB reporting.
+    for later AbuseIPDB reporting.
     """
 
     def __init__(self, api_url: str = None, api_key: str = None):
@@ -342,8 +342,8 @@ class GrinderReportClient:
         Initialize Grinder report client.
 
         Args:
-            api_url (str, optional): Grinder API URL. Defaults to settings.
-            api_key (str, optional): Grinder API key. Defaults to settings.
+            api_url (str, optional): Grinder API URL. Default to settings.
+            api_key (str, optional): Grinder API key. Default to settings.
         """
         self.api_url = api_url or GRINDER0X_API_URL
         self.api_key = api_key or GRINDER0X_API_KEY
@@ -369,7 +369,7 @@ class GrinderReportClient:
         self, ip_address: str, detection_context: Dict[str, Any], confidence: int = 90
     ) -> Dict[str, Any]:
         """
-        Report a malicious IP address to Grinder system.
+        Report a malicious IP address to a Grinder system.
 
         Args:
             ip_address (str): The malicious IP address to report
@@ -469,9 +469,10 @@ class GrinderReportClient:
             logger.error(f"❌ Unexpected error reporting IP {ip_address} to Grinder: {e}")
             return {"status": "error", "message": str(e)}
 
-    def _validate_ip_address(self, ip_address: str) -> bool:
+    @staticmethod
+    def _validate_ip_address(ip_address: str) -> bool:
         """
-        Validate IP address format.
+        Validate an IP address format.
 
         Args:
             ip_address (str): IP address to validate
@@ -485,7 +486,8 @@ class GrinderReportClient:
         except ValueError:
             return False
 
-    def _determine_categories(self, detection_context: Dict[str, Any]) -> List[int]:
+    @staticmethod
+    def _determine_categories(detection_context: Dict[str, Any]) -> List[int]:
         """
         Determine appropriate AbuseIPDB categories based on detection context.
 
@@ -495,10 +497,9 @@ class GrinderReportClient:
         Returns:
             List[int]: List of category IDs
         """
-        categories = []
+        categories = [ABUSEIPDB_CATEGORIES["phishing"]]
 
         # Always add phishing category for phishing sites
-        categories.append(ABUSEIPDB_CATEGORIES["phishing"])
 
         # Add additional categories based on threat level and context
         threat_level = detection_context.get("threat_level", "").lower()
@@ -520,7 +521,8 @@ class GrinderReportClient:
         # Remove duplicates and return
         return list(set(categories))
 
-    def _build_comment(self, detection_context: Dict[str, Any]) -> str:
+    @staticmethod
+    def _build_comment(detection_context: Dict[str, Any]) -> str:
         """
         Build a comprehensive comment for the abuse report.
 
@@ -656,7 +658,7 @@ class VirusTotalIntegration:
 
     def scan_url(self, url: str) -> Dict[str, Any]:
         """
-        Submit URL for analysis and get comprehensive threat assessment.
+        Submit URL for analysis and get a comprehensive threat assessment.
 
         Args:
             url (str): URL to scan
@@ -702,7 +704,7 @@ class VirusTotalIntegration:
                 return result
 
             elif response.status_code == 404:
-                # URL not found, submit for scanning
+                # URL isn't found, submit for scanning
                 scan_response = self.session.post(f"{self.base_url}/urls", data={"url": url})
 
                 if scan_response.status_code == 200:
@@ -725,7 +727,8 @@ class VirusTotalIntegration:
             logger.error(f"❌ VirusTotal scan failed for {url}: {e}")
             return {"error": str(e)}
 
-    def _calculate_threat_level(self, analysis_stats: Dict[str, int]) -> str:
+    @staticmethod
+    def _calculate_threat_level(analysis_stats: Dict[str, int]) -> str:
         """
         Calculate threat level based on detection statistics.
 
@@ -759,7 +762,7 @@ class VirusTotalIntegration:
 
     def get_domain_report(self, domain: str) -> Dict[str, Any]:
         """
-        Get domain reputation and analysis report.
+        Get a domain reputation and analysis report.
 
         Args:
             domain (str): Domain to analyze
@@ -868,7 +871,8 @@ class URLVoidIntegration:
             logger.error(f"❌ URLVoid analysis failed for {domain}: {e}")
             return {"error": str(e)}
 
-    def _calculate_urlvoid_threat_level(self, details: Dict[str, Any]) -> str:
+    @staticmethod
+    def _calculate_urlvoid_threat_level(details: Dict[str, Any]) -> str:
         """
         Calculate threat level based on URLVoid analysis.
 
@@ -894,9 +898,9 @@ class URLVoidIntegration:
 
 class PhishTankIntegration:
     """
-    PhishTank API Integration for community-driven phishing database.
+    PhishTank API Integration for a community-driven phishing database.
 
-    Provides access to verified phishing URLs from security community with
+    Provides access to verified phishing URLs from the security community with
     real-time updates and submission capabilities.
     """
 
@@ -913,7 +917,7 @@ class PhishTankIntegration:
 
     def check_phishing_status(self, url: str) -> Dict[str, Any]:
         """
-        Check if URL is in PhishTank verified phishing database.
+        Check if URL is in PhishTank verified a phishing database.
 
         Args:
             url (str): URL to check
@@ -1069,8 +1073,9 @@ class MultiAPIValidator:
 
         return results
 
+    @staticmethod
     def _aggregate_threat_level(
-        self, vt_result: Dict[str, Any], uv_result: Dict[str, Any], pt_result: Dict[str, Any]
+        vt_result: Dict[str, Any], uv_result: Dict[str, Any], pt_result: Dict[str, Any]
     ) -> str:
         """
         Aggregate threat levels from multiple APIs into single assessment.
@@ -1085,7 +1090,7 @@ class MultiAPIValidator:
         """
         threat_scores = []
 
-        # PhishTank has highest priority (verified community reports)
+        # PhishTank has the highest priority (verified community reports)
         if pt_result.get("is_phishing") and pt_result.get("verified"):
             return "critical"
         elif pt_result.get("is_phishing"):
@@ -1127,8 +1132,9 @@ class MultiAPIValidator:
         else:
             return "clean"
 
+    @staticmethod
     def _calculate_confidence_score(
-        self, vt_result: Dict[str, Any], uv_result: Dict[str, Any], pt_result: Dict[str, Any]
+        vt_result: Dict[str, Any], uv_result: Dict[str, Any], pt_result: Dict[str, Any]
     ) -> int:
         """
         Calculate confidence score based on API response quality and agreement.
@@ -1147,7 +1153,7 @@ class MultiAPIValidator:
             elif pt_result.get("is_phishing"):
                 confidence += 75  # Medium confidence for unverified reports
             else:
-                confidence += 60  # Base confidence for clean result
+                confidence += 60  # Base confidence for a clean result
 
         # VirusTotal confidence
         if not vt_result.get("error"):
@@ -1168,8 +1174,9 @@ class MultiAPIValidator:
 
         return int(confidence / factors) if factors > 0 else 0
 
+    @staticmethod
     def _generate_recommendations(
-        self, vt_result: Dict[str, Any], uv_result: Dict[str, Any], pt_result: Dict[str, Any]
+        vt_result: Dict[str, Any], uv_result: Dict[str, Any], pt_result: Dict[str, Any]
     ) -> List[str]:
         """
         Generate actionable recommendations based on scan results.
@@ -1247,7 +1254,7 @@ class AttachmentConfig:
 
     @staticmethod
     def get_attachment() -> Optional[str]:
-        """Get default attachment path from settings."""
+        """Get a default attachment path from settings."""
         path = getattr(settings, "DEFAULT_ATTACHMENT", None)
         if path and os.path.exists(path):
             abs_path = os.path.abspath(path)
@@ -1311,7 +1318,7 @@ class AttachmentConfig:
         """
         attachments = []
 
-        # First, try to get attachments from folder
+        # First, try to get attachments from the folder
         folder_attachments = AttachmentConfig.get_attachments_from_folder()
         if folder_attachments:
             attachments.extend(folder_attachments)
@@ -1444,7 +1451,7 @@ class EnhancedAbuseEmailDetector:
 
     def get_abuse_email_by_registrar(self, registrar: str) -> Optional[str]:
         """Get abuse email from registrar database (cached + enhanced)."""
-        # Check database cache first
+        # Check the database cache first
         with self.db_manager.engine.begin() as conn:
             result = conn.execute(
                 text("SELECT abuse_email FROM registrar_abuse WHERE LOWER(registrar) LIKE :param"),
@@ -1481,7 +1488,7 @@ class EnhancedAbuseEmailDetector:
         logger.info(f"🔍 Starting enhanced abuse email detection for domain: {domain}")
         abuse_emails = []
 
-        # 1. Check cached registrar database
+        # 1. Check a cached registrar database
         if registrar:
             registrar_email = self.get_abuse_email_by_registrar(registrar)
             if registrar_email and self.validate_abuse_email_domain(registrar_email, domain):
@@ -1541,7 +1548,7 @@ class EnhancedAbuseEmailDetector:
                 else:
                     logger.warning(f"⚠️  Could not find real IP behind Cloudflare for {domain}")
 
-                # Always add Cloudflare as secondary option
+                # Always add Cloudflare as a secondary option
                 cloudflare_email = "abuse@cloudflare.com"
                 if cloudflare_email not in abuse_emails:
                     abuse_emails.append(cloudflare_email)
@@ -1642,7 +1649,8 @@ class EnhancedAbuseEmailDetector:
             return match.group(1).strip()
         return None
 
-    def validate_abuse_email_domain(self, email: str, reported_domain: str) -> bool:
+    @staticmethod
+    def validate_abuse_email_domain(email: str, reported_domain: str) -> bool:
         """
         Validate that abuse email is not from the same domain being reported.
 
@@ -1781,7 +1789,7 @@ class EnhancedAbuseEmailDetector:
                     if isinstance(contact_data, dict):
                         contact_info = contact_data.get("contact", {})
                         if contact_info and isinstance(contact_info, dict):
-                            # Check role for abuse
+                            # Check a role for abuse
                             role = str(contact_info.get("role", "")).lower()
                             if "abuse" in role:
                                 email = contact_info.get("email")
@@ -1821,7 +1829,7 @@ class EnhancedAbuseEmailDetector:
                     if isinstance(entity, dict):
                         roles = entity.get("roles", [])
                         if roles and isinstance(roles, list) and "abuse" in roles:
-                            # This entity has abuse role
+                            # This entity has an abuse role
                             events = entity.get("events", [])
                             contact = entity.get("contact", {})
                             if contact and isinstance(contact, dict):
@@ -1857,9 +1865,10 @@ class EnhancedAbuseEmailDetector:
             logger.error(f"❌ Failed to get hosting provider info for IP {ip}: {e}")
             return None, None, None, None
 
-    def get_abuse_email_by_asn(self, asn: str) -> Optional[str]:
+    @staticmethod
+    def get_abuse_email_by_asn(asn: str) -> Optional[str]:
         """
-        Get abuse email from ASN database.
+        Get abuse email from an ASN database.
 
         Args:
             asn (str): ASN number (with or without 'AS' prefix)
@@ -1884,9 +1893,10 @@ class EnhancedAbuseEmailDetector:
         logger.debug(f"⚠️  No ASN abuse email found for AS{asn_clean}")
         return None
 
-    def get_enhanced_whois_data(self, domain: str) -> dict:
+    @staticmethod
+    def get_enhanced_whois_data(domain: str) -> dict:
         """
-        Get WHOIS data using appropriate server based on TLD with enhanced parsing.
+        Get WHOIS data using the appropriate server based on TLD with enhanced parsing.
 
         Args:
             domain (str): Domain to query
@@ -1979,7 +1989,7 @@ class PhishingAPI:
         # Initialize Flask app
         self.app = Flask(__name__)
         self.app.config["JSON_SORT_KEYS"] = False
-        self.app.api_key = api_key  # Store API key in app config
+        self.app.api_key = api_key  # Store API key in-app config
 
         # Configure Flask logging to be less verbose
         flask_logging.getLogger("werkzeug").setLevel(flask_logging.WARNING)
@@ -2921,7 +2931,7 @@ class AbuseReportManager:
         multi_api_results: Optional[Dict[str, Any]] = None,
     ) -> bool:
         """
-        Send abuse report with enhanced error handling and Grinder IP reporting integration.
+        Send an abuse report with enhanced error handling and Grinder IP reporting integration.
 
         Args:
             abuse_emails (List[str]): List of abuse email addresses
@@ -2932,7 +2942,7 @@ class AbuseReportManager:
             multi_api_results (Optional[Dict[str, Any]]): Multi-API validation results
 
         Returns:
-            bool: True if report was sent successfully, False otherwise
+            bool: True if a report was sent successfully, False otherwise
         """
         # Get attachments - prioritize parameter, then get all configured attachments
         if attachment_paths is None:
@@ -3002,7 +3012,15 @@ class AbuseReportManager:
         )
 
         # Prepare CC list
-        final_cc = [] if test_mode else (self.cc_emails[:] if self.cc_emails else [])
+        final_cc = (
+            []
+            if test_mode
+            else (
+                self.cc_emails[:]
+                if self.cc_emails
+                else settings.ABUSE_EMAIL_SENDER + settings.DEFAULT_CC_EMAILS
+            )
+        )
         if not test_mode and sender_email not in final_cc:
             final_cc.insert(0, sender_email)
 
@@ -3127,7 +3145,7 @@ class AbuseReportManager:
                     logger.warning(f"⚠️  Invalid email format, skipping: {primary}")
                     continue
 
-                # Validate email is not from same domain being reported
+                # Validate email is not from the same domain being reported
                 if not self.abuse_detector.validate_abuse_email_domain(primary, site_domain):
                     logger.warning(
                         f"⚠️  Skipping abuse email from same domain being reported: {primary} for {site_url}"
@@ -3607,7 +3625,7 @@ class AbuseReportManager:
                         logger.info(f"🔍 Performing multi-API validation for {url}")
                         multi_api_results = self.multi_api_validator.comprehensive_scan(url)
 
-                        # Store API results in database
+                        # Store API results in a database
                         try:
                             conn.execute(
                                 text(
@@ -3678,7 +3696,7 @@ class AbuseReportManager:
                         )
                         abuse_list = ["abuse@cloudflare.com"]
                     elif cloudflare_detected and abuse_list:
-                        # Ensure Cloudflare is in the list but as secondary option
+                        # Ensure Cloudflare is in the list but as a secondary option
                         cloudflare_email = "abuse@cloudflare.com"
                         if cloudflare_email not in abuse_list:
                             abuse_list.append(cloudflare_email)
@@ -3863,7 +3881,7 @@ def save_offset(offset: int):
 
 
 def get_offset() -> int:
-    """Get current offset from file."""
+    """Get the current offset from a file."""
     try:
         with open(OFFSET_FILE, "r") as f:
             offset_str = f.read().strip()
@@ -3938,7 +3956,7 @@ class AutoPhishingAnalyzer:
                             logger.error(f"❌ Error analyzing site {site_info['url']}: {e}")
                             continue
                 else:
-                    # No pending sites, wait longer
+                    # No, pending sites, wait longer
                     time.sleep(60)
 
             except Exception as e:
@@ -4013,8 +4031,9 @@ class AutoPhishingAnalyzer:
             logger.error(f"❌ Failed to analyze detected site {url}: {e}")
             return {"error": str(e), "url": url}
 
+    @staticmethod
     def _make_auto_report_decision(
-        self, multi_api_results: Dict[str, Any], detection_keywords: List[str]
+        multi_api_results: Dict[str, Any], detection_keywords: List[str]
     ) -> Dict[str, Any]:
         """
         Make intelligent auto-report decision based on analysis results.
@@ -4189,7 +4208,7 @@ class AutoPhishingAnalyzer:
                             )
                         continue
 
-                    # Get enhanced multi-API results for report
+                    # Get enhanced multi-API results for a report
                     with self.db_manager.engine.begin() as conn:
                         api_results = conn.execute(
                             text(
@@ -4389,7 +4408,7 @@ class PhishingUtils:
 
     @staticmethod
     def log_positive_result(url: str, found_keywords: List[str]) -> None:
-        """Log positive phishing detection result."""
+        """Log a positive phishing detection result."""
         log_file = "positive_report.txt"
         entry = (
             f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} - {url}: {', '.join(found_keywords)}\n"
@@ -4444,7 +4463,7 @@ class PhishingUtils:
 
 
 def generate_queries_file(keywords: List[str], domains: List[str]) -> None:
-    """Generate queries file with all keyword/domain combinations."""
+    """Generate a query file with all keyword/domain combinations."""
     total = 0
     with open(QUERIES_FILE, "w") as f:
         for i in range(1, len(keywords) + 1):
@@ -4472,7 +4491,7 @@ class PhishingScanner:
         self.multi_api_validator = MultiAPIValidator()
         self.db_manager = None
 
-        # Initialize database for auto-analysis only if enabled
+        # Initialize a database for auto-analysis only if enabled
         if AUTO_ANALYSIS_ENABLED:
             try:
                 self.db_manager = DatabaseManager(db_url=DATABASE_URL)
@@ -4505,13 +4524,13 @@ class PhishingScanner:
                 self.total_queries = 0
 
     def get_dynamic_target_sites(self) -> List[str]:
-        """Get next batch of target sites from queries file."""
+        """Get the next batch of target sites from a query file."""
         offset = get_offset()
         batch = []
         logger.debug(f"📖 Getting targets from offset {offset}, batch_size={self.batch_size}")
 
         # If offset is beyond file size, reset to beginning for continuous scanning
-        if self.total_queries > 0 and offset >= self.total_queries:
+        if 0 < self.total_queries <= offset:
             logger.info(
                 f"🔄 Offset {offset} beyond file size {self.total_queries}. Resetting to beginning for continuous scanning."
             )
@@ -4524,10 +4543,10 @@ class PhishingScanner:
                 for _ in range(offset):
                     f.readline()
 
-                # Read next batch
+                # Read the next batch
                 for _ in range(self.batch_size):
                     line = f.readline()
-                    if not line:  # End of file
+                    if not line:  # End of a file
                         break
                     batch.append(line.strip())
         except Exception as e:
@@ -4654,7 +4673,7 @@ class PhishingScanner:
                         if any(kw.lower() in content for kw in self.keywords):
                             matches.append(indicator)
 
-                # Always store scan result in the original table
+                # Always store a scan result in the original table
                 PhishingUtils.store_scan_result(url, code, matches, db_file=DATABASE_URL)
 
                 if matches:
@@ -5032,12 +5051,12 @@ class Engine:
 
             print("\n" + "=" * 80)
 
-            # Store results if this was a positive detection
+            # Store results if this was positive detection
             threat_level = results["aggregated_threat_level"]
             if threat_level in ["critical", "high", "medium"]:
                 logger.info(f"🚨 Storing scan results due to threat level: {threat_level}")
 
-                # Store in database for further action
+                # Store in a database for further action
                 with self.db_manager.engine.begin() as conn:
                     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -5401,7 +5420,7 @@ def parse_arguments() -> argparse.Namespace:
 
 
 def show_auto_status():
-    """Show current status of the auto-analysis and auto-reporting system."""
+    """Show the current status of the auto-analysis and auto-reporting system."""
     print("\n" + "=" * 80)
     print("🤖 ANISAKYS AUTO-ANALYSIS & AUTO-REPORTING STATUS")
     print("=" * 80)
@@ -5695,7 +5714,7 @@ def main():
             logger.info("ℹ️  No sites pending analysis")
         return
 
-    # Handle auto-report now command
+    # Handle an auto-report now command
     if args.auto_report_now:
         logger.info("🚨 Forcing immediate processing of auto-report eligible sites...")
         db_manager = DatabaseManager(db_url=DATABASE_URL)
