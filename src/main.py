@@ -2360,102 +2360,77 @@ flask_app = None
 
 def upgrade_phishing_db():
     """Upgrade phishing database schema with new multi-API and auto-analysis fields."""
+    columns_to_add = [
+        ("source", "TEXT DEFAULT 'manual'"),
+        ("priority", "TEXT DEFAULT 'medium'"),
+        ("description", "TEXT"),
+        ("asn", "TEXT"),
+        ("asn_abuse_email", "TEXT"),
+        ("hosting_provider", "TEXT"),
+        ("all_abuse_emails", "TEXT"),
+        ("virustotal_result", "TEXT"),
+        ("urlvoid_result", "TEXT"),
+        ("phishtank_result", "TEXT"),
+        ("multi_api_threat_level", "TEXT"),
+        ("api_confidence_score", "INTEGER"),
+        ("auto_detected", "INTEGER DEFAULT 0"),
+        ("auto_analysis_status", "TEXT DEFAULT 'pending'"),
+        ("auto_analysis_timestamp", "TIMESTAMP"),
+        ("detection_keywords", "TEXT"),
+        ("auto_report_eligible", "INTEGER DEFAULT 0"),
+        ("requires_manual_review", "INTEGER DEFAULT 0"),
+    ]
+
     with db_engine.begin() as conn:
-        # Add new columns for API functionality
-        try:
-            conn.execute(text("ALTER TABLE phishing_sites ADD COLUMN source TEXT DEFAULT 'manual'"))
-        except:
-            pass
-        try:
-            conn.execute(
-                text("ALTER TABLE phishing_sites ADD COLUMN priority TEXT DEFAULT 'medium'")
+        # First check existing columns
+        result = conn.execute(
+            text(
+                """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'phishing_sites'
+        """
             )
-        except:
-            pass
-        try:
-            conn.execute(text("ALTER TABLE phishing_sites ADD COLUMN description TEXT"))
-        except:
-            pass
+        )
+        existing_columns = {row[0] for row in result}
 
-        # Add new ASN-related columns
-        try:
-            conn.execute(text("ALTER TABLE phishing_sites ADD COLUMN asn TEXT"))
-        except:
-            pass
-        try:
-            conn.execute(text("ALTER TABLE phishing_sites ADD COLUMN asn_abuse_email TEXT"))
-        except:
-            pass
-        try:
-            conn.execute(text("ALTER TABLE phishing_sites ADD COLUMN hosting_provider TEXT"))
-        except:
-            pass
-        try:
-            conn.execute(text("ALTER TABLE phishing_sites ADD COLUMN all_abuse_emails TEXT"))
-        except:
-            pass
-
-        # Add new multi-API validation columns
-        try:
-            conn.execute(text("ALTER TABLE phishing_sites ADD COLUMN virustotal_result TEXT"))
-        except:
-            pass
-        try:
-            conn.execute(text("ALTER TABLE phishing_sites ADD COLUMN urlvoid_result TEXT"))
-        except:
-            pass
-        try:
-            conn.execute(text("ALTER TABLE phishing_sites ADD COLUMN phishtank_result TEXT"))
-        except:
-            pass
-        try:
-            conn.execute(text("ALTER TABLE phishing_sites ADD COLUMN multi_api_threat_level TEXT"))
-        except:
-            pass
-        try:
-            conn.execute(text("ALTER TABLE phishing_sites ADD COLUMN api_confidence_score INTEGER"))
-        except:
-            pass
-
-        # Add new auto-analysis columns
-        try:
-            conn.execute(
-                text("ALTER TABLE phishing_sites ADD COLUMN auto_detected INTEGER DEFAULT 0")
-            )
-        except:
-            pass
-        try:
-            conn.execute(
-                text(
-                    "ALTER TABLE phishing_sites ADD COLUMN auto_analysis_status TEXT DEFAULT 'pending'"
+        # Fix api_confidence_score column if it has wrong type
+        if "api_confidence_score" in existing_columns:
+            try:
+                # Check if it's the wrong numeric type
+                result = conn.execute(
+                    text(
+                        """
+                    SELECT data_type, numeric_precision, numeric_scale
+                    FROM information_schema.columns
+                    WHERE table_name = 'phishing_sites' AND column_name = 'api_confidence_score'
+                """
+                    )
                 )
-            )
-        except:
-            pass
-        try:
-            conn.execute(
-                text("ALTER TABLE phishing_sites ADD COLUMN auto_analysis_timestamp TIMESTAMP")
-            )
-        except:
-            pass
-        try:
-            conn.execute(text("ALTER TABLE phishing_sites ADD COLUMN detection_keywords TEXT"))
-        except:
-            pass
-        try:
-            conn.execute(
-                text("ALTER TABLE phishing_sites ADD COLUMN auto_report_eligible INTEGER DEFAULT 0")
-            )
-        except:
-            pass
-        try:
-            conn.execute(
-                text(
-                    "ALTER TABLE phishing_sites ADD COLUMN requires_manual_review INTEGER DEFAULT 0"
-                )
-            )
-        except:
-            pass
+                col_info = result.fetchone()
+                if col_info and col_info[0] == "numeric" and col_info[1] == 5 and col_info[2] == 4:
+                    logger.info("🔧 Fixing api_confidence_score column type...")
+                    conn.execute(
+                        text(
+                            "ALTER TABLE phishing_sites ALTER COLUMN api_confidence_score TYPE INTEGER"
+                        )
+                    )
+                    logger.info("✅ Fixed api_confidence_score column type to INTEGER")
+            except Exception as e:
+                logger.error(f"❌ Failed to fix api_confidence_score column: {e}")
+
+        # Add missing columns
+        for column_name, column_def in columns_to_add:
+            if column_name not in existing_columns:
+                try:
+                    conn.execute(
+                        text(f"ALTER TABLE phishing_sites ADD COLUMN {column_name} {column_def}")
+                    )
+                    logger.info(f"✅ Added column: {column_name}")
+                except Exception as e:
+                    logger.error(f"❌ Failed to add column {column_name}: {e}")
+            else:
+                logger.debug(f"⏭️  Column {column_name} already exists")
 
     logger.info(
         "🔧 Upgraded phishing_sites table with multi-API and auto-analysis support if necessary."
@@ -3018,7 +2993,8 @@ class AbuseReportManager:
             else (
                 self.cc_emails[:]
                 if self.cc_emails
-                else settings.ABUSE_EMAIL_SENDER + settings.DEFAULT_CC_EMAILS
+                else [settings.ABUSE_EMAIL_SENDER]
+                + (settings.DEFAULT_CC_EMAILS.split(",") if settings.DEFAULT_CC_EMAILS else [])
             )
         )
         if not test_mode and sender_email not in final_cc:
