@@ -47,6 +47,22 @@ from functools import wraps
 
 from src.config import settings, CLOUDFLARE_IP_RANGES
 from src.logger import logger
+from src.screenshot_service import ScreenshotService
+
+# Global testing mode detection - independent of test_mode (used for screenshots)
+IS_TESTING_MODE = False
+
+
+def set_testing_mode(enabled=True):
+    """Enable/disable global testing mode. In testing mode, CCs are NEVER sent."""
+    global IS_TESTING_MODE
+    IS_TESTING_MODE = enabled
+    if enabled:
+        logger.warning("🧪 TESTING MODE ACTIVE - CCs disabled for security")
+
+
+from src.abuse_contact_validator import AbuseContactValidator
+from src.report_tracker import ReportTracker, create_report_record
 
 # Database and file configuration
 DATABASE_URL = getattr(settings, "DATABASE_URL", None)
@@ -2379,7 +2395,46 @@ def upgrade_phishing_db():
         ("detection_keywords", "TEXT"),
         ("auto_report_eligible", "INTEGER DEFAULT 0"),
         ("requires_manual_review", "INTEGER DEFAULT 0"),
+        ("screenshot_taken", "INTEGER DEFAULT 0"),
+        ("screenshot_path", "TEXT"),
+        ("screenshot_timestamp", "TIMESTAMP"),
     ]
+
+    # New table for tracking abuse reports (ICANN compliance)
+    def create_abuse_reports_table():
+        """Create table for tracking sent abuse reports"""
+        with db_engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS abuse_reports (
+                        id SERIAL PRIMARY KEY,
+                        site_url TEXT NOT NULL,
+                        report_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        recipients TEXT NOT NULL,
+                        cc_recipients TEXT,
+                        subject TEXT,
+                        report_id TEXT UNIQUE,
+                        status TEXT DEFAULT 'sent',
+                        response_received INTEGER DEFAULT 0,
+                        response_date TIMESTAMP,
+                        response_content TEXT,
+                        sla_deadline TIMESTAMP,
+                        icann_compliant INTEGER DEFAULT 1,
+                        screenshot_included INTEGER DEFAULT 0,
+                        multi_api_results TEXT,
+                        confidence_score INTEGER,
+                        threat_level TEXT,
+                        follow_up_required INTEGER DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """
+                )
+            )
+            logger.info("✅ Created or verified abuse_reports table")
+
+    create_abuse_reports_table()
 
     with db_engine.begin() as conn:
         # First check existing columns
@@ -2602,6 +2657,11 @@ class DatabaseManager:
         """
         Get sites pending multi-API analysis.
 
+        This includes:
+        - Auto-detected sites with pending analysis
+        - Manual sites that haven't been analyzed yet
+        - API-imported sites that need analysis
+
         Args:
             limit (int): Maximum number of sites to return
 
@@ -2615,9 +2675,18 @@ class DatabaseManager:
                         """
                         SELECT url, detection_keywords, first_seen, source, priority
                         FROM phishing_sites
-                        WHERE auto_analysis_status = 'pending'
-                        AND auto_detected = 1
+                        WHERE (
+                            (auto_analysis_status = 'pending' AND auto_detected = 1)  -- Auto-detected pending
+                            OR (manual_flag = 1 AND auto_analysis_status IS NULL)    -- Manual sites not analyzed
+                            OR (source = 'external_api' AND auto_analysis_status IS NULL)  -- API sites not analyzed
+                        )
+                        AND site_status != 'down'  -- Only analyze sites that are potentially up
                         ORDER BY
+                            CASE
+                                WHEN manual_flag = 1 THEN 0      -- Manual sites first
+                                WHEN source = 'external_api' THEN 1  -- API sites second
+                                ELSE 2  -- Auto-detected last
+                            END,
                             CASE priority
                                 WHEN 'high' THEN 1
                                 WHEN 'medium' THEN 2
@@ -2810,6 +2879,13 @@ class AbuseReportManager:
         self.multi_api_validator = MultiAPIValidator()
         self.grinder_client = GrinderReportClient()
 
+        # Initialize ICANN compliance services
+        self.abuse_contact_validator = AbuseContactValidator(timeout=timeout)
+        self.screenshot_service = ScreenshotService(
+            screenshots_dir=getattr(settings, "SCREENSHOTS_DIR", None), timeout=timeout
+        )
+        self.report_tracker = ReportTracker(db_manager.engine)
+
         if cc_emails is None:
             default_cc = getattr(settings, "DEFAULT_CC_ESCALATION_LEVEL2", "")
             self.cc_emails = (
@@ -2930,9 +3006,61 @@ class AbuseReportManager:
         sender_email = getattr(settings, "ABUSE_EMAIL_SENDER")
         subject = f"{getattr(settings, 'ABUSE_EMAIL_SUBJECT')} for {site_url}"
 
-        # Report IP to Grinder if not in test mode and integration is enabled
+        # DEVELOPMENT/TEST PROTECTION: Only send to test email in development
+        TEST_EMAIL = "r6ty5r296it6tl4eg5m.constant214@passinbox.com"
+        if not test_mode:
+            # Check if we're in development/test environment
+            is_development = any(test_email in abuse_emails for test_email in [TEST_EMAIL])
+
+            if is_development:
+                # In development: only send to test email
+                logger.warning(f"🧪 DEVELOPMENT MODE: Redirecting all emails to test address")
+                abuse_emails = [TEST_EMAIL]
+            else:
+                # In production: validate abuse contacts normally
+                validated_emails = []
+                for email in abuse_emails:
+                    validation_result = (
+                        self.abuse_contact_validator.validate_registrar_abuse_contact(email)
+                    )
+                    if validation_result["valid"]:
+                        validated_emails.append(email)
+                        if validation_result["warnings"]:
+                            logger.warning(
+                                f"⚠️  Abuse email {email} has warnings: {', '.join(validation_result['warnings'])}"
+                            )
+                    else:
+                        logger.error(
+                            f"❌ Invalid abuse email {email}: {', '.join(validation_result['errors'])}"
+                        )
+
+                if not validated_emails:
+                    logger.error("❌ No valid abuse emails found - cannot send report")
+                    return False
+
+                abuse_emails = validated_emails
+
+        # ICANN Compliance: Always capture screenshot (independent of test_mode)
+        screenshot_info = None
+        screenshot_included = False
+        try:
+            screenshot_info = self.screenshot_service.capture_screenshot(site_url, use_async=False)
+            if screenshot_info and screenshot_info.get("success"):
+                if not attachment_paths:
+                    attachment_paths = []
+                attachment_paths.append(screenshot_info["screenshot_path"])
+                screenshot_included = True
+                logger.info(f"📸 Screenshot captured: {screenshot_info['filename']}")
+            else:
+                logger.warning(
+                    f"⚠️  Failed to capture screenshot: {screenshot_info.get('error', 'Unknown error') if screenshot_info else 'Service unavailable'}"
+                )
+        except Exception as e:
+            logger.error(f"❌ Screenshot capture error: {e}")
+
+        # Report IP to Grinder if not in test mode, not in testing mode, and integration is enabled
         grinder_report_result = None
-        if not test_mode and GRINDER_INTEGRATION_ENABLED:
+        if not test_mode and not IS_TESTING_MODE and GRINDER_INTEGRATION_ENABLED:
             try:
                 domain = re.sub(r"^https?://", "", site_url).strip().split("/")[0]
                 ip_address = socket.gethostbyname(domain)
@@ -2986,29 +3114,40 @@ class AbuseReportManager:
             [os.path.basename(path) for path in attachment_paths] if attachment_paths else []
         )
 
-        # Prepare CC list
-        final_cc = (
-            []
-            if test_mode
-            else (
-                self.cc_emails[:]
-                if self.cc_emails
-                else [settings.ABUSE_EMAIL_SENDER]
-                + (settings.DEFAULT_CC_EMAILS.split(",") if settings.DEFAULT_CC_EMAILS else [])
-            )
-        )
-        if not test_mode and sender_email not in final_cc:
-            final_cc.insert(0, sender_email)
+        # Prepare CC list with development protection
+        if test_mode:
+            final_cc = []
+        else:
+            # Check if we're in development (sending to test email)
+            is_development = TEST_EMAIL in abuse_emails
 
-        if not test_mode and not self.cc_emails:
-            escalation2 = getattr(settings, "DEFAULT_CC_ESCALATION_LEVEL2", "")
-            escalation3 = getattr(settings, "DEFAULT_CC_ESCALATION_LEVEL3", "")
-            for var in [escalation2, escalation3]:
-                if var:
-                    for email in var.split(","):
-                        email = email.strip()
-                        if email and email not in final_cc:
-                            final_cc.append(email)
+            if is_development:
+                # In development: no CC emails to avoid sending to production contacts
+                logger.warning(
+                    f"🧪 DEVELOPMENT MODE: Clearing CC list to avoid sending to production"
+                )
+                final_cc = []
+            else:
+                # In production: use normal CC logic
+                final_cc = (
+                    self.cc_emails[:]
+                    if self.cc_emails
+                    else [settings.ABUSE_EMAIL_SENDER]
+                    + (settings.DEFAULT_CC_EMAILS.split(",") if settings.DEFAULT_CC_EMAILS else [])
+                )
+
+                if sender_email not in final_cc:
+                    final_cc.insert(0, sender_email)
+
+                if not self.cc_emails:
+                    escalation2 = getattr(settings, "DEFAULT_CC_ESCALATION_LEVEL2", "")
+                    escalation3 = getattr(settings, "DEFAULT_CC_ESCALATION_LEVEL3", "")
+                    for var in [escalation2, escalation3]:
+                        if var:
+                            for email in var.split(","):
+                                email = email.strip()
+                                if email and email not in final_cc:
+                                    final_cc.append(email)
 
         # Prepare multi-API results summary for template
         api_summary = ""
@@ -3083,19 +3222,31 @@ class AbuseReportManager:
             env_jinja = Environment(
                 loader=FileSystemLoader("templates"), autoescape=select_autoescape(["html", "xml"])
             )
+            # Generate temporary report ID for template
+            temp_report_id = f"ANISAKYS-{datetime.datetime.now().strftime('%Y%m%d')}-{hash(site_url) % 10000:04d}"
+
+            # Calculate SLA deadline
+            from datetime import timedelta
+
+            report_date = datetime.datetime.now()
+            sla_deadline = report_date + timedelta(days=2)  # 2 business days
+
             html_content = env_jinja.get_template("abuse_report.html").render(
                 site_url=site_url,
                 whois_info=whois_str,
                 attachment_filenames=attachment_filenames,
                 attachment_count=len(attachment_filenames),
                 cc_emails=final_cc,
-                timestamp=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                timestamp=report_date.strftime("%Y-%m-%d %H:%M:%S"),
                 api_summary=api_summary,
                 threat_level=threat_level,
                 confidence_score=confidence_score,
                 multi_api_results=multi_api_results,
                 grinder_integration=GRINDER_INTEGRATION_ENABLED,
                 grinder_report=grinder_report_result,
+                report_id=temp_report_id,
+                report_date=report_date.strftime("%Y-%m-%d %H:%M:%S"),
+                sla_deadline=sla_deadline.strftime("%Y-%m-%d %H:%M:%S"),
             )
             logger.debug("📧 Rendered email content (first 300 chars): " + html_content[:300])
         except Exception as render_err:
@@ -3133,11 +3284,17 @@ class AbuseReportManager:
                 msg["From"] = sender_email
                 msg["To"] = primary
 
-                if not test_mode and final_cc:
+                # SECURITY: Never send CCs in testing mode
+                # IS_TESTING_MODE is independent of test_mode (which controls screenshots)
+                if not test_mode and final_cc and not IS_TESTING_MODE:
                     msg["Cc"] = ", ".join(final_cc)
                     recipients = [primary] + final_cc
                 else:
                     recipients = [primary]
+                    if IS_TESTING_MODE and final_cc:
+                        logger.warning(
+                            f"🧪 TESTING MODE: CCs blocked for security - only sending to {primary}"
+                        )
 
                 msg.attach(MIMEText(html_content, "html"))
 
@@ -3219,6 +3376,26 @@ class AbuseReportManager:
             except Exception as e:
                 logger.error(f"❌ Failed to send abuse report to {primary}: {e}")
                 continue
+
+        # ICANN Compliance: Track sent reports
+        if success_count > 0 and not test_mode:
+            try:
+                report_record = create_report_record(
+                    site_url=site_url,
+                    recipients=abuse_emails,
+                    subject=subject,
+                    cc_recipients=final_cc,
+                    multi_api_results=multi_api_results,
+                    screenshot_included=screenshot_included,
+                )
+
+                if self.report_tracker.track_report(report_record):
+                    logger.info(f"📋 Tracked abuse report: {report_record.report_id}")
+                else:
+                    logger.warning("⚠️  Failed to track abuse report in database")
+
+            except Exception as e:
+                logger.error(f"❌ Failed to track report: {e}")
 
         # Log final summary
         if success_count > 0:
@@ -3542,7 +3719,9 @@ class AbuseReportManager:
                                         """
                                         ),
                                         {
-                                            "abuse_email": abuse_list[0],
+                                            "abuse_email": json.dumps(
+                                                abuse_list
+                                            ),  # Store as JSON list
                                             "timestamp": timestamp,
                                             "url": url,
                                         },
@@ -3711,7 +3890,11 @@ class AbuseReportManager:
                                     WHERE url=:url
                                 """
                                 ),
-                                {"abuse_email": abuse_list[0], "timestamp": timestamp, "url": url},
+                                {
+                                    "abuse_email": json.dumps(abuse_list),
+                                    "timestamp": timestamp,
+                                    "url": url,
+                                },  # Store as JSON list
                             )
                     elif not abuse_list:
                         logger.warning(
@@ -3953,6 +4136,26 @@ class AutoPhishingAnalyzer:
         logger.info(f"🔍 Starting comprehensive analysis for: {url}")
 
         try:
+            # Get site information to determine source and flags
+            site_info = None
+            try:
+                with self.db_manager.engine.begin() as conn:
+                    result = conn.execute(
+                        text(
+                            "SELECT source, manual_flag, auto_detected FROM phishing_sites WHERE url = :url"
+                        ),
+                        {"url": url},
+                    ).fetchone()
+                    if result:
+                        site_info = {
+                            "source": result[0],
+                            "manual_flag": result[1],
+                            "auto_detected": result[2],
+                        }
+            except Exception as e:
+                logger.warning(f"Could not get site info for {url}: {e}")
+                site_info = {"source": "unknown", "manual_flag": 0, "auto_detected": 1}
+
             # Perform multi-API scan
             if AUTO_ANALYSIS_ENABLED:
                 multi_api_results = self.multi_api_validator.comprehensive_scan(url)
@@ -3966,9 +4169,9 @@ class AutoPhishingAnalyzer:
                     "phishtank": {"error": "API key not configured"},
                 }
 
-            # Make auto-report decision
+            # Make auto-report decision based on source
             auto_report_decision = self._make_auto_report_decision(
-                multi_api_results, detection_keywords
+                multi_api_results, detection_keywords, site_info
             )
 
             # Update database with results
@@ -4009,14 +4212,20 @@ class AutoPhishingAnalyzer:
 
     @staticmethod
     def _make_auto_report_decision(
-        multi_api_results: Dict[str, Any], detection_keywords: List[str]
+        multi_api_results: Dict[str, Any],
+        detection_keywords: List[str],
+        site_info: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """
-        Make intelligent auto-report decision based on analysis results.
+        Make intelligent auto-report decision based on analysis results and site source.
+
+        IMPORTANT: Auto-detected sites should NEVER trigger automatic reports.
+        Only manual flagged sites and API-imported sites should be eligible for auto-reporting.
 
         Args:
             multi_api_results (Dict[str, Any]): Multi-API scan results
             detection_keywords (List[str]): Keywords that triggered detection
+            site_info (Dict[str, Any], optional): Site source and flag information
 
         Returns:
             Dict[str, Any]: Auto-report decision with reasoning
@@ -4030,6 +4239,23 @@ class AutoPhishingAnalyzer:
             "priority": "medium",
             "reasoning": [],
         }
+
+        # CRITICAL: Block auto-reporting for automatically detected sites
+        if site_info and site_info.get("auto_detected") == 1 and not site_info.get("manual_flag"):
+            decision["auto_report"] = False
+            decision["manual_review"] = True  # Always require manual review for auto-detections
+            decision["reasoning"].append(
+                "Auto-detected sites require manual review - no automatic reporting"
+            )
+            return decision
+
+        # Only allow auto-reporting for manual flags or API imports
+        if not site_info or not (
+            site_info.get("manual_flag") == 1 or site_info.get("source") == "external_api"
+        ):
+            decision["manual_review"] = True
+            decision["reasoning"].append("Only manual or API sites eligible for auto-reporting")
+            return decision
 
         # Critical threat level from PhishTank verified
         pt_result = multi_api_results.get("phishtank", {})
@@ -4878,6 +5104,13 @@ class Engine:
         # Initialize multi-API validator
         self.multi_api_validator = MultiAPIValidator()
 
+        # Initialize ICANN compliance services
+        self.screenshot_service = ScreenshotService(
+            screenshots_dir=getattr(settings, "SCREENSHOTS_DIR", None), timeout=self.timeout
+        )
+        self.abuse_contact_validator = AbuseContactValidator(timeout=self.timeout)
+        self.report_tracker = ReportTracker(self.db_manager.engine)
+
         # Initialize auto-analyzer (always, but may be inactive)
         self.auto_analyzer = AutoPhishingAnalyzer(self.db_manager, self.abuse_detector)
 
@@ -4939,7 +5172,11 @@ class Engine:
                         WHERE url=:url
                     """
                     ),
-                    {"timestamp": timestamp, "abuse_email": abuse_email, "url": url},
+                    {
+                        "timestamp": timestamp,
+                        "abuse_email": json.dumps([abuse_email]) if abuse_email else "[]",
+                        "url": url,
+                    },  # Store as JSON list
                 )
                 logger.info(f"🔄 Updated phishing flag for {url} with abuse email {abuse_email}")
             else:

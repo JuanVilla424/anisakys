@@ -11,6 +11,7 @@ dist/
 *.tsbuildinfo
 
 .claude
+screenshots
 
 # Poetry
 poetry.lock
