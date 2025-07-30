@@ -176,13 +176,16 @@ class AbuseContactValidator:
 
         return is_compliant, warnings
 
-    def validate_registrar_abuse_contact(self, email: str, registrar: str = None) -> Dict[str, any]:
+    def validate_registrar_abuse_contact(
+        self, email: str, registrar: str = None, target_domain: str = None
+    ) -> Dict[str, any]:
         """
         Validate registrar abuse contact specifically
 
         Args:
             email: Registrar abuse email
             registrar: Registrar name (optional)
+            target_domain: The domain being reported (to check for same-domain issues)
 
         Returns:
             Dict with validation results
@@ -222,9 +225,9 @@ class AbuseContactValidator:
         if not result["smtp_valid"]:
             result["warnings"].append(f"SMTP connectivity issue: {smtp_error}")
 
-        # Standards compliance
+        # Standards compliance (use target_domain if provided, otherwise skip same-domain check)
         result["standards_compliant"], standards_warnings = self.check_abuse_email_standards(
-            email, domain
+            email, target_domain or "unknown-domain.example"
         )
         result["warnings"].extend(standards_warnings)
 
