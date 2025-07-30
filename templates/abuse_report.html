@@ -49,32 +49,70 @@
     <p><strong>WHOIS Information:</strong></p>
     <pre>{{ whois_info }}</pre>
 
-    {% if attachment_filename %}
-      <p><strong>Attached File:</strong> {{ attachment_filename }}</p>
-      {% if attachment_filename.lower().endswith('.pdf') %}
+    {% if attachment_filenames and attachment_filenames|length > 0 %}
+      <p><strong>Attached Files ({{ attachment_filenames|length }}):</strong></p>
+      <ul>
+        {% for filename in attachment_filenames %}
+          <li>{{ filename }}</li>
+        {% endfor %}
+      </ul>
+
+      {% set pdf_files = [] %}
+      {% set image_files = [] %}
+      {% for filename in attachment_filenames %}
+        {% if filename.lower().endswith('.pdf') %}
+          {% set _ = pdf_files.append(filename) %}
+        {% elif filename.lower().endswith(('.png', '.jpg', '.jpeg')) %}
+          {% set _ = image_files.append(filename) %}
+        {% endif %}
+      {% endfor %}
+      {% set pdf_count = pdf_files|length %}
+      {% set image_count = image_files|length %}
+
+      {% if pdf_count > 0 %}
         <p class="attachment-note">
-          Note: The attached PDF is a legally authorized document. Please review it carefully as it contains official legal information.
+          Note: The attached PDF document(s) contain legally authorized information. Please review carefully as they contain official legal evidence.
         </p>
-      {% else %}
+      {% endif %}
+
+      {% if image_count > 0 %}
         <p class="attachment-note">
-          A file is attached for your reference.
+          Visual evidence (screenshots) are included as required by ICANN DNS Abuse Mitigation standards.
+        </p>
+      {% endif %}
+
+      {% if attachment_filenames|length > (pdf_count + image_count) %}
+        <p class="attachment-note">
+          Additional supporting documentation is attached for your reference.
         </p>
       {% endif %}
     {% endif %}
 
     <div class="compliance">
-      <h3>Compliance Statement</h3>
+      <h3>ICANN Compliance Statement</h3>
       <p>
-        This report is submitted in strict compliance with the 2013 Registrar Accreditation Agreement (RAA), the applicable Registry Agreements,
-        and the Interim Registration Data Policy for gTLDs (Interim Policy). All data provided in this report is accurate to the best of our knowledge and
+        This report is submitted in strict compliance with the <strong>2013 Registrar Accreditation Agreement (RAA)</strong>, the applicable Registry Agreements,
+        and the <strong>ICANN DNS Abuse Mitigation Requirements (effective April 5, 2024)</strong>. All data provided in this report is accurate to the best of our knowledge and
         is provided solely for the purpose of abuse investigation and remediation.
+      </p>
+      <p>
+        <strong>Response SLA:</strong> Per ICANN requirements, we request acknowledgment and initial response within <strong>2 business days</strong> of receipt.
+        Complete investigation and remediation should be initiated promptly upon confirmation of the abuse.
+      </p>
+      <p>
+        <strong>Evidence Provided:</strong> This report includes complete URL evidence, technical analysis from multiple threat intelligence sources,
+        {% if attachment_filenames %}
+          {% if image_count > 0 %}visual evidence ({{ image_count }} screenshot{{ 's' if image_count != 1 else '' }}), {% endif %}
+        {% endif %}and supporting documentation as required by ICANN standards.
       </p>
       <p>
         By submitting this report, the sender certifies that the information contained herein has been collected in accordance with the aforementioned agreements
         and policies. The recipient is obligated to handle this information confidentially and in full compliance with all legal and contractual requirements.
       </p>
       <p>
-        If you have any questions regarding the compliance or the data provided, please refer to the official documents or contact the submitting registrar.
+        <strong>Report ID:</strong> {{ report_id }}<br>
+        <strong>Submission Date:</strong> {{ report_date }}<br>
+        <strong>SLA Deadline:</strong> {{ sla_deadline }}
       </p>
     </div>
 
