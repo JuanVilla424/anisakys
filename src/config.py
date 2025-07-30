@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     GRINDER0X_API_URL: Optional[str] = None
     GRINDER0X_API_KEY: Optional[str] = None
 
+    # Google Safe Browsing Integration
+    GOOGLE_SAFEBROWSING_ENABLED: Optional[bool] = False
+    GOOGLE_SAFEBROWSING_USE_SELENIUM: Optional[bool] = True
+    GOOGLE_SAFEBROWSING_TIMEOUT: Optional[int] = 30
+
     model_config = {
         "env_file": env_file,
         "extra": "ignore",
