@@ -92,43 +92,245 @@ class ReportTracker:
             self._ensure_table_exists()
 
     def _ensure_table_exists(self):
-        """Ensure the abuse_reports table exists"""
+        """Ensure the abuse_reports table exists and is up to date"""
         if self.db_engine is None:
             logger.warning("Database engine not initialized, skipping table creation")
             return
         try:
             with self.db_engine.begin() as conn:
+                # Check if table exists and verify schema
+                table_exists = conn.execute(
+                    text(
+                        "SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'abuse_reports')"
+                    )
+                ).scalar()
+
+                if table_exists:
+                    # Verify schema matches expected structure
+                    if not self._verify_table_schema(conn):
+                        logger.warning("Table schema mismatch detected, attempting to migrate...")
+                        self._migrate_table_schema(conn)
+                    else:
+                        # Add missing columns if they don't exist
+                        self._add_missing_columns(conn)
+                else:
+                    # Create table from scratch
+                    conn.execute(
+                        text(
+                            """
+                            CREATE TABLE abuse_reports (
+                                id SERIAL PRIMARY KEY,
+                                site_url TEXT NOT NULL,
+                                site_id INTEGER,
+                                report_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                recipients TEXT NOT NULL,
+                                cc_recipients TEXT,
+                                subject TEXT,
+                                report_id TEXT UNIQUE,
+                                status TEXT DEFAULT 'sent',
+                                response_received INTEGER DEFAULT 0,
+                                response_date TIMESTAMP,
+                                response_content TEXT,
+                                sla_deadline TIMESTAMP,
+                                icann_compliant INTEGER DEFAULT 1,
+                                screenshot_included INTEGER DEFAULT 0,
+                                screenshot_path TEXT,
+                                attachment_count INTEGER DEFAULT 0,
+                                follow_up_required INTEGER DEFAULT 0,
+                                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                                FOREIGN KEY (site_id) REFERENCES phishing_sites(id)
+                            )
+                        """
+                        )
+                    )
+                    logger.info("Created abuse_reports table")
+        except Exception as e:
+            logger.error(f"Error ensuring abuse_reports table exists: {e}")
+            # Try to create a minimal working table
+            try:
+                self._create_minimal_table()
+            except Exception as e2:
+                logger.error(f"Failed to create minimal table: {e2}")
+
+    def _verify_table_schema(self, conn) -> bool:
+        """Verify if the table schema matches expected structure"""
+        try:
+            # Get current table columns and their types
+            result = conn.execute(
+                text(
+                    """
+                    SELECT column_name, data_type, is_nullable, column_default
+                    FROM information_schema.columns
+                    WHERE table_name = 'abuse_reports'
+                    ORDER BY ordinal_position
+                    """
+                )
+            ).fetchall()
+
+            current_columns = {
+                row[0]: {"type": row[1], "nullable": row[2], "default": row[3]} for row in result
+            }
+
+            # Define expected schema
+            expected_columns = {
+                "id": {"type": "integer", "nullable": "NO"},
+                "site_url": {"type": "text", "nullable": "NO"},
+                "recipients": {"type": "text", "nullable": "NO"},
+                "status": {"type": "text", "nullable": "YES"},
+                "report_id": {"type": "text", "nullable": "YES"},
+            }
+
+            # Check if critical columns exist with correct types
+            for col, props in expected_columns.items():
+                if col not in current_columns:
+                    logger.warning(f"Missing critical column: {col}")
+                    return False
+                if current_columns[col]["type"] != props["type"]:
+                    logger.warning(
+                        f"Column {col} has wrong type: {current_columns[col]['type']} != {props['type']}"
+                    )
+                    return False
+
+            return True
+        except Exception as e:
+            logger.error(f"Error verifying table schema: {e}")
+            return False
+
+    def _migrate_table_schema(self, conn):
+        """Migrate table to correct schema preserving data"""
+        try:
+            logger.info("Starting table migration...")
+
+            # Create backup
+            conn.execute(text("ALTER TABLE abuse_reports RENAME TO abuse_reports_backup"))
+
+            # Create new table with correct schema
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE abuse_reports (
+                        id SERIAL PRIMARY KEY,
+                        site_url TEXT NOT NULL,
+                        site_id INTEGER,
+                        report_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        recipients TEXT NOT NULL,
+                        cc_recipients TEXT,
+                        subject TEXT,
+                        report_id TEXT UNIQUE,
+                        status TEXT DEFAULT 'sent',
+                        response_received INTEGER DEFAULT 0,
+                        response_date TIMESTAMP,
+                        response_content TEXT,
+                        sla_deadline TIMESTAMP,
+                        icann_compliant INTEGER DEFAULT 1,
+                        screenshot_included INTEGER DEFAULT 0,
+                        screenshot_path TEXT,
+                        attachment_count INTEGER DEFAULT 0,
+                        follow_up_required INTEGER DEFAULT 0,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (site_id) REFERENCES phishing_sites(id)
+                    )
+                """
+                )
+            )
+
+            # Copy data from backup
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO abuse_reports (site_url, recipients, status, report_id)
+                    SELECT site_url, recipients, COALESCE(status, 'sent'), report_id
+                    FROM abuse_reports_backup
+                    WHERE site_url IS NOT NULL AND recipients IS NOT NULL
+                    """
+                )
+            )
+
+            # Drop backup
+            conn.execute(text("DROP TABLE abuse_reports_backup"))
+            logger.info("Table migration completed successfully")
+
+        except Exception as e:
+            logger.error(f"Error during table migration: {e}")
+            # Try to restore backup if exists
+            try:
+                conn.execute(text("DROP TABLE IF EXISTS abuse_reports"))
+                conn.execute(text("ALTER TABLE abuse_reports_backup RENAME TO abuse_reports"))
+                logger.info("Restored backup table")
+            except:
+                pass
+            raise
+
+    def _create_minimal_table(self):
+        """Create a minimal working table as fallback"""
+        try:
+            with self.db_engine.begin() as conn:
+                # Drop existing table if corrupted
+                conn.execute(text("DROP TABLE IF EXISTS abuse_reports CASCADE"))
+
+                # Create minimal table
                 conn.execute(
                     text(
                         """
-                        CREATE TABLE IF NOT EXISTS abuse_reports (
+                        CREATE TABLE abuse_reports (
                             id SERIAL PRIMARY KEY,
                             site_url TEXT NOT NULL,
-                            report_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                             recipients TEXT NOT NULL,
-                            cc_recipients TEXT,
-                            subject TEXT,
-                            report_id TEXT UNIQUE,
+                            report_id TEXT,
                             status TEXT DEFAULT 'sent',
-                            response_received INTEGER DEFAULT 0,
-                            response_date TIMESTAMP,
-                            response_content TEXT,
-                            sla_deadline TIMESTAMP,
-                            icann_compliant INTEGER DEFAULT 1,
-                            screenshot_included INTEGER DEFAULT 0,
-                            multi_api_results TEXT,
-                            confidence_score INTEGER,
-                            threat_level TEXT,
-                            follow_up_required INTEGER DEFAULT 0,
-                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         )
                     """
                     )
                 )
-                logger.debug("Verified abuse_reports table exists")
+                logger.info("Created minimal abuse_reports table")
         except Exception as e:
-            logger.error(f"Error ensuring abuse_reports table exists: {e}")
+            logger.error(f"Failed to create minimal table: {e}")
+
+    def _add_missing_columns(self, conn):
+        """Add missing columns to existing abuse_reports table"""
+        try:
+            # Get current columns
+            result = conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns WHERE table_name = 'abuse_reports'"
+                )
+            ).fetchall()
+            current_columns = {row[0] for row in result}
+
+            # Define columns to add if missing
+            columns_to_add = [
+                ("site_id", "INTEGER"),
+                ("report_date", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+                ("cc_recipients", "TEXT"),
+                ("subject", "TEXT"),
+                ("response_received", "INTEGER DEFAULT 0"),
+                ("response_date", "TIMESTAMP"),
+                ("response_content", "TEXT"),
+                ("sla_deadline", "TIMESTAMP"),
+                ("icann_compliant", "INTEGER DEFAULT 1"),
+                ("screenshot_included", "INTEGER DEFAULT 0"),
+                ("screenshot_path", "TEXT"),
+                ("attachment_count", "INTEGER DEFAULT 0"),
+                ("follow_up_required", "INTEGER DEFAULT 0"),
+                ("created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+                ("updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"),
+            ]
+
+            for col_name, col_type in columns_to_add:
+                if col_name not in current_columns:
+                    try:
+                        logger.info(f"Adding column {col_name} to abuse_reports table...")
+                        conn.execute(
+                            text(f"ALTER TABLE abuse_reports ADD COLUMN {col_name} {col_type}")
+                        )
+                    except Exception as e:
+                        logger.warning(f"Could not add column {col_name}: {e}")
+
+        except Exception as e:
+            logger.warning(f"Error adding missing columns: {e}")
 
     def generate_report_id(self) -> str:
         """Generate unique report ID"""
@@ -146,25 +348,34 @@ class ReportTracker:
         """
         try:
             with self.db_engine.begin() as conn:
+                # Get site_id from phishing_sites table
+                site_result = conn.execute(
+                    text("SELECT id FROM phishing_sites WHERE url = :site_url"),
+                    {"site_url": report.site_url},
+                ).fetchone()
+
+                site_id = site_result[0] if site_result else None
+
                 # Insert into abuse_reports table
                 conn.execute(
                     text(
                         """
                         INSERT INTO abuse_reports (
-                            site_url, report_date, recipients, cc_recipients, subject,
+                            site_url, site_id, report_date, recipients, cc_recipients, subject,
                             report_id, status, sla_deadline, icann_compliant,
-                            screenshot_included, multi_api_results, confidence_score,
-                            threat_level, follow_up_required, created_at, updated_at
+                            screenshot_included, screenshot_path, attachment_count,
+                            follow_up_required, created_at, updated_at
                         ) VALUES (
-                            :site_url, :report_date, :recipients, :cc_recipients, :subject,
+                            :site_url, :site_id, :report_date, :recipients, :cc_recipients, :subject,
                             :report_id, :status, :sla_deadline, :icann_compliant,
-                            :screenshot_included, :multi_api_results, :confidence_score,
-                            :threat_level, :follow_up_required, :created_at, :updated_at
+                            :screenshot_included, :screenshot_path, :attachment_count,
+                            :follow_up_required, :created_at, :updated_at
                         )
                     """
                     ),
                     {
                         "site_url": report.site_url,
+                        "site_id": site_id,
                         "report_date": report.report_date,
                         "recipients": (
                             json.dumps(report.recipients)
@@ -180,35 +391,28 @@ class ReportTracker:
                         "sla_deadline": report.sla_deadline,
                         "icann_compliant": 1 if report.icann_compliant else 0,
                         "screenshot_included": 1 if report.screenshot_included else 0,
-                        "multi_api_results": (
-                            json.dumps(report.multi_api_results)
-                            if report.multi_api_results
-                            else None
-                        ),
-                        "confidence_score": report.confidence_score,
-                        "threat_level": report.threat_level,
+                        "screenshot_path": getattr(report, "screenshot_path", None),
+                        "attachment_count": getattr(report, "attachment_count", 0),
                         "follow_up_required": 1 if report.follow_up_required else 0,
                         "created_at": report.created_at,
                         "updated_at": report.updated_at,
                     },
                 )
 
-                # Update existing phishing_sites table fields
+                # Update existing phishing_sites table - keep minimal fields
                 conn.execute(
                     text(
                         """
                         UPDATE phishing_sites
                         SET abuse_report_sent = 1,
                             reported = 1,
-                            last_report_sent = :report_date,
-                            abuse_email = :abuse_email
+                            last_report_sent = :report_date
                         WHERE url = :site_url
                     """
                     ),
                     {
                         "site_url": report.site_url,
                         "report_date": report.report_date,
-                        "abuse_email": report.recipients[0] if report.recipients else None,
                     },
                 )
 
