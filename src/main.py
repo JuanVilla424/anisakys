@@ -3976,9 +3976,19 @@ Phishing Detection Team
                             # Get abuse emails using enhanced detection
                             domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
                             registrar = self.abuse_detector.extract_registrar(whois_info)
-                            abuse_list = self.abuse_detector.get_enhanced_abuse_email(
-                                domain, whois_info, registrar
-                            )
+                            abuse_list = []  # Initialize to prevent UnboundLocalError
+                            try:
+                                abuse_list = (
+                                    self.abuse_detector.get_enhanced_abuse_email(
+                                        domain, whois_info, registrar
+                                    )
+                                    or []
+                                )  # Ensure it's never None
+                            except Exception as e:
+                                logger.warning(
+                                    f"⚠️  Error getting enhanced abuse email for {domain}: {e}"
+                                )
+                                abuse_list = []
 
                             # Enhanced Cloudflare handling
                             if cloudflare_detected and not abuse_list:
@@ -4195,6 +4205,22 @@ Phishing Detection Team
                     # Get registrar from WHOIS data
                     registrar = self.abuse_detector.extract_registrar(whois_info) or ""
 
+                    # Get abuse emails using enhanced detection BEFORE UPDATE
+                    domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+                    logger.info(f"🏢 Extracting registrar info for {url}")
+                    logger.info(f"📧 Getting enhanced abuse emails for {domain}")
+                    abuse_list = []  # Initialize to prevent UnboundLocalError
+                    try:
+                        abuse_list = (
+                            self.abuse_detector.get_enhanced_abuse_email(
+                                domain, whois_info, registrar
+                            )
+                            or []
+                        )  # Ensure it's never None
+                    except Exception as e:
+                        logger.warning(f"⚠️  Error getting enhanced abuse email for {domain}: {e}")
+                        abuse_list = []
+
                     conn.execute(
                         text(
                             """
@@ -4219,15 +4245,6 @@ Phishing Detection Team
                         },
                     )
                     logger.info(f"📊 Manually processed WHOIS data for {url}")
-
-                    # Get abuse emails using enhanced detection
-                    domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
-                    logger.info(f"🏢 Extracting registrar info for {url}")
-                    registrar = self.abuse_detector.extract_registrar(whois_info)
-                    logger.info(f"📧 Getting enhanced abuse emails for {domain}")
-                    abuse_list = self.abuse_detector.get_enhanced_abuse_email(
-                        domain, whois_info, registrar
-                    )
                     logger.info(
                         f"✅ Found {len(abuse_list) if abuse_list else 0} abuse emails: {abuse_list}"
                     )
