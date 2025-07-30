@@ -1390,10 +1390,10 @@ class EnhancedAbuseEmailDetector:
             logger.debug(f"Domain validation failed for email: {email}")
             return False
 
-    def extract_emails_from_whois(self, whois_data: Any) -> List[str]:
+    def extract_emails_from_whois(self, whois_info: Any) -> List[str]:
         """Extract email addresses from WHOIS data using enhanced patterns."""
         emails = []
-        whois_str = str(whois_data).lower()
+        whois_str = str(whois_info).lower()
 
         # Use multiple patterns to find emails
         for pattern in ABUSE_EMAIL_PATTERNS:
@@ -1498,7 +1498,7 @@ class EnhancedAbuseEmailDetector:
         return None
 
     def get_enhanced_abuse_email(
-        self, domain: str, whois_data: Any = None, registrar: str = None
+        self, domain: str, whois_info: Any = None, registrar: str = None
     ) -> List[str]:
         """Get abuse email using multiple enhanced detection methods."""
         logger.info(f"🔍 Starting enhanced abuse email detection for domain: {domain}")
@@ -1512,8 +1512,8 @@ class EnhancedAbuseEmailDetector:
                 logger.info(f"✅ Added registrar abuse email: {registrar_email}")
 
         # 2. Extract from WHOIS data (exclude same domain)
-        if whois_data:
-            whois_emails = self.extract_emails_from_whois(whois_data)
+        if whois_info:
+            whois_emails = self.extract_emails_from_whois(whois_info)
             for email in whois_emails:
                 if self.validate_abuse_email_domain(email, domain):
                     abuse_emails.append(email)
@@ -1650,16 +1650,16 @@ class EnhancedAbuseEmailDetector:
         return unique_emails
 
     @staticmethod
-    def extract_registrar(whois_data) -> Optional[str]:
+    def extract_registrar(whois_info) -> Optional[str]:
         """Extract registrar from WHOIS data."""
-        if isinstance(whois_data, dict):
-            registrar = whois_data.get("registrar")
+        if isinstance(whois_info, dict):
+            registrar = whois_info.get("registrar")
             if registrar:
                 if isinstance(registrar, list):
                     return registrar[0].strip()
                 else:
                     return str(registrar).strip()
-        whois_str = str(whois_data)
+        whois_str = str(whois_info)
         match = re.search(r"Registrar:\s*(.+)", whois_str, re.IGNORECASE)
         if match:
             return match.group(1).strip()
@@ -1910,7 +1910,7 @@ class EnhancedAbuseEmailDetector:
         return None
 
     @staticmethod
-    def get_enhanced_whois_data(domain: str) -> dict:
+    def get_enhanced_whois_info(domain: str) -> dict:
         """
         Get WHOIS data using the appropriate server based on TLD with enhanced parsing.
 
@@ -2307,10 +2307,10 @@ class PhishingAPI:
                     if not abuse_email:
                         try:
                             domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
-                            whois_data = basic_whois_lookup(url)
-                            registrar = self.abuse_detector.extract_registrar(whois_data)
+                            whois_info = basic_whois_lookup(url)
+                            registrar = self.abuse_detector.extract_registrar(whois_info)
                             abuse_emails = self.abuse_detector.get_enhanced_abuse_email(
-                                domain, whois_data, registrar
+                                domain, whois_info, registrar
                             )
                             abuse_email = abuse_emails[0] if abuse_emails else None
                         except Exception as e:
@@ -2855,7 +2855,7 @@ def basic_whois_lookup(url: str) -> dict:
 
         dummy_db_manager = type("DummyDBManager", (), {"engine": create_engine(DATABASE_URL)})()
         detector = EnhancedAbuseEmailDetector(dummy_db_manager)
-        data = detector.get_enhanced_whois_data(domain)
+        data = detector.get_enhanced_whois_info(domain)
 
         return data
     except Exception as e:
@@ -2953,16 +2953,16 @@ class AbuseReportManager:
 
         return result
 
-    def get_enhanced_abuse_emails(self, whois_data, domain: str) -> List[str]:
+    def get_enhanced_abuse_emails(self, whois_info, domain: str) -> List[str]:
         """Get abuse emails using enhanced detection methods."""
-        registrar = self.abuse_detector.extract_registrar(whois_data) or ""
+        registrar = self.abuse_detector.extract_registrar(whois_info) or ""
 
         # Use the enhanced method from abuse_detector
-        abuse_emails = self.abuse_detector.get_enhanced_abuse_email(domain, whois_data, registrar)
+        abuse_emails = self.abuse_detector.get_enhanced_abuse_email(domain, whois_info, registrar)
 
         # If no emails found, try fallback methods with domain validation
         if not abuse_emails:
-            whois_str = str(whois_data)
+            whois_str = str(whois_info)
             emails = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", whois_str)
             for email in emails:
                 if "abuse" in email.lower() and self.abuse_detector.validate_abuse_email_domain(
@@ -3430,11 +3430,20 @@ class AbuseReportManager:
             try:
                 logger.info(f"🏁 UPDATING DATABASE to mark {site_url} as reported")
                 with self.db_manager.engine.begin() as conn:
+                    # Get current WHOIS data if we don't have it
+                    domain = re.sub(r"^https?://", "", site_url).strip().split("/")[0]
+
+                    # Update with all relevant data including WHOIS and abuse emails
                     result = conn.execute(
                         text(
-                            "UPDATE phishing_sites SET reported = 1, abuse_report_sent = 1, last_report_sent = CURRENT_TIMESTAMP WHERE url = :url"
+                            "UPDATE phishing_sites SET reported = 1, abuse_report_sent = 1, "
+                            "last_report_sent = CURRENT_TIMESTAMP, abuse_email = :abuse_email "
+                            "WHERE url = :url"
                         ),
-                        {"url": site_url},
+                        {
+                            "url": site_url,
+                            "abuse_email": json.dumps(abuse_emails) if abuse_emails else None,
+                        },
                     )
                     logger.info(
                         f"✅ Database updated: {result.rowcount} rows affected for {site_url}"
@@ -3512,6 +3521,183 @@ class AbuseReportManager:
 
         logger.info(f"🎉 SEND_ABUSE_REPORT ABOUT TO RETURN: {success_count > 0} for {site_url}")
         return success_count > 0
+
+    def process_overdue_followups(self):
+        """Process overdue reports and send follow-up emails every 2 days per ICANN compliance"""
+        logger.info("🔄 Starting overdue follow-up processing...")
+
+        try:
+            # Get overdue reports from report tracker
+            overdue_reports = self.report_tracker.get_overdue_reports()
+
+            if not overdue_reports:
+                logger.info("✅ No overdue reports found")
+                return
+
+            logger.info(f"📋 Found {len(overdue_reports)} overdue reports requiring follow-up")
+
+            for report in overdue_reports:
+                try:
+                    site_url = report["site_url"]
+                    report_id = report["report_id"]
+                    overdue_hours = report.get("overdue_hours", 0)
+
+                    logger.info(
+                        f"⚠️  Processing overdue report: {report_id} for {site_url} ({overdue_hours}h overdue)"
+                    )
+
+                    # Get original recipients
+                    recipients = json.loads(report["recipients"]) if report["recipients"] else []
+
+                    if not recipients:
+                        logger.warning(f"⚠️  No recipients found for {report_id}, skipping")
+                        continue
+
+                    # Prepare follow-up email subject
+                    follow_up_subject = f"FOLLOW-UP: Phishing Report {report_id} - Response Required (ICANN Compliance)"
+
+                    # Add escalation CCs for overdue reports
+                    escalation_cc = self.cc_emails.copy() if self.cc_emails else []
+
+                    # Add additional escalation based on how overdue
+                    if overdue_hours > 72:  # 3+ days overdue
+                        escalation_level3 = getattr(settings, "DEFAULT_CC_ESCALATION_LEVEL3", "")
+                        if escalation_level3:
+                            for email in escalation_level3.split(","):
+                                email = email.strip()
+                                if email and email not in escalation_cc:
+                                    escalation_cc.append(email)
+
+                    # Create follow-up whois context
+                    followup_context = f"""FOLLOW-UP NOTICE - ICANN COMPLIANCE
+
+Original Report ID: {report_id}
+Site: {site_url}
+Original Report Date: {report.get('report_date', 'Unknown')}
+Hours Overdue: {overdue_hours}
+
+This is a follow-up to our previous phishing report. ICANN policies require registrars to respond to abuse reports within 2 business days. Please provide an update on the status of this case.
+
+If the reported site has been taken down, please confirm. If not, please provide expected timeline for resolution.
+"""
+
+                    # Send follow-up (don't create new screenshot to save time)
+                    logger.info(f"📤 Sending follow-up report for {site_url}...")
+
+                    success = self._send_followup_email(
+                        site_url=site_url,
+                        recipients=recipients,
+                        escalation_cc=escalation_cc,
+                        subject=follow_up_subject,
+                        followup_context=followup_context,
+                        report_id=report_id,
+                    )
+
+                    if success:
+                        # Mark as follow-up sent and update status
+                        self.report_tracker.mark_report_for_followup(
+                            report_id, reason=f"Follow-up sent after {overdue_hours}h overdue"
+                        )
+                        logger.info(f"✅ Follow-up sent successfully for {report_id}")
+                    else:
+                        logger.error(f"❌ Failed to send follow-up for {report_id}")
+
+                except Exception as e:
+                    logger.error(
+                        f"❌ Error processing overdue report {report.get('report_id', 'unknown')}: {e}"
+                    )
+                    continue
+
+            logger.info(f"🏁 Completed processing {len(overdue_reports)} overdue reports")
+
+        except Exception as e:
+            logger.error(f"❌ Error in overdue follow-up processing: {e}")
+
+    def _send_followup_email(
+        self,
+        site_url: str,
+        recipients: List[str],
+        escalation_cc: List[str],
+        subject: str,
+        followup_context: str,
+        report_id: str,
+    ) -> bool:
+        """Send a follow-up email for overdue reports"""
+        try:
+            # Use simplified email sending for follow-ups
+            smtp_host = getattr(settings, "SMTP_HOST", "localhost")
+            smtp_port = getattr(settings, "SMTP_PORT", 1125)
+            sender_email = getattr(settings, "SENDER_EMAIL", "abuse@example.com")
+
+            success_count = 0
+
+            for recipient in recipients:
+                try:
+                    msg = MIMEMultipart()
+                    msg["From"] = sender_email
+                    msg["To"] = recipient
+                    msg["Subject"] = subject
+
+                    # Add CCs
+                    if escalation_cc:
+                        msg["Cc"] = ", ".join(escalation_cc)
+
+                    # Simple text body for follow-up
+                    body = f"""Dear Registrar Abuse Team,
+
+{followup_context}
+
+Please respond to this follow-up as required by ICANN policies.
+
+Thank you for your cooperation.
+
+Best regards,
+Phishing Detection Team
+"""
+
+                    msg.attach(MIMEText(body, "plain"))
+
+                    # Send email
+                    with smtplib.SMTP(smtp_host, smtp_port) as server:
+                        all_recipients = [recipient] + escalation_cc
+                        server.send_message(msg, to_addrs=all_recipients)
+
+                    logger.info(f"✅ Follow-up sent to {recipient}")
+                    success_count += 1
+
+                except Exception as e:
+                    logger.error(f"❌ Failed to send follow-up to {recipient}: {e}")
+                    continue
+
+            return success_count > 0
+
+        except Exception as e:
+            logger.error(f"❌ Error in follow-up email sending: {e}")
+            return False
+
+    def followup_worker(self):
+        """Background worker that checks for overdue reports every 2 hours"""
+        logger.info("🚀 Starting follow-up worker for ICANN compliance (checks every 2 hours)...")
+
+        while self.running:
+            try:
+                # Process overdue reports
+                self.process_overdue_followups()
+
+                # Wait 2 hours before next check
+                for _ in range(120):  # 120 minutes = 2 hours
+                    if not self.running:
+                        break
+                    time.sleep(60)  # Sleep 1 minute at a time for responsive shutdown
+
+            except Exception as e:
+                logger.error(f"❌ Error in follow-up worker: {e}")
+                time.sleep(300)  # Wait 5 minutes before retrying on error
+
+    def stop_followup_worker(self):
+        """Stop the follow-up worker gracefully"""
+        self.running = False
+        logger.info("🛑 Follow-up worker stopped")
 
     def report_phishing_sites(self):
         """Main loop for reporting phishing sites with enhanced multi-API validation and auto-reporting."""
@@ -3705,8 +3891,8 @@ class AbuseReportManager:
                                             f"⚠️  Failed to store fresh API results for {url}: {e}"
                                         )
 
-                            whois_data = basic_whois_lookup(url)
-                            whois_str = str(whois_data)
+                            whois_info = basic_whois_lookup(url)
+                            whois_str = str(whois_info)
                             timestamp = current_time.strftime("%Y-%m-%d %H:%M:%S")
                             domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
                             resolved_ip, asn_provider = get_ip_info(domain)
@@ -3761,9 +3947,9 @@ class AbuseReportManager:
 
                             # Get abuse emails using enhanced detection
                             domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
-                            registrar = self.abuse_detector.extract_registrar(whois_data)
+                            registrar = self.abuse_detector.extract_registrar(whois_info)
                             abuse_list = self.abuse_detector.get_enhanced_abuse_email(
-                                domain, whois_data, registrar
+                                domain, whois_info, registrar
                             )
 
                             # Enhanced Cloudflare handling
@@ -3953,9 +4139,9 @@ class AbuseReportManager:
                             logger.warning(f"⚠️  Failed to store API results for {url}: {e}")
 
                     logger.info(f"🔍 Starting WHOIS lookup for {url}")
-                    whois_data = basic_whois_lookup(url)
+                    whois_info = basic_whois_lookup(url)
                     logger.info(f"✅ WHOIS lookup complete for {url}")
-                    whois_str = str(whois_data)
+                    whois_str = str(whois_info)
                     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
                     logger.info(f"🌐 Getting IP info for domain: {domain}")
@@ -3978,21 +4164,27 @@ class AbuseReportManager:
                         logger.info(f"✅ Site marked as down: {url}")
                         continue  # Skip to next site
 
+                    # Get registrar from WHOIS data
+                    registrar = self.abuse_detector.extract_registrar(whois_info) or ""
+
                     conn.execute(
                         text(
                             """
                             UPDATE phishing_sites
                             SET whois_info=:whois_str, last_seen=:timestamp, reported=1,
-                                resolved_ip=:resolved_ip, asn_provider=:asn_provider, is_cloudflare=:is_cloudflare
+                                resolved_ip=:resolved_ip, asn_provider=:asn_provider, is_cloudflare=:is_cloudflare,
+                                registrar=:registrar, abuse_email=:abuse_email
                             WHERE url=:url
                         """
                         ),
                         {
-                            "whois_str": whois_str,
+                            "whois_str": json.dumps(whois_info) if whois_info else None,
                             "timestamp": timestamp,
                             "resolved_ip": resolved_ip,
                             "asn_provider": asn_provider,
                             "is_cloudflare": 1 if cloudflare_detected else 0,
+                            "registrar": registrar,
+                            "abuse_email": json.dumps(abuse_list) if abuse_list else None,
                             "url": url,
                         },
                     )
@@ -4001,10 +4193,10 @@ class AbuseReportManager:
                     # Get abuse emails using enhanced detection
                     domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
                     logger.info(f"🏢 Extracting registrar info for {url}")
-                    registrar = self.abuse_detector.extract_registrar(whois_data)
+                    registrar = self.abuse_detector.extract_registrar(whois_info)
                     logger.info(f"📧 Getting enhanced abuse emails for {domain}")
                     abuse_list = self.abuse_detector.get_enhanced_abuse_email(
-                        domain, whois_data, registrar
+                        domain, whois_info, registrar
                     )
                     logger.info(
                         f"✅ Found {len(abuse_list) if abuse_list else 0} abuse emails: {abuse_list}"
@@ -4556,12 +4748,12 @@ class AutoPhishingAnalyzer:
                     )
 
                     # Get WHOIS and abuse emails
-                    whois_data = basic_whois_lookup(url)
-                    whois_str = str(whois_data)
+                    whois_info = basic_whois_lookup(url)
+                    whois_str = str(whois_info)
                     domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
-                    registrar = self.abuse_detector.extract_registrar(whois_data)
+                    registrar = self.abuse_detector.extract_registrar(whois_info)
                     abuse_list = self.abuse_detector.get_enhanced_abuse_email(
-                        domain, whois_data, registrar
+                        domain, whois_info, registrar
                     )
 
                     if not abuse_list:
@@ -5327,9 +5519,37 @@ class Engine:
             logger.debug("ℹ️  No scanner needed for current mode")
 
     def mark_site_as_phishing(self, url: str, abuse_email: Optional[str] = None):
-        """Mark a site as phishing with enhanced database operations."""
+        """Mark a site as phishing with enhanced database operations including WHOIS data."""
         with self.db_manager.engine.begin() as conn:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+            # Get WHOIS data and abuse emails
+            whois_info = None
+            abuse_emails = []
+            registrar = None
+
+            try:
+                domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+                whois_info = self.abuse_detector.get_enhanced_whois_info(domain)
+                registrar = self.abuse_detector.extract_registrar(whois_info)
+
+                # Get abuse emails if not provided
+                if not abuse_email:
+                    detected_emails = self.abuse_detector.get_enhanced_abuse_email(
+                        domain, whois_info, registrar
+                    )
+                    abuse_emails = detected_emails if detected_emails else []
+                else:
+                    abuse_emails = [abuse_email]
+
+                logger.info(
+                    f"🔍 WHOIS lookup for {domain}: Registrar={registrar}, Abuse emails={abuse_emails}"
+                )
+            except Exception as e:
+                logger.warning(f"⚠️  Failed to get WHOIS data for {url}: {e}")
+                if abuse_email:
+                    abuse_emails = [abuse_email]
+
             result = conn.execute(
                 text("SELECT id FROM phishing_sites WHERE url=:url"), {"url": url}
             ).fetchone()
@@ -5340,29 +5560,44 @@ class Engine:
                         """
                         UPDATE phishing_sites
                         SET manual_flag=1, last_seen=:timestamp, reported=0,
-                            abuse_report_sent=0, abuse_email=:abuse_email
+                            abuse_report_sent=0, abuse_email=:abuse_email,
+                            whois_info=:whois_info, registrar=:registrar
                         WHERE url=:url
                     """
                     ),
                     {
                         "timestamp": timestamp,
-                        "abuse_email": json.dumps([abuse_email]) if abuse_email else "[]",
+                        "abuse_email": json.dumps(abuse_emails),
+                        "whois_info": json.dumps(whois_info) if whois_info else None,
+                        "registrar": registrar,
                         "url": url,
-                    },  # Store as JSON list
+                    },
                 )
-                logger.info(f"🔄 Updated phishing flag for {url} with abuse email {abuse_email}")
+                logger.info(
+                    f"🔄 Updated phishing flag for {url} with registrar {registrar} and abuse emails {abuse_emails}"
+                )
             else:
                 conn.execute(
                     text(
                         """
                         INSERT INTO phishing_sites
-                        (url, manual_flag, first_seen, last_seen, abuse_email, reported, abuse_report_sent)
-                        VALUES (:url, 1, :timestamp, :timestamp, :abuse_email, 0, 0)
+                        (url, manual_flag, first_seen, last_seen, abuse_email,
+                         whois_info, registrar, reported, abuse_report_sent)
+                        VALUES (:url, 1, :timestamp, :timestamp, :abuse_email,
+                                :whois_info, :registrar, 0, 0)
                     """
                     ),
-                    {"url": url, "timestamp": timestamp, "abuse_email": abuse_email},
+                    {
+                        "url": url,
+                        "timestamp": timestamp,
+                        "abuse_email": json.dumps(abuse_emails),
+                        "whois_info": json.dumps(whois_info) if whois_info else None,
+                        "registrar": registrar,
+                    },
                 )
-                logger.info(f"🚨 Marked {url} as phishing with abuse email {abuse_email}")
+                logger.info(
+                    f"🚨 Marked {url} as phishing with registrar {registrar} and abuse emails {abuse_emails}"
+                )
 
     def perform_multi_api_scan(self, url: str):
         """Perform multi-API scan and display results."""
@@ -5565,6 +5800,11 @@ class Engine:
         takedown_thread.start()
         logger.debug("🔍 Takedown monitoring thread started")
 
+        # Start follow-up worker for ICANN compliance (every 2 hours)
+        followup_thread = threading.Thread(target=self.report_manager.followup_worker, daemon=True)
+        followup_thread.start()
+        logger.debug("🔄 ICANN follow-up worker started (checks every 2 hours)")
+
         # Start auto-analysis worker if APIs are configured
         if AUTO_ANALYSIS_ENABLED:
             self.auto_analyzer.start_analysis_worker()
@@ -5579,7 +5819,7 @@ class Engine:
                 "🧵 Running in threads-only mode. Background threads are active; skipping scanning cycle."
             )
             logger.info(
-                "🔄 Active systems: Abuse reporting, Takedown monitoring"
+                "🔄 Active systems: Abuse reporting, Takedown monitoring, ICANN Follow-up"
                 + (", Auto-analysis" if AUTO_ANALYSIS_ENABLED else "")
             )
             logger.info("ℹ️  To scan for new sites, run without --threads-only flag.")
@@ -5603,6 +5843,7 @@ class Engine:
             logger.info("🔄 Background threads running:")
             logger.info("  📧 Abuse Report Manager: Processing flagged phishing sites")
             logger.info("  🔍 Takedown Monitor: Monitoring site status changes")
+            logger.info("  🔄 ICANN Follow-up Worker: Checking overdue reports every 2 hours")
             if AUTO_ANALYSIS_ENABLED:
                 logger.info(
                     "  🤖 Auto-Analysis Worker: Analyzing detected sites with multi-API validation"

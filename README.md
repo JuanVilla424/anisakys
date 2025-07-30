@@ -1,51 +1,180 @@
-# 🔍 Anisakys
+<div align="center">
+  <h1>🔍 Anisakys</h1>
+  <p><em>Advanced Automated Phishing Detection & ICANN Compliance Engine</em></p>
 
-![Security](https://img.shields.io/badge/Security-BlueTeam-blue)
+![Security](https://img.shields.io/badge/Security-BlueTeam-4B0082)
 ![Python](https://img.shields.io/badge/Python-3776AB?logo=python&logoColor=fff)
-![Python3](https://img.shields.io/badge/Python-3.10%2B-blue.svg)
-![Status](https://img.shields.io/badge/Status-Development-blue.svg)
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0.en.html)
+![Version](https://img.shields.io/badge/Python-3.10%2B-brightgreen.svg)
+![Status](https://img.shields.io/badge/Status-Production-success.svg)
+![License](https://img.shields.io/badge/License-GPLv3-red.svg)
+![ICANN](https://img.shields.io/badge/ICANN-Compliant-orange)
+![Threat Intel](https://img.shields.io/badge/Threat%20Intel-Multi--API-yellow)
+![Automation](https://img.shields.io/badge/Automation-Ready-purple)
 
-## Overview
+  <br/>
 
-Anisakys is an advanced automated phishing detection engine designed for blue teams and cybersecurity analysts who need comprehensive threat hunting capabilities. This powerful tool performs real-time monitoring of suspicious domains through combinatorial analysis, multi-API validation, and machine learning-based threat assessment, making it essential for organizations protecting against sophisticated phishing campaigns.
+![Architecture](https://img.shields.io/badge/Architecture-Multi--Threaded-lightblue)
+![Database](https://img.shields.io/badge/Database-PostgreSQL-336791?logo=postgresql&logoColor=white)
+![API](https://img.shields.io/badge/API-REST-FF6C37)
+![Reports](https://img.shields.io/badge/Reports-Auto--Generated-green)
+
+</div>
+
+---
+
+## 🎯 Overview
+
+<div align="center">
+
+```mermaid
+graph TB
+    A[🌐 Domain Generation] --> B[🔍 Multi-API Scanning]
+    B --> C[🤖 ML Threat Assessment]
+    C --> D[📊 Confidence Scoring]
+    D --> E{🎯 Auto-Report?}
+    E -->|Yes| F[📧 ICANN Compliance Report]
+    E -->|No| G[👤 Manual Review Queue]
+    F --> H[📋 Follow-up Tracking]
+    G --> I[🔄 Analyst Decision]
+    I --> F
+
+    style A fill:#e1f5fe
+    style B fill:#f3e5f5
+    style C fill:#e8f5e8
+    style D fill:#fff8e1
+    style E fill:#ffebee
+    style F fill:#e0f2f1
+    style G fill:#fce4ec
+    style H fill:#f1f8e9
+    style I fill:#e3f2fd
+```
+
+</div>
+
+**Anisakys** is an enterprise-grade automated phishing detection and reporting engine specifically designed for **blue teams**, **SOC analysts**, and **cybersecurity professionals** who require comprehensive threat hunting capabilities with full **ICANN compliance**.
+
+This sophisticated platform combines **real-time domain monitoring**, **multi-API threat intelligence**, **machine learning-based assessment**, and **automated abuse reporting** to provide organizations with a complete defense against sophisticated phishing campaigns.
+
+### 🏛️ **ICANN Compliance Features**
+
+- ✅ **2-Day SLA Tracking** - Automatic follow-up system for non-responsive registrars
+- ✅ **Escalation Management** - Multi-level CC escalation for overdue reports
+- ✅ **Audit Trail** - Complete reporting history with timestamps
+- ✅ **Professional Templates** - ICANN-compliant abuse report formatting
+
+---
 
 ## 📚 Table of Contents
 
-- [Features](#-features)
-- [Getting Started](#-getting-started)
-  - [Prerequisites](#-prerequisites)
-  - [Installation](#-installation)
-- [Configuration](#-configuration)
-- [Usage](#-usage)
-  - [Basic Scanning](#-basic-scanning)
-  - [Multi-API Validation](#-multi-api-validation)
-  - [Auto-Analysis System](#-auto-analysis-system)
-  - [REST API Server](#-rest-api-server)
-  - [Manual Phishing Site Reporting](#-manual-phishing-site-reporting)
-- [Contributing](#-contributing)
-- [License](#-license)
-- [Contact](#-contact)
+<div align="center">
+
+|          🎯 **Core Sections**           |         🛠️ **Technical Docs**          |                🚀 **Advanced Usage**                 |
+| :-------------------------------------: | :------------------------------------: | :--------------------------------------------------: |
+|        [🌟 Features](#-features)        |  [⚙️ Configuration](#-configuration)   |      [🤖 Auto-Analysis](#-auto-analysis-system)      |
+| [🚀 Getting Started](#-getting-started) |          [🛠️ Usage](#-usage)           |           [🔌 REST API](#-rest-api-server)           |
+|   [📋 Prerequisites](#-prerequisites)   | [🔍 Multi-API](#-multi-api-validation) | [📧 ICANN Reports](#-manual-phishing-site-reporting) |
+|    [🔨 Installation](#-installation)    |   [📊 Monitoring](#-basic-scanning)    |       [🔄 Advanced Ops](#-advanced-operations)       |
+
+</div>
+
+**Quick Navigation:**
+
+- 🎯 [**Overview**](#-overview) • 🌟 [**Features**](#-features) • 🚀 [**Quick Start**](#-getting-started)
+- ⚙️ [**Configuration**](#-configuration) • 🛠️ [**Usage Guide**](#-usage) • 🤝 [**Contributing**](#-contributing)
+
+---
 
 ## 🌟 Features
 
-### Core Detection Engine
+<div align="center">
 
-- 🌀 Dynamic domain permutation generation from keyword lists
-- 🔍 Content-based phishing pattern detection with ML enhancement
-- ⚡ Multi-threaded scanning architecture (up to 180 concurrent workers)
-- 📊 Smart logging with duplicate prevention and noise reduction
-- 🛡️ DNS failure noise reduction and intelligent retry logic
-- 🔄 Continuous monitoring with configurable intervals and daemon mode
+```mermaid
+graph LR
+    A[🔍 Detection Engine] --> B[🛡️ Threat Intel APIs]
+    B --> C[📧 ICANN Reporting]
+    C --> D[📊 Management Dashboard]
+    B --> N[🔗 Grinder Integration]
 
-### Multi-API Threat Intelligence
+    A --> E[🌀 Domain Generation<br/>180 Threads]
+    A --> F[🤖 ML Pattern Detection<br/>Content Analysis]
 
-- 🛡️ **VirusTotal Integration**: 70+ antivirus engines for comprehensive URL scanning
-- 🔍 **URLVoid Integration**: 30+ reputation engines and blocklist services
-- 🎣 **PhishTank Integration**: Community-driven verified phishing database
-- 🔗 **Grinder Integration**: Bidirectional threat intelligence sharing and IP reporting
-- 🤖 **Auto-Analysis Pipeline**: Intelligent threat assessment with confidence scoring
-- 📊 **Multi-API Validation**: Aggregated threat level calculation across all services
+    B --> G[🦠 VirusTotal<br/>70+ Engines]
+    B --> H[🔍 URLVoid<br/>30+ Sources]
+    B --> I[🎣 PhishTank<br/>Community DB]
+
+    N --> O[📤 IP Reporting<br/>Malicious Infrastructure]
+
+    C --> J[📋 Follow-up System<br/>2-Day SLA]
+    C --> K[🔄 Escalation Mgmt<br/>Multi-Level CC]
+
+    D --> L[🚀 REST API<br/>Bearer Auth]
+    D --> M[📈 Real-time Stats<br/>Health Monitoring]
+
+    style A fill:#e1f5fe
+    style B fill:#f3e5f5
+    style C fill:#e8f5e8
+    style D fill:#fff8e1
+    style N fill:#ffebee
+```
+
+</div>
+
+---
+
+### 🔍 **Core Detection Engine**
+
+<table>
+<tr>
+<td width="50%">
+
+#### 🌀 **Dynamic Domain Generation**
+
+- **Keyword Permutation Engine** - Advanced combinatorial generation
+- **Smart Pattern Recognition** - ML-enhanced content analysis
+- **Multi-Threading Support** - Up to **180 concurrent workers**
+- **Noise Reduction Logic** - DNS failure filtering & retry intelligence
+
+</td>
+<td width="50%">
+
+#### ⚡ **High-Performance Architecture**
+
+- **Continuous Monitoring** - Configurable intervals & daemon mode
+- **Smart Logging System** - Duplicate prevention & log rotation
+- **Memory Optimization** - Efficient resource management
+- **Graceful Shutdown** - Clean exit handling with KeyboardInterrupt
+
+</td>
+</tr>
+</table>
+
+### 🛡️ **Multi-API Threat Intelligence**
+
+Anisakys integrates multiple threat intelligence services to provide comprehensive assessment of each detected domain. The system simultaneously queries different APIs and aggregates results to generate a **consolidated confidence score** and **aggregated threat level**.
+
+#### 🔄 **Multi-API Validation Flow**
+
+1. **🔍 Initial Detection** - Detection engine identifies suspicious domain
+2. **📡 Parallel Query** - Simultaneous requests sent to all configured APIs
+3. **⚖️ Result Aggregation** - Results combined using specific weights
+4. **📊 Final Scoring** - 0-100% score calculated based on all sources
+5. **🎯 Automatic Decision** - If threshold exceeded, proceeds to automatic reporting
+
+#### 🔌 **Integrated APIs**
+
+- **🦠 VirusTotal** - Queries 70+ antivirus engines for malware detection and URL reputation
+- **🔍 URLVoid** - Verifies against 30+ reputation sources and blacklist services
+- **🎣 PhishTank** - Community database of verified phishing sites
+- **🔗 Grinder** - Optional malicious IP reporting to threat intelligence system (configurable)
+
+#### 📈 **Confidence System**
+
+The system automatically calculates:
+
+- **Confidence Score** (0-100%) - Based on API consensus
+- **Threat Level** - Aggregated classification (low/medium/high/critical)
+- **Detection Keywords** - Specific terms that triggered detection
+- **API Response Consensus** - Percentage of APIs confirming the threat
 
 ### Enhanced Abuse Reporting
 
@@ -85,74 +214,135 @@ Anisakys is an advanced automated phishing detection engine designed for blue te
 
 ### 📋 Prerequisites
 
-**Before you begin, ensure you have met the following requirements**:
+<div align="center">
 
-- Python 3.10+
-- PostgreSQL 12+ (for production) or SQLite (for development)
-- Linux/macOS (Windows not recommended)
-- **Optional API Keys for Enhanced Detection**:
-  - VirusTotal API Key (recommended)
-  - URLVoid API Key (recommended)
-  - PhishTank API Key (optional)
-  - Grinder API credentials (optional)
+|                       🐍 **Python Environment**                       |                           🗄️ **Database Requirements**                            |                        🔑 **API Keys (Optional)**                         |
+| :-------------------------------------------------------------------: | :-------------------------------------------------------------------------------: | :-----------------------------------------------------------------------: |
+| ![Python](https://img.shields.io/badge/Python-3.10+-blue?logo=python) | ![PostgreSQL](https://img.shields.io/badge/PostgreSQL-12+-336791?logo=postgresql) | ![VirusTotal](https://img.shields.io/badge/VirusTotal-Recommended-4285f4) |
+| ![OS](https://img.shields.io/badge/OS-Linux%2FmacOS-green?logo=linux) |   ![SQLite](https://img.shields.io/badge/SQLite-Development-003B57?logo=sqlite)   |    ![URLVoid](https://img.shields.io/badge/URLVoid-Recommended-orange)    |
+
+</div>
+
+<table>
+<tr>
+<td width="50%">
+
+#### 🎯 **System Requirements**
+
+- **Python 3.10+** - Core runtime environment
+- **PostgreSQL 12+** - Production database (recommended)
+- **SQLite** - Development/testing database
+- **Linux/macOS** - Preferred operating systems
+- **4GB RAM** - Minimum for multi-threading
+- **SSD Storage** - Recommended for database performance
+
+</td>
+<td width="50%">
+
+#### 🔑 **API Keys (Optional but Recommended)**
+
+- **VirusTotal API** - 70+ antivirus engines
+- **URLVoid API** - 30+ reputation sources
+- **PhishTank API** - Community phishing database
+- **Grinder API** - Enterprise threat intelligence
+- **SMTP Credentials** - Abuse report delivery
+- **Screenshots Directory** - Visual evidence storage
+
+</td>
+</tr>
+</table>
+
+---
 
 ### 🔨 Installation
 
-1. **Clone the Repository:**
+<div align="center">
 
-   ```bash
-   git clone https://github.com/JuanVilla424/anisakys.git
-   cd anisakys
-   ```
+```mermaid
+graph TD
+    A[📥 Clone Repository] --> B[🐍 Create Virtual Environment]
+    B --> C[⚡ Activate Environment]
+    C --> D[📦 Install Dependencies]
+    D --> E[⚙️ Configure Environment]
+    E --> F[🗄️ Setup Database]
+    F --> G[🚀 Launch System]
 
-2. **Create a Virtual Environment**
+    style A fill:#e3f2fd
+    style B fill:#f3e5f5
+    style C fill:#e8f5e8
+    style D fill:#fff8e1
+    style E fill:#ffebee
+    style F fill:#f1f8e9
+    style G fill:#e0f2f1
+```
 
-   ```bash
-   python -m venv venv
-   ```
+</div>
 
-3. **Activate the Virtual Environment**
+#### **Step 1: 📥 Clone the Repository**
 
-   On Unix or MacOS:
+```bash
+git clone https://github.com/JuanVilla424/anisakys.git
+cd anisakys
+```
 
-   ```bash
-   source venv/bin/activate
-   ```
+#### **Step 2: 🐍 Setup Python Environment**
 
-4. **Upgrade pip**
+<table>
+<tr>
+<td width="50%">
 
-   ```bash
-   python -m ensurepip
-   pip install --upgrade pip
-   ```
+**🔹 Using pip (Recommended)**
 
-5. **Install Dependencies**
+```bash
+# Create virtual environment
+python -m venv venv
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+# Activate environment
+source venv/bin/activate  # Linux/macOS
+# venv\Scripts\activate   # Windows
 
-   - or if u prefer use poetry:
+# Upgrade pip
+python -m pip install --upgrade pip
 
-     ```bash
-     pip install poetry
-     poetry lock
-     poetry install
-     ```
+# Install dependencies
+pip install -r requirements.txt
+```
 
-     - **When you're done**, deactivate the environment:
+</td>
+<td width="50%">
 
-       ```bash
-       deactivate
-       ```
+**🔹 Using Poetry (Alternative)**
 
-6. **Set Up Environment Variables**
+```bash
+# Install Poetry
+pip install poetry
 
-   - Rename the `.env.example` file to `.env`:
-     ```bash
-     cp .env.example .env
-     ```
-   - Open the `.env` file and configure the environment variables as needed.
+# Setup project
+poetry lock
+poetry install
+
+# Activate environment
+poetry shell
+
+# When done
+deactivate
+```
+
+</td>
+</tr>
+</table>
+
+#### **Step 3: ⚙️ Environment Configuration**
+
+```bash
+# Copy example configuration
+cp .env.example .env
+
+# Edit configuration (use your preferred editor)
+nano .env
+```
+
+> 💡 **Pro Tip:** The system will work with minimal configuration, but API keys significantly enhance detection capabilities.
 
 ## ⚙️ Configuration
 
