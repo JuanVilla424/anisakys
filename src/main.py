@@ -3743,6 +3743,13 @@ class AbuseReportManager:
                                 logger.warning(
                                     f"❌ No valid abuse emails found for {url} - all emails were same domain or invalid"
                                 )
+                                # Mark abuse_report_sent=1 to avoid infinite loop - we tried but couldn't find valid emails
+                                conn.execute(
+                                    text(
+                                        "UPDATE phishing_sites SET abuse_report_sent=1 WHERE url=:url"
+                                    ),
+                                    {"url": url},
+                                )
 
                         except Exception as e:
                             logger.error(f"❌ Error processing report for {url}: {e}")
@@ -3906,6 +3913,11 @@ class AbuseReportManager:
                     elif not abuse_list:
                         logger.warning(
                             f"❌ No valid abuse emails found for {url} - all emails were same domain or invalid"
+                        )
+                        # Mark as reported to avoid infinite loop - we tried but couldn't find valid emails
+                        conn.execute(
+                            text("UPDATE phishing_sites SET reported=1 WHERE url=:url"),
+                            {"url": url},
                         )
 
                 except Exception as e:
