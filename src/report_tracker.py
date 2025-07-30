@@ -88,7 +88,8 @@ class ReportTracker:
             db_engine: SQLAlchemy database engine
         """
         self.db_engine = db_engine
-        self._ensure_table_exists()
+        if db_engine is not None:  # Only ensure table exists if we have a valid engine
+            self._ensure_table_exists()
 
     def _ensure_table_exists(self):
         """Ensure the abuse_reports table exists"""
