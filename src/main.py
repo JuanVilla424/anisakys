@@ -2995,75 +2995,90 @@ class AbuseReportManager:
         Returns:
             bool: True if a report was sent successfully, False otherwise
         """
+        logger.info(f"🎯 ENTERED send_abuse_report for {site_url}")
+        logger.info(f"📧 Abuse emails: {abuse_emails}")
+        logger.info(f"🧪 Test mode: {test_mode}")
+        logger.info(f"📎 Attachment paths: {attachment_paths}")
+        logger.info(f"🔬 Multi-API results: {bool(multi_api_results)}")
         # Get attachments - prioritize parameter, then get all configured attachments
+        logger.info("📎 Getting attachment paths...")
         if attachment_paths is None:
             attachment_paths = AttachmentConfig.get_all_attachments()
+        logger.info(f"📎 Final attachment paths: {attachment_paths}")
 
+        logger.info("⚙️ Getting SMTP configuration...")
         smtp_host = getattr(settings, "SMTP_HOST")
         smtp_port = getattr(settings, "SMTP_PORT")
         smtp_user = getattr(settings, "SMTP_USER", "")
         smtp_pass = getattr(settings, "SMTP_PASS", "")
         sender_email = getattr(settings, "ABUSE_EMAIL_SENDER")
         subject = f"{getattr(settings, 'ABUSE_EMAIL_SUBJECT')} for {site_url}"
+        logger.info(f"📧 SMTP: {smtp_host}:{smtp_port}, sender: {sender_email}")
 
         # DEVELOPMENT/TEST PROTECTION: Only send to test email in development
+        logger.info("🔍 Checking development/test mode...")
         TEST_EMAIL = "r6ty5r296it6tl4eg5m.constant214@passinbox.com"
+        logger.info(f"🧪 Test mode: {test_mode}")
+
         if not test_mode:
+            logger.info("⚡ Not in test mode - checking for development environment...")
             # Check if we're in development/test environment
             is_development = any(test_email in abuse_emails for test_email in [TEST_EMAIL])
+            logger.info(f"🔍 Is development: {is_development}")
+            logger.info(f"📧 Current abuse emails: {abuse_emails}")
 
             if is_development:
                 # In development: only send to test email
                 logger.warning(f"🧪 DEVELOPMENT MODE: Redirecting all emails to test address")
                 abuse_emails = [TEST_EMAIL]
             else:
-                # In production: validate abuse contacts normally
-                validated_emails = []
-                # Extract domain from site_url for same-domain validation
-                from urllib.parse import urlparse
-
-                target_domain = urlparse(site_url).netloc.lower().replace("www.", "")
-
-                for email in abuse_emails:
-                    validation_result = (
-                        self.abuse_contact_validator.validate_registrar_abuse_contact(
-                            email, target_domain=target_domain
-                        )
-                    )
-                    if validation_result["valid"]:
-                        validated_emails.append(email)
-                        if validation_result["warnings"]:
-                            logger.warning(
-                                f"⚠️  Abuse email {email} has warnings: {', '.join(validation_result['warnings'])}"
-                            )
-                    else:
-                        logger.error(
-                            f"❌ Invalid abuse email {email}: {', '.join(validation_result['errors'])}"
-                        )
+                # In production: SKIP ICANN validation to avoid hanging
+                logger.info(
+                    "🚀 PRODUCTION MODE: Skipping ICANN email validation to prevent hanging"
+                )
+                logger.warning(
+                    "⏭️  ICANN email validation disabled in production to prevent SMTP timeout hangs"
+                )
+                # Simply use the emails as-is without validation to prevent hanging
+                validated_emails = abuse_emails[:]  # Copy the list
+                logger.info(f"✅ Using emails without validation: {validated_emails}")
 
                 if not validated_emails:
-                    logger.error("❌ No valid abuse emails found - cannot send report")
+                    logger.error("❌ No abuse emails found - cannot send report")
                     return False
 
                 abuse_emails = validated_emails
 
         # ICANN Compliance: Always capture screenshot (independent of test_mode)
+        logger.info("📸 STARTING screenshot capture...")
         screenshot_info = None
         screenshot_included = False
         try:
-            screenshot_info = self.screenshot_service.capture_screenshot(site_url, use_async=False)
-            if screenshot_info and screenshot_info.get("success"):
-                if not attachment_paths:
-                    attachment_paths = []
-                attachment_paths.append(screenshot_info["screenshot_path"])
-                screenshot_included = True
-                logger.info(f"📸 Screenshot captured: {screenshot_info['filename']}")
-            else:
-                logger.warning(
-                    f"⚠️  Failed to capture screenshot: {screenshot_info.get('error', 'Unknown error') if screenshot_info else 'Service unavailable'}"
+            if hasattr(self, "screenshot_service") and self.screenshot_service:
+                logger.info(f"📸 Calling screenshot_service.capture_screenshot for {site_url}")
+                logger.info("🏁 ABOUT TO CALL SCREENSHOT SERVICE - THIS MIGHT HANG!")
+                screenshot_info = self.screenshot_service.capture_screenshot(
+                    site_url, use_async=False
                 )
+                logger.info(f"✅ Screenshot service returned: {bool(screenshot_info)}")
+
+                if screenshot_info and screenshot_info.get("success"):
+                    logger.info("✅ Screenshot capture successful")
+                    if not attachment_paths:
+                        attachment_paths = []
+                    attachment_paths.append(screenshot_info["screenshot_path"])
+                    screenshot_included = True
+                    logger.info(f"📸 Screenshot captured: {screenshot_info['filename']}")
+                else:
+                    logger.warning(
+                        f"⚠️  Failed to capture screenshot: {screenshot_info.get('error', 'Unknown error') if screenshot_info else 'Service unavailable'}"
+                    )
+            else:
+                logger.warning("⚠️ No screenshot service available")
         except Exception as e:
             logger.error(f"❌ Screenshot capture error: {e}")
+
+        logger.info("✅ Screenshot section completed")
 
         # Report IP to Grinder if not in test mode, not in testing mode, and integration is enabled
         grinder_report_result = None
@@ -3108,9 +3123,14 @@ class AbuseReportManager:
                     if not pt_result.get("error") and pt_result.get("is_phishing"):
                         detection_context["phishtank_verified"] = pt_result.get("verified", False)
 
-                grinder_report_result = self.report_ip_to_grinder(
-                    ip_address, site_url, detection_context
-                )
+                # Re-enable Grinder but with better error handling
+                try:
+                    grinder_report_result = self.report_ip_to_grinder(
+                        ip_address, site_url, detection_context
+                    )
+                except Exception as grinder_error:
+                    logger.warning(f"⚠️  Grinder error (continuing): {grinder_error}")
+                    grinder_report_result = {"status": "error", "message": str(grinder_error)}
 
             except Exception as e:
                 logger.warning(f"⚠️  Could not report IP to Grinder during abuse report: {e}")
@@ -3272,8 +3292,11 @@ class AbuseReportManager:
             re.sub(r"^https?://", "", site_url).strip().split("/")[0].lower().replace("www.", "")
         )
 
-        for primary in abuse_emails:
+        logger.info(f"🔄 STARTING EMAIL LOOP for {len(abuse_emails)} recipients")
+        for i, primary in enumerate(abuse_emails, 1):
             try:
+                logger.info(f"📧 PROCESSING EMAIL {i}/{len(abuse_emails)}: {primary}")
+
                 # Validate email format
                 if not self.abuse_detector.validate_email(primary):
                     logger.warning(f"⚠️  Invalid email format, skipping: {primary}")
@@ -3286,6 +3309,7 @@ class AbuseReportManager:
                     )
                     continue
 
+                logger.info(f"📝 CREATING EMAIL MESSAGE for {primary}")
                 msg = MIMEMultipart("alternative")
                 msg["Subject"] = subject
                 msg["From"] = sender_email
@@ -3351,6 +3375,7 @@ class AbuseReportManager:
                     continue
 
                 # Send email
+                logger.info(f"📤 ABOUT TO SEND EMAIL to {primary}")
                 attachment_info = ""
                 api_info = ""
                 grinder_info = ""
@@ -3369,42 +3394,27 @@ class AbuseReportManager:
                 if grinder_report_result and grinder_report_result.get("status") == "success":
                     grinder_info = " [IP reported to threat intelligence]"
 
+                logger.info(f"🌐 CONNECTING TO SMTP {smtp_host}:{smtp_port}")
                 with smtplib.SMTP(smtp_host, smtp_port) as server:
                     if smtp_user and smtp_pass:
+                        logger.info(f"🔐 LOGGING IN TO SMTP SERVER")
                         server.login(smtp_user, smtp_pass)
+                    logger.info(f"📬 SENDING EMAIL MESSAGE to {primary}")
                     server.sendmail(sender_email, recipients, msg.as_string())
+                    logger.info(f"✅ EMAIL SENT SUCCESSFULLY to {primary}")
 
                 logger.info(
                     f"✅ Enhanced abuse report sent to {primary} for site {site_url}{attachment_info}{api_info}{grinder_info}; "
                     f"CC: {final_cc if final_cc else 'None'}"
                 )
                 success_count += 1
+                logger.info(f"📊 EMAIL SUCCESS COUNT: {success_count}")
 
             except Exception as e:
                 logger.error(f"❌ Failed to send abuse report to {primary}: {e}")
                 continue
 
-        # ICANN Compliance: Track sent reports
-        if success_count > 0 and not test_mode:
-            try:
-                report_record = create_report_record(
-                    site_url=site_url,
-                    recipients=abuse_emails,
-                    subject=subject,
-                    cc_recipients=final_cc,
-                    multi_api_results=multi_api_results,
-                    screenshot_included=screenshot_included,
-                )
-
-                if self.report_tracker.track_report(report_record):
-                    logger.info(f"📋 Tracked abuse report: {report_record.report_id}")
-                else:
-                    logger.warning("⚠️  Failed to track abuse report in database")
-
-            except Exception as e:
-                logger.error(f"❌ Failed to track report: {e}")
-
-        # Log final summary
+        # Log final summary before report tracking to identify hang point
         if success_count > 0:
             logger.info(
                 f"📊 SUMMARY: Successfully sent enhanced abuse reports to {success_count}/{len(abuse_emails)} recipients for {site_url}"
@@ -3414,6 +3424,93 @@ class AbuseReportManager:
                 f"❌ SUMMARY: Failed to send abuse reports to any recipients for {site_url}"
             )
 
+        # ICANN Compliance: Track sent reports - RE-ENABLED WITH BETTER ERROR HANDLING
+        if success_count > 0 and not test_mode:
+            # Manual database update to mark as reported and prevent infinite loop
+            try:
+                logger.info(f"🏁 UPDATING DATABASE to mark {site_url} as reported")
+                with self.db_manager.engine.begin() as conn:
+                    result = conn.execute(
+                        text(
+                            "UPDATE phishing_sites SET reported = 1, abuse_report_sent = 1, last_report_sent = CURRENT_TIMESTAMP WHERE url = :url"
+                        ),
+                        {"url": site_url},
+                    )
+                    logger.info(
+                        f"✅ Database updated: {result.rowcount} rows affected for {site_url}"
+                    )
+
+                # Try to track the report - if this fails, continue anyway since emails were sent
+                try:
+                    logger.info(f"📋 CREATING REPORT RECORD for tracking")
+                    report_record = create_report_record(
+                        site_url=site_url,
+                        recipients=abuse_emails,
+                        subject=subject,
+                        cc_recipients=final_cc,
+                        multi_api_results=multi_api_results,
+                        screenshot_included=screenshot_included,
+                    )
+
+                    if self.report_tracker.track_report(report_record):
+                        logger.info(f"📋 Tracked abuse report: {report_record.report_id}")
+                    else:
+                        logger.warning(
+                            "⚠️  Failed to track abuse report in database (emails were sent successfully)"
+                        )
+
+                except Exception as track_error:
+                    logger.warning(
+                        f"⚠️  Report tracking failed (emails were sent successfully): {track_error}"
+                    )
+
+            except Exception as db_error:
+                logger.error(f"❌ CRITICAL: Failed to mark site as reported: {db_error}")
+                logger.error("❌ This will cause infinite loop - site will be processed again!")
+                import traceback
+
+                traceback.print_exc()
+
+            # try:
+            #     logger.info(f"🏁 ABOUT TO MANUALLY UPDATE DATABASE for {site_url}")
+            #     with self.db_manager.engine.begin() as conn:
+            #         logger.info(f"🔄 EXECUTING UPDATE QUERY for {site_url}")
+            #         conn.execute(
+            #             text("UPDATE phishing_sites SET reported = 1, abuse_report_sent = 1, last_report_sent = CURRENT_TIMESTAMP WHERE url = :url"),
+            #             {"url": site_url}
+            #         )
+            #         logger.info(f"✅ DATABASE UPDATE COMPLETED for {site_url}")
+            #     logger.info(f"✅ Manually marked {site_url} as reported in database")
+            # except Exception as e:
+            #     logger.error(f"❌ Failed to mark site as reported: {e}")
+            #     import traceback
+            #     traceback.print_exc()
+
+            # try:
+            #     logger.info(f"🏁 ABOUT TO CREATE REPORT RECORD for {site_url}")
+            #     report_record = create_report_record(
+            #         site_url=site_url,
+            #         recipients=abuse_emails,
+            #         subject=subject,
+            #         cc_recipients=final_cc,
+            #         multi_api_results=multi_api_results,
+            #         screenshot_included=screenshot_included,
+            #     )
+            #     logger.info(f"✅ REPORT RECORD CREATED: {report_record.report_id}")
+            #
+            #     logger.info(f"🏁 ABOUT TO TRACK REPORT - THIS MIGHT HANG!")
+            #     if self.report_tracker.track_report(report_record):
+            #         logger.info(f"📋 Tracked abuse report: {report_record.report_id}")
+            #     else:
+            #         logger.warning("⚠️  Failed to track abuse report in database")
+            #     logger.info(f"✅ REPORT TRACKING COMPLETED for {site_url}")
+            #
+            # except Exception as e:
+            #     logger.error(f"❌ Failed to track report: {e}")
+            #     import traceback
+            #     traceback.print_exc()
+
+        logger.info(f"🎉 SEND_ABUSE_REPORT ABOUT TO RETURN: {success_count > 0} for {site_url}")
         return success_count > 0
 
     def report_phishing_sites(self):
@@ -3761,17 +3858,26 @@ class AbuseReportManager:
 
     def process_manual_reports(self, attachment_paths: Optional[List[str]] = None):
         """Process manual reports that haven't been processed yet with multi-API validation."""
+        logger.info("🔍 STARTING process_manual_reports method")
+
         # If no specific attachments provided, get all configured attachments
         if attachment_paths is None:
             attachment_paths = AttachmentConfig.get_all_attachments()
+            logger.info(
+                f"📎 Using default attachments: {len(attachment_paths) if attachment_paths else 0} files"
+            )
+        else:
+            logger.info(f"📎 Using provided attachments: {len(attachment_paths)} files")
 
+        logger.info("🗄️ Opening database connection...")
         with self.db_manager.engine.begin() as conn:
+            logger.info("🔍 Querying for manual sites to process...")
             sites = conn.execute(
                 text(
                     """
-                    SELECT url, reported, abuse_report_sent, abuse_email, priority
+                    SELECT url, reported, abuse_report_sent, abuse_email, priority, site_status, takedown_date
                     FROM phishing_sites
-                    WHERE manual_flag = 1 AND reported = 0
+                    WHERE manual_flag = 1 AND reported = 0 AND site_status = 'up'
                     ORDER BY
                         CASE priority
                             WHEN 'high' THEN 1
@@ -3784,17 +3890,39 @@ class AbuseReportManager:
                 )
             ).fetchall()
 
-            for row in sites:
-                url, reported, abuse_report_sent, stored_abuse = row[:4]
+            logger.info(f"📋 Found {len(sites)} sites to process")
+
+            if not sites:
+                logger.info("✅ No manual sites to process - all done!")
+                logger.info("🚪 EXITING process_manual_reports method normally")
+                return
+
+            for i, row in enumerate(sites, 1):
+                (
+                    url,
+                    reported,
+                    abuse_report_sent,
+                    stored_abuse,
+                    priority,
+                    site_status,
+                    takedown_date,
+                ) = row[:7]
+                logger.info(f"🔄 Processing site {i}/{len(sites)}: {url}")
+                logger.info(
+                    f"   📊 Status: site_status={site_status}, reported={reported}, abuse_sent={abuse_report_sent}"
+                )
+                logger.info(f"   📊 Priority: {priority}, takedown_date: {takedown_date}")
 
                 try:
                     # Perform multi-API validation if API keys are configured
                     multi_api_results = None
                     if AUTO_ANALYSIS_ENABLED:
-                        logger.info(f"🔍 Performing multi-API validation for {url}")
+                        logger.info(f"🔍 Starting multi-API validation for {url}")
                         multi_api_results = self.multi_api_validator.comprehensive_scan(url)
+                        logger.info(f"✅ Multi-API validation complete for {url}")
 
                         # Store API results in a database
+                        logger.info(f"💾 Storing API results for {url}")
                         try:
                             conn.execute(
                                 text(
@@ -3824,12 +3952,31 @@ class AbuseReportManager:
                         except Exception as e:
                             logger.warning(f"⚠️  Failed to store API results for {url}: {e}")
 
+                    logger.info(f"🔍 Starting WHOIS lookup for {url}")
                     whois_data = basic_whois_lookup(url)
+                    logger.info(f"✅ WHOIS lookup complete for {url}")
                     whois_str = str(whois_data)
                     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+                    logger.info(f"🌐 Getting IP info for domain: {domain}")
                     resolved_ip, asn_provider = get_ip_info(domain)
                     cloudflare_detected = resolved_ip and is_cloudflare_ip(resolved_ip)
+                    logger.info(f"✅ IP info complete: {resolved_ip}, CF: {cloudflare_detected}")
+
+                    # If we can't resolve the IP, the site is likely down
+                    if not resolved_ip:
+                        logger.warning(
+                            f"⚠️  Cannot resolve IP for {domain} - site appears to be down"
+                        )
+                        logger.info(f"📝 Updating site status to 'down' for {url}")
+                        conn.execute(
+                            text(
+                                "UPDATE phishing_sites SET site_status = 'down', takedown_date = CURRENT_TIMESTAMP WHERE url = :url"
+                            ),
+                            {"url": url},
+                        )
+                        logger.info(f"✅ Site marked as down: {url}")
+                        continue  # Skip to next site
 
                     conn.execute(
                         text(
@@ -3853,9 +4000,14 @@ class AbuseReportManager:
 
                     # Get abuse emails using enhanced detection
                     domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+                    logger.info(f"🏢 Extracting registrar info for {url}")
                     registrar = self.abuse_detector.extract_registrar(whois_data)
+                    logger.info(f"📧 Getting enhanced abuse emails for {domain}")
                     abuse_list = self.abuse_detector.get_enhanced_abuse_email(
                         domain, whois_data, registrar
+                    )
+                    logger.info(
+                        f"✅ Found {len(abuse_list) if abuse_list else 0} abuse emails: {abuse_list}"
                     )
 
                     # Additional check: if Cloudflare detected, enhance the logic
@@ -3889,27 +4041,24 @@ class AbuseReportManager:
                             )
 
                     if abuse_list and abuse_report_sent == 0:
-                        if self.send_abuse_report(
+                        logger.info(f"📧 SENDING ABUSE REPORT for {url} to {abuse_list}")
+                        logger.info(
+                            f"🏁 ABOUT TO CALL send_abuse_report - THIS IS WHERE IT MIGHT HANG!"
+                        )
+
+                        report_result = self.send_abuse_report(
                             abuse_list,
                             url,
                             whois_str,
                             attachment_paths=attachment_paths,
                             multi_api_results=multi_api_results,
-                        ):
-                            conn.execute(
-                                text(
-                                    """
-                                    UPDATE phishing_sites
-                                    SET abuse_report_sent=1, abuse_email=:abuse_email, last_report_sent=:timestamp
-                                    WHERE url=:url
-                                """
-                                ),
-                                {
-                                    "abuse_email": json.dumps(abuse_list),
-                                    "timestamp": timestamp,
-                                    "url": url,
-                                },  # Store as JSON list
-                            )
+                        )
+                        logger.info(f"🎉 SEND_ABUSE_REPORT RETURNED: {report_result} for {url}")
+
+                        if report_result:
+                            # Update handled by report_tracker.track_report() - no need to duplicate here
+                            logger.info(f"✅ Abuse report sent successfully for {url}")
+                            pass
                     elif not abuse_list:
                         logger.warning(
                             f"❌ No valid abuse emails found for {url} - all emails were same domain or invalid"
@@ -3922,8 +4071,12 @@ class AbuseReportManager:
 
                 except Exception as e:
                     logger.error(f"❌ WHOIS query failed for {url}: {e}")
+                    logger.info(f"⚠️  Continuing to next site after error for {url}")
 
-        logger.info("✅ Completed manual reports processing with multi-API validation.")
+                logger.info(f"✅ Finished processing site {i}/{len(sites)}: {url}")
+
+        logger.info("🏁 Completed ALL manual reports processing with multi-API validation.")
+        logger.info("🚪 EXITING process_manual_reports method after processing all sites")
 
     def send_test_report(self, test_email: str, attachment_paths: Optional[List[str]] = None):
         """Send a test abuse report with multi-API results."""
@@ -5349,10 +5502,17 @@ class Engine:
             return
 
         if self.args.process_reports:
+            logger.info("🚀 STARTING --process-reports mode")
             # Convert single attachment to list if provided
             attachment_paths = [self.attachment] if self.attachment else None
+            logger.info(f"📎 Attachment paths: {attachment_paths}")
+
+            logger.info("🏁 CALLING process_manual_reports...")
             self.report_manager.process_manual_reports(attachment_paths=attachment_paths)
+            logger.info("✅ process_manual_reports RETURNED SUCCESSFULLY!")
+
             logger.info("✅ Manually processed flagged phishing reports. Exiting.")
+            logger.info("🚪 ABOUT TO RETURN FROM start() method")
             return
 
         if self.args.test_report:
