@@ -80,6 +80,33 @@ VIRUSTOTAL_API_KEY = getattr(settings, "VIRUSTOTAL_API_KEY", None)
 URLVOID_API_KEY = getattr(settings, "URLVOID_API_KEY", None)
 PHISHTANK_API_KEY = getattr(settings, "PHISHTANK_API_KEY", None)
 
+
+def serialize_for_json(obj):
+    """Convert objects with datetime to JSON-serializable format"""
+    if obj is None:
+        return None
+
+    if hasattr(obj, "__dict__"):
+        # For objects with attributes, convert to dict
+        result = {}
+        for key, value in obj.__dict__.items():
+            if isinstance(value, datetime.datetime):
+                result[key] = value.isoformat()
+            elif isinstance(value, list):
+                result[key] = [serialize_for_json(item) for item in value]
+            else:
+                result[key] = value
+        return result
+    elif isinstance(obj, datetime.datetime):
+        return obj.isoformat()
+    elif isinstance(obj, list):
+        return [serialize_for_json(item) for item in obj]
+    elif isinstance(obj, dict):
+        return {key: serialize_for_json(value) for key, value in obj.items()}
+    else:
+        return obj
+
+
 # Grinder Integration Configuration
 GRINDER0X_API_URL = getattr(settings, "GRINDER0X_API_URL", None)
 GRINDER0X_API_KEY = getattr(settings, "GRINDER0X_API_KEY", None)
@@ -2384,6 +2411,7 @@ def upgrade_phishing_db():
         ("asn_abuse_email", "TEXT"),
         ("hosting_provider", "TEXT"),
         ("all_abuse_emails", "TEXT"),
+        ("registrar", "TEXT"),
         ("virustotal_result", "TEXT"),
         ("urlvoid_result", "TEXT"),
         ("phishtank_result", "TEXT"),
@@ -4178,7 +4206,9 @@ Phishing Detection Team
                         """
                         ),
                         {
-                            "whois_str": json.dumps(whois_info) if whois_info else None,
+                            "whois_str": (
+                                json.dumps(serialize_for_json(whois_info)) if whois_info else None
+                            ),
                             "timestamp": timestamp,
                             "resolved_ip": resolved_ip,
                             "asn_provider": asn_provider,
@@ -5568,7 +5598,9 @@ class Engine:
                     {
                         "timestamp": timestamp,
                         "abuse_email": json.dumps(abuse_emails),
-                        "whois_info": json.dumps(whois_info) if whois_info else None,
+                        "whois_info": (
+                            json.dumps(serialize_for_json(whois_info)) if whois_info else None
+                        ),
                         "registrar": registrar,
                         "url": url,
                     },
@@ -5591,7 +5623,9 @@ class Engine:
                         "url": url,
                         "timestamp": timestamp,
                         "abuse_email": json.dumps(abuse_emails),
-                        "whois_info": json.dumps(whois_info) if whois_info else None,
+                        "whois_info": (
+                            json.dumps(serialize_for_json(whois_info)) if whois_info else None
+                        ),
                         "registrar": registrar,
                     },
                 )
