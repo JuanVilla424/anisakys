@@ -3019,9 +3019,16 @@ class AbuseReportManager:
             else:
                 # In production: validate abuse contacts normally
                 validated_emails = []
+                # Extract domain from site_url for same-domain validation
+                from urllib.parse import urlparse
+
+                target_domain = urlparse(site_url).netloc.lower().replace("www.", "")
+
                 for email in abuse_emails:
                     validation_result = (
-                        self.abuse_contact_validator.validate_registrar_abuse_contact(email)
+                        self.abuse_contact_validator.validate_registrar_abuse_contact(
+                            email, target_domain=target_domain
+                        )
                     )
                     if validation_result["valid"]:
                         validated_emails.append(email)
