@@ -26,6 +26,7 @@ import psutil
 import json
 import subprocess
 import base64
+import psycopg2
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.application import MIMEApplication
@@ -367,8 +368,10 @@ ABUSEIPDB_CATEGORIES = {
     "fraud": 18,
 }
 
-# Global engine for database operations
-db_engine = create_engine(DATABASE_URL, pool_pre_ping=True, echo=False)
+# Global engine for database operations with NullPool to avoid connection issues
+from sqlalchemy.pool import NullPool
+
+db_engine = create_engine(DATABASE_URL, poolclass=NullPool, echo=False)
 
 
 class GrinderReportClient:
@@ -2431,7 +2434,7 @@ def upgrade_phishing_db():
     # New table for tracking abuse reports (ICANN compliance)
     def create_abuse_reports_table():
         """Create table for tracking sent abuse reports"""
-        with db_engine.begin() as conn:
+        with db_engine.connect() as conn:
             conn.execute(
                 text(
                     """
@@ -2460,11 +2463,12 @@ def upgrade_phishing_db():
                 """
                 )
             )
+            conn.commit()
             logger.info("✅ Created or verified abuse_reports table")
 
     create_abuse_reports_table()
 
-    with db_engine.begin() as conn:
+    with db_engine.connect() as conn:
         # First check existing columns
         result = conn.execute(
             text(
@@ -2515,6 +2519,8 @@ def upgrade_phishing_db():
             else:
                 logger.debug(f"⏭️  Column {column_name} already exists")
 
+        conn.commit()
+
     logger.info(
         "🔧 Upgraded phishing_sites table with multi-API and auto-analysis support if necessary."
     )
@@ -2529,7 +2535,7 @@ class DatabaseManager:
 
     def init_db(self):
         """Initialize scan results table."""
-        with self.engine.begin() as conn:
+        with self.engine.connect() as conn:
             conn.execute(
                 text(
                     """
@@ -2545,11 +2551,12 @@ class DatabaseManager:
                 """
                 )
             )
+            conn.commit()
             logger.info("🗄️  Initialized scan_results table.")
 
     def init_phishing_db(self):
         """Initialize phishing sites table with enhanced multi-API support."""
-        with self.engine.begin() as conn:
+        with self.engine.connect() as conn:
             conn.execute(
                 text(
                     """
@@ -2592,11 +2599,12 @@ class DatabaseManager:
                 """
                 )
             )
+            conn.commit()
             logger.info("🗄️  Initialized phishing_sites table with enhanced multi-API support.")
 
     def init_registrar_abuse_db(self):
         """Initialize registrar abuse table."""
-        with self.engine.begin() as conn:
+        with self.engine.connect() as conn:
             conn.execute(
                 text(
                     """
@@ -2607,6 +2615,7 @@ class DatabaseManager:
                 """
                 )
             )
+            conn.commit()
             logger.info("🗄️  Initialized registrar_abuse table.")
 
     def store_detected_phishing_site(
@@ -3458,36 +3467,45 @@ class AbuseReportManager:
             try:
                 logger.info(f"🏁 UPDATING DATABASE to mark {site_url} as reported")
 
-                # Simple UPDATE with proper connection management
-                engine = None
-                conn = None
+                # Database update with new connection and autocommit
                 try:
-                    from sqlalchemy import create_engine
+                    logger.info(f"📊 Updating database to mark {site_url} as reported")
 
-                    engine = create_engine(DATABASE_URL, isolation_level="AUTOCOMMIT")
-                    conn = engine.connect()
-                    result = conn.execute(
-                        text(
-                            "UPDATE phishing_sites SET reported = 1, abuse_report_sent = 1 WHERE url = :url"
-                        ),
-                        {"url": site_url},
+                    # Use direct psycopg2 connection to avoid SQLAlchemy hanging
+                    import psycopg2
+                    from urllib.parse import urlparse
+
+                    # Parse DATABASE_URL
+                    parsed = urlparse(DATABASE_URL)
+
+                    conn_update = psycopg2.connect(
+                        host=parsed.hostname,
+                        port=parsed.port,
+                        database=parsed.path[1:],  # Remove leading slash
+                        user=parsed.username,
+                        password=parsed.password,
+                    )
+                    conn_update.autocommit = True
+
+                    cursor_update = conn_update.cursor()
+                    cursor_update.execute(
+                        "UPDATE phishing_sites SET reported = 1, abuse_report_sent = 1 WHERE url = %s",
+                        (site_url,),
                     )
                     logger.info(
-                        f"✅ DB UPDATE: Set reported=1 for {site_url} ({result.rowcount} rows)"
+                        f"✅ Database updated: Set reported=1 for {site_url} ({cursor_update.rowcount} rows)"
                     )
+
+                    cursor_update.close()
+                    conn_update.close()
+
                 except Exception as e:
-                    logger.error(f"❌ DB update failed: {e}")
-                    logger.warning(f"⚠️  EMAILS SENT SUCCESSFULLY - DB update failed but that's OK")
-                finally:
-                    # ALWAYS close connections
-                    if conn:
-                        conn.close()
-                    if engine:
-                        engine.dispose()
+                    logger.error(f"❌ Database update failed: {e}")
+                    raise  # Re-raise to ensure we know about failures
 
                 # Try to track the report - if this fails, continue anyway since emails were sent
                 try:
-                    logger.info(f"📋 CREATING REPORT RECORD for tracking")
+                    logger.info(f"📋 Creating report record for tracking")
                     report_record = create_report_record(
                         site_url=site_url,
                         recipients=abuse_emails,
@@ -3498,7 +3516,7 @@ class AbuseReportManager:
                     )
 
                     if self.report_tracker.track_report(report_record):
-                        logger.info(f"📋 Tracked abuse report: {report_record.report_id}")
+                        logger.info(f"📋 Abuse report tracked: {report_record.report_id}")
                     else:
                         logger.warning(
                             "⚠️  Failed to track abuse report in database (emails were sent successfully)"
@@ -4092,6 +4110,20 @@ Phishing Detection Team
         """Process manual reports that haven't been processed yet with multi-API validation."""
         logger.info("🔍 STARTING process_manual_reports method")
 
+        # Import required modules at the top to avoid UnboundLocalError
+        import subprocess
+        import os
+
+        # Close all existing database connections to avoid blocking
+        logger.info("🔒 Disposing all existing database connections")
+        self.db_manager.engine.dispose()
+
+        # Create a new engine for this operation
+        from sqlalchemy import create_engine
+        from sqlalchemy.pool import NullPool
+
+        self.db_manager.engine = create_engine(self.db_manager.engine.url, poolclass=NullPool)
+
         # If no specific attachments provided, get all configured attachments
         if attachment_paths is None:
             attachment_paths = AttachmentConfig.get_all_attachments()
@@ -4102,9 +4134,14 @@ Phishing Detection Team
             logger.info(f"📎 Using provided attachments: {len(attachment_paths)} files")
 
         logger.info("🗄️ Opening database connection...")
-        with self.db_manager.engine.begin() as conn:
+
+        # Get sites to process with short-lived connection
+        sites_to_process = []
+        conn = None
+        try:
+            conn = self.db_manager.engine.connect()
             logger.info("🔍 Querying for manual sites to process...")
-            sites = conn.execute(
+            result = conn.execute(
                 text(
                     """
                     SELECT url, reported, abuse_report_sent, abuse_email, priority, site_status, takedown_date
@@ -4120,80 +4157,121 @@ Phishing Detection Team
                         first_seen ASC
                 """
                 )
-            ).fetchall()
+            )
+            # Convert to list and close connection immediately
+            sites_to_process = [dict(row._mapping) for row in result]
+        except Exception as e:
+            logger.error(f"❌ Failed to query sites: {e}")
+            raise
+        finally:
+            if conn:
+                conn.close()
+                logger.debug("🔒 Initial query connection closed")
 
-            logger.info(f"📋 Found {len(sites)} sites to process")
+        logger.info(f"📋 Found {len(sites_to_process)} sites to process")
 
-            if not sites:
-                logger.info("✅ No manual sites to process - all done!")
-                logger.info("🚪 EXITING process_manual_reports method normally")
-                return
+        if not sites_to_process:
+            logger.info("✅ No manual sites to process - all done!")
+            logger.info("🚪 EXITING process_manual_reports method normally")
+            return
 
-            for i, row in enumerate(sites, 1):
-                (
-                    url,
-                    reported,
-                    abuse_report_sent,
-                    stored_abuse,
-                    priority,
-                    site_status,
-                    takedown_date,
-                ) = row[:7]
-                logger.info(f"🔄 Processing site {i}/{len(sites)}: {url}")
-                logger.info(
-                    f"   📊 Status: site_status={site_status}, reported={reported}, abuse_sent={abuse_report_sent}"
-                )
-                logger.info(f"   📊 Priority: {priority}, takedown_date: {takedown_date}")
+        for i, site_data in enumerate(sites_to_process, 1):
+            url = site_data["url"]
+            reported = site_data["reported"]
+            abuse_report_sent = site_data["abuse_report_sent"]
+            stored_abuse = site_data["abuse_email"]
+            priority = site_data["priority"]
+            site_status = site_data["site_status"]
+            takedown_date = site_data["takedown_date"]
 
+            logger.info(f"🔄 Processing site {i}/{len(sites_to_process)}: {url}")
+            logger.info(
+                f"   📊 Status: site_status={site_status}, reported={reported}, abuse_sent={abuse_report_sent}"
+            )
+            logger.info(f"   📊 Priority: {priority}, takedown_date: {takedown_date}")
+
+            try:
+                # Perform multi-API validation if API keys are configured
+                multi_api_results = None
+                if AUTO_ANALYSIS_ENABLED:
+                    logger.info(f"🔍 Starting multi-API validation for {url}")
+                    multi_api_results = self.multi_api_validator.comprehensive_scan(url)
+                    logger.info(f"✅ Multi-API validation complete for {url}")
+
+                    # Store API results in database
+                    logger.info(f"💾 Storing API results for {url}")
+                    logger.info(
+                        f"📊 API Results: {multi_api_results.get('aggregated_threat_level', 'unknown')} threat, {multi_api_results.get('confidence_score', 0)}% confidence"
+                    )
+
+                    # Store API results in database with proper isolation
+                    # Use direct psycopg2 connection to avoid SQLAlchemy hanging issues
+                    try:
+                        import psycopg2
+                        from urllib.parse import urlparse
+
+                        # Parse DATABASE_URL
+                        parsed = urlparse(DATABASE_URL)
+
+                        logger.info(f"🔧 Creating direct psycopg2 connection")
+                        conn_api = psycopg2.connect(
+                            host=parsed.hostname,
+                            port=parsed.port,
+                            database=parsed.path[1:],  # Remove leading slash
+                            user=parsed.username,
+                            password=parsed.password,
+                        )
+                        conn_api.autocommit = True  # Enable autocommit
+
+                        cursor = conn_api.cursor()
+                        logger.info(f"✅ Direct connection established, executing API UPDATE")
+
+                        cursor.execute(
+                            """
+                            UPDATE phishing_sites
+                            SET virustotal_result = %s,
+                                urlvoid_result = %s,
+                                phishtank_result = %s,
+                                multi_api_threat_level = %s,
+                                api_confidence_score = %s
+                            WHERE url = %s
+                            """,
+                            (
+                                json.dumps(multi_api_results.get("virustotal", {})),
+                                json.dumps(multi_api_results.get("urlvoid", {})),
+                                json.dumps(multi_api_results.get("phishtank", {})),
+                                multi_api_results.get("aggregated_threat_level"),
+                                multi_api_results.get("confidence_score"),
+                                url,
+                            ),
+                        )
+                        logger.info(f"✅ API results stored for {url}")
+                    except Exception as e:
+                        logger.error(f"❌ Failed to store API results for {url}: {e}")
+                        raise
+                    finally:
+                        if "cursor" in locals():
+                            cursor.close()
+                        if "conn_api" in locals():
+                            conn_api.close()
+                            logger.info(f"🔒 Direct connection closed for {url}")
+
+                # Main processing with fresh connection per site
+                logger.info(f"🔍 Starting WHOIS lookup for {url}")
+                whois_info = basic_whois_lookup(url)
+                logger.info(f"✅ WHOIS lookup complete for {url}")
+                whois_str = str(whois_info)
+                timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+                logger.info(f"🌐 Getting IP info for domain: {domain}")
+                resolved_ip, asn_provider = get_ip_info(domain)
+                cloudflare_detected = resolved_ip and is_cloudflare_ip(resolved_ip)
+                logger.info(f"✅ IP info complete: {resolved_ip}, CF: {cloudflare_detected}")
+
+                # Use new connection for updates without long-running transaction
+                conn = None
                 try:
-                    # Perform multi-API validation if API keys are configured
-                    multi_api_results = None
-                    if AUTO_ANALYSIS_ENABLED:
-                        logger.info(f"🔍 Starting multi-API validation for {url}")
-                        multi_api_results = self.multi_api_validator.comprehensive_scan(url)
-                        logger.info(f"✅ Multi-API validation complete for {url}")
-
-                        # Store API results in a database
-                        logger.info(f"💾 Storing API results for {url}")
-                        try:
-                            conn.execute(
-                                text(
-                                    """
-                                    UPDATE phishing_sites
-                                    SET virustotal_result = :vt_result,
-                                        urlvoid_result = :uv_result,
-                                        phishtank_result = :pt_result,
-                                        multi_api_threat_level = :threat_level,
-                                        api_confidence_score = :confidence_score
-                                    WHERE url = :url
-                                """
-                                ),
-                                {
-                                    "vt_result": json.dumps(
-                                        multi_api_results.get("virustotal", {})
-                                    ),
-                                    "uv_result": json.dumps(multi_api_results.get("urlvoid", {})),
-                                    "pt_result": json.dumps(multi_api_results.get("phishtank", {})),
-                                    "threat_level": multi_api_results.get(
-                                        "aggregated_threat_level"
-                                    ),
-                                    "confidence_score": multi_api_results.get("confidence_score"),
-                                    "url": url,
-                                },
-                            )
-                        except Exception as e:
-                            logger.warning(f"⚠️  Failed to store API results for {url}: {e}")
-
-                    logger.info(f"🔍 Starting WHOIS lookup for {url}")
-                    whois_info = basic_whois_lookup(url)
-                    logger.info(f"✅ WHOIS lookup complete for {url}")
-                    whois_str = str(whois_info)
-                    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
-                    logger.info(f"🌐 Getting IP info for domain: {domain}")
-                    resolved_ip, asn_provider = get_ip_info(domain)
-                    cloudflare_detected = resolved_ip and is_cloudflare_ip(resolved_ip)
-                    logger.info(f"✅ IP info complete: {resolved_ip}, CF: {cloudflare_detected}")
+                    conn = self.db_manager.engine.connect()
 
                     # If we can't resolve the IP, the site is likely down
                     if not resolved_ip:
@@ -4207,6 +4285,7 @@ Phishing Detection Team
                             ),
                             {"url": url},
                         )
+                        conn.commit()
                         logger.info(f"✅ Site marked as down: {url}")
                         continue  # Skip to next site
 
@@ -4229,6 +4308,7 @@ Phishing Detection Team
                         logger.warning(f"⚠️  Error getting enhanced abuse email for {domain}: {e}")
                         abuse_list = []
 
+                    # Update WHOIS information in database
                     conn.execute(
                         text(
                             """
@@ -4252,6 +4332,7 @@ Phishing Detection Team
                             "url": url,
                         },
                     )
+                    conn.commit()
                     logger.info(f"📊 Manually processed WHOIS data for {url}")
                     logger.info(
                         f"✅ Found {len(abuse_list) if abuse_list else 0} abuse emails: {abuse_list}"
@@ -4316,11 +4397,26 @@ Phishing Detection Team
                             {"url": url},
                         )
 
+                    # Commit changes
+                    conn.commit()
+                    logger.debug(f"🔒 Changes committed for {url}")
+
                 except Exception as e:
                     logger.error(f"❌ WHOIS query failed for {url}: {e}")
+                    if conn:
+                        conn.rollback()
+                        logger.debug(f"🔄 Changes rolled back for {url}")
                     logger.info(f"⚠️  Continuing to next site after error for {url}")
+                finally:
+                    if conn:
+                        conn.close()
+                        logger.debug(f"🔒 Connection closed for {url}")
 
-                logger.info(f"✅ Finished processing site {i}/{len(sites)}: {url}")
+                logger.info(f"✅ Finished processing site {i}/{len(sites_to_process)}: {url}")
+
+            except Exception as e:
+                logger.error(f"❌ Critical error processing site {url}: {e}")
+                logger.info(f"⚠️  Skipping site {url} due to critical error")
 
         logger.info("🏁 Completed ALL manual reports processing with multi-API validation.")
         logger.info("🚪 EXITING process_manual_reports method after processing all sites")
@@ -5514,6 +5610,11 @@ class Engine:
         self.db_manager.init_phishing_db()
         upgrade_phishing_db()
         self.db_manager.init_registrar_abuse_db()
+
+        # Ensure all initialization connections are closed
+        logger.info("🔒 Disposing initialization connections")
+        self.db_manager.engine.dispose()
+        db_engine.dispose()
 
         logger.debug("🗄️  Database initialization completed")
 
