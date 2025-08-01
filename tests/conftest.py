@@ -11,20 +11,20 @@ from contextlib import contextmanager
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 
+@pytest.fixture(scope="session")
+def main_module():
+    """Import and return the main module"""
+    from src import main
+
+    return main
+
+
 @pytest.fixture(scope="session", autouse=True)
-def create_test_database():
+def create_test_database(main_module):
     """
     Creates the test database if it does not exist.
     """
-    # Load the main module to get DATABASE_URL
-    import importlib.util
-
-    module_path = Path(__file__).parent.parent / "src" / "main.py"
-    spec = importlib.util.spec_from_file_location("src.main", str(module_path))
-    main = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(main)
-
-    db_url = main.DATABASE_URL
+    db_url = main_module.DATABASE_URL
     parsed = urlparse(db_url)
     test_db = parsed.path.lstrip("/")
 
@@ -223,5 +223,5 @@ def test_data_manager(db_engine, unique_test_id):
     manager.cleanup()
 
 
-# Test email configuration
+# Test email configuration - using @passinbox.com to avoid real reports
 TEST_USER_EMAIL = "r6ty5r296it6tl4eg5m.constant214@passinbox.com"

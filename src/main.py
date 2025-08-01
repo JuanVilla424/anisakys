@@ -128,11 +128,32 @@ GRINDER_INTEGRATION_ENABLED = bool(GRINDER0X_API_URL and GRINDER0X_API_KEY)
 
 # Constants
 ALLOWED_HEAD_STATUS = {200, 201, 202, 203, 204, 205, 206, 301, 302, 403, 405, 503, 504}
+# Realistic browser user agents - Chrome is primary, Firefox as fallback
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/115.0 Safari/537.36"
+    "Chrome/131.0.0.0 Safari/537.36"
 )
+
+FIREFOX_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) " "Gecko/20100101 Firefox/122.0"
+)
+
+# Standard browser headers to appear as legitimate traffic
+BROWSER_HEADERS = {
+    "User-Agent": DEFAULT_USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "DNT": "1",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
+}
 DNS_ERROR_KEY_PHRASES = {
     "Name or service not known",
     "getaddrinfo failed",
@@ -400,7 +421,15 @@ class GrinderReportClient:
                 {
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
-                    "User-Agent": "Anisakys-Threat-Intelligence/1.0",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                    "Accept": "application/json, text/plain, */*",
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept-Encoding": "gzip, deflate, br",
+                    "DNT": "1",
+                    "Connection": "keep-alive",
+                    "Sec-Fetch-Dest": "empty",
+                    "Sec-Fetch-Mode": "cors",
+                    "Sec-Fetch-Site": "cross-site",
                 }
             )
 
@@ -699,7 +728,20 @@ class VirusTotalIntegration:
         self.base_url = "https://www.virustotal.com/api/v3"
         self.session = requests.Session()
         self.session.headers.update(
-            {"x-apikey": self.api_key, "User-Agent": "Anisakys-Phishing-Detector/1.0"}
+            {
+                "x-apikey": self.api_key,
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                "Accept": "application/json",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept-Encoding": "gzip, deflate, br",
+                "DNT": "1",
+                "Connection": "keep-alive",
+                "Sec-Fetch-Dest": "empty",
+                "Sec-Fetch-Mode": "cors",
+                "Sec-Fetch-Site": "cross-site",
+                "Origin": "https://www.virustotal.com",
+                "Referer": "https://www.virustotal.com/",
+            }
         )
 
     def scan_url(self, url: str) -> Dict[str, Any]:
@@ -5159,7 +5201,17 @@ class PhishingUtils:
         else:
             try:
                 response = requests.get(
-                    url, timeout=timeout, headers={"User-Agent": DEFAULT_USER_AGENT}
+                    url,
+                    timeout=timeout,
+                    headers={
+                        "User-Agent": DEFAULT_USER_AGENT,
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Accept-Encoding": "gzip, deflate, br",
+                        "DNT": "1",
+                        "Connection": "keep-alive",
+                        "Upgrade-Insecure-Requests": "1",
+                    },
                 )
                 if response.status_code == 200:
                     if "suspended" in response.text.lower():
@@ -5321,7 +5373,14 @@ class PhishingScanner:
                     response = requests.head(
                         url,
                         timeout=self.timeout,
-                        headers={"User-Agent": DEFAULT_USER_AGENT},
+                        headers={
+                            "User-Agent": DEFAULT_USER_AGENT,
+                            "Accept": "*/*",
+                            "Accept-Language": "en-US,en;q=0.9",
+                            "Accept-Encoding": "gzip, deflate, br",
+                            "DNT": "1",
+                            "Connection": "keep-alive",
+                        },
                         allow_redirects=True,
                     )
                     if response.status_code in ALLOWED_HEAD_STATUS:
@@ -5353,7 +5412,7 @@ class PhishingScanner:
         for url in self.get_candidate_urls(domain) or []:
             logger.info(f"🔍 Scanning {url} for keywords: {self.keywords}")
             try:
-                headers = {"User-Agent": DEFAULT_USER_AGENT}
+                headers = BROWSER_HEADERS.copy()
                 response = requests.get(
                     url, timeout=self.timeout, headers=headers, allow_redirects=True
                 )

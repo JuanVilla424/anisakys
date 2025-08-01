@@ -1,11 +1,29 @@
 ---
-# .github/ISSUE_TEMPLATE/config.yml
+# 🎛️ GitHub Issue Template Configuration
+# This file configures the issue creation experience
 
-blank_issues_enabled: false
+blank_issues_enabled: true
 contact_links:
-  - name: Anisakys Community Support
+  - name: 💬 Community Discussions
     url: https://github.com/JuanVilla424/anisakys/discussions
-    about: Please ask and answer questions here.
-  - name: Anisakys Security Reports
-    url: https://juanvilla424.github.io/anisakys/SECURITY
-    about: Please report security vulnerabilities here.
+    about: "Ask questions, share ideas, and connect with the community"
+
+  - name: 🔒 Private Security Reports
+    url: https://github.com/JuanVilla424/anisakys/security/advisories
+    about: "Report critical security vulnerabilities privately"
+
+  - name: 📚 Documentation & Wiki
+    url: https://juanvilla424.github.io/anisakys/
+    about: "Browse comprehensive documentation and guides"
+
+  - name: 🚀 Feature Roadmap
+    url: https://github.com/JuanVilla424/anisakys/projects
+    about: "View planned features and project progress"
+
+  - name: 💡 Ideas & Suggestions
+    url: https://github.com/JuanVilla424/anisakys/discussions/categories/ideas
+    about: "Share ideas and brainstorm new features"
+
+  - name: ❓ Help & Support
+    url: https://github.com/JuanVilla424/anisakys/discussions/categories/q-a
+    about: "Get help with installation, configuration, and usage"
