@@ -553,4 +553,8 @@ For any inquiries or support, please open an issue or contact [r6ty5r296it6tl4eg
 
 ## 📜 License
 
+<div align="center">
+
 2025 — This project is licensed under the [GNU General Public License v3.0](https://www.gnu.org/licenses/gpl-3.0.en.html). You are free to use, modify, and distribute this software under the terms of the GPL-3.0 license. For more details, please refer to the [LICENSE](LICENSE) file included in this repository.
+
+</div>
