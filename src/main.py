@@ -2975,6 +2975,9 @@ class AbuseReportManager:
         self.timeout = timeout
         self.monitoring_event = monitoring_event
 
+        # Initialize running flag for followup worker
+        self.running = True
+
     def report_ip_to_grinder(
         self, ip_address: str, url: str, detection_context: Dict[str, Any]
     ) -> Dict[str, Any]:
