@@ -2975,6 +2975,9 @@ class AbuseReportManager:
         self.timeout = timeout
         self.monitoring_event = monitoring_event
 
+        # Initialize running flag for followup worker
+        self.running = True
+
     def report_ip_to_grinder(
         self, ip_address: str, url: str, detection_context: Dict[str, Any]
     ) -> Dict[str, Any]:
@@ -4179,36 +4182,32 @@ Phishing Detection Team
 
         # Get sites to process with short-lived connection
         sites_to_process = []
-        conn = None
         try:
-            conn = self.db_manager.engine.connect()
-            logger.info("🔍 Querying for manual sites to process...")
-            result = conn.execute(
-                text(
+            with self.db_manager.engine.connect() as conn:
+                logger.info("🔍 Querying for manual sites to process...")
+                result = conn.execute(
+                    text(
+                        """
+                        SELECT url, reported, abuse_report_sent, abuse_email, priority, site_status, takedown_date
+                        FROM phishing_sites
+                        WHERE manual_flag = 1 AND reported = 0 AND site_status = 'up'
+                        ORDER BY
+                            CASE priority
+                                WHEN 'high' THEN 1
+                                WHEN 'medium' THEN 2
+                                WHEN 'low' THEN 3
+                                ELSE 2
+                            END,
+                            first_seen ASC
                     """
-                    SELECT url, reported, abuse_report_sent, abuse_email, priority, site_status, takedown_date
-                    FROM phishing_sites
-                    WHERE manual_flag = 1 AND reported = 0 AND site_status = 'up'
-                    ORDER BY
-                        CASE priority
-                            WHEN 'high' THEN 1
-                            WHEN 'medium' THEN 2
-                            WHEN 'low' THEN 3
-                            ELSE 2
-                        END,
-                        first_seen ASC
-                """
+                    )
                 )
-            )
-            # Convert to list and close connection immediately
-            sites_to_process = [dict(row._mapping) for row in result]
+                # Convert to list and close connection immediately
+                sites_to_process = [dict(row._mapping) for row in result]
+                logger.debug("🔒 Initial query connection closed")
         except Exception as e:
             logger.error(f"❌ Failed to query sites: {e}")
             raise
-        finally:
-            if conn:
-                conn.close()
-                logger.debug("🔒 Initial query connection closed")
 
         logger.info(f"📋 Found {len(sites_to_process)} sites to process")
 
@@ -4311,148 +4310,146 @@ Phishing Detection Team
                 logger.info(f"✅ IP info complete: {resolved_ip}, CF: {cloudflare_detected}")
 
                 # Use new connection for updates without long-running transaction
-                conn = None
                 try:
-                    conn = self.db_manager.engine.connect()
+                    with self.db_manager.engine.connect() as conn:
+                        # If we can't resolve the IP, the site is likely down
+                        if not resolved_ip:
+                            logger.warning(
+                                f"⚠️  Cannot resolve IP for {domain} - site appears to be down"
+                            )
+                            logger.info(f"📝 Updating site status to 'down' for {url}")
+                            conn.execute(
+                                text(
+                                    "UPDATE phishing_sites SET site_status = 'down', takedown_date = CURRENT_TIMESTAMP WHERE url = :url"
+                                ),
+                                {"url": url},
+                            )
+                            conn.commit()
+                            logger.info(f"✅ Site marked as down: {url}")
+                            continue  # Skip to next site
 
-                    # If we can't resolve the IP, the site is likely down
-                    if not resolved_ip:
-                        logger.warning(
-                            f"⚠️  Cannot resolve IP for {domain} - site appears to be down"
-                        )
-                        logger.info(f"📝 Updating site status to 'down' for {url}")
+                        # Get registrar from WHOIS data
+                        registrar = self.abuse_detector.extract_registrar(whois_info) or ""
+
+                        # Get abuse emails using enhanced detection BEFORE UPDATE
+                        domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+                        logger.info(f"🏢 Extracting registrar info for {url}")
+                        logger.info(f"📧 Getting enhanced abuse emails for {domain}")
+                        abuse_list = []  # Initialize to prevent UnboundLocalError
+                        try:
+                            abuse_list = (
+                                self.abuse_detector.get_enhanced_abuse_email(
+                                    domain, whois_info, registrar
+                                )
+                                or []
+                            )  # Ensure it's never None
+                        except Exception as e:
+                            logger.warning(
+                                f"⚠️  Error getting enhanced abuse email for {domain}: {e}"
+                            )
+                            abuse_list = []
+
+                        # Update WHOIS information in database
                         conn.execute(
                             text(
-                                "UPDATE phishing_sites SET site_status = 'down', takedown_date = CURRENT_TIMESTAMP WHERE url = :url"
+                                """
+                                UPDATE phishing_sites
+                                SET whois_info=:whois_str, last_seen=:timestamp, reported=1,
+                                    resolved_ip=:resolved_ip, asn_provider=:asn_provider, is_cloudflare=:is_cloudflare,
+                                    registrar=:registrar, abuse_email=:abuse_email
+                                WHERE url=:url
+                            """
                             ),
-                            {"url": url},
+                            {
+                                "whois_str": (
+                                    json.dumps(serialize_for_json(whois_info))
+                                    if whois_info
+                                    else None
+                                ),
+                                "timestamp": timestamp,
+                                "resolved_ip": resolved_ip,
+                                "asn_provider": asn_provider,
+                                "is_cloudflare": 1 if cloudflare_detected else 0,
+                                "registrar": registrar,
+                                "abuse_email": json.dumps(abuse_list) if abuse_list else None,
+                                "url": url,
+                            },
                         )
                         conn.commit()
-                        logger.info(f"✅ Site marked as down: {url}")
-                        continue  # Skip to next site
+                        logger.info(f"📊 Manually processed WHOIS data for {url}")
+                        logger.info(
+                            f"✅ Found {len(abuse_list) if abuse_list else 0} abuse emails: {abuse_list}"
+                        )
 
-                    # Get registrar from WHOIS data
-                    registrar = self.abuse_detector.extract_registrar(whois_info) or ""
-
-                    # Get abuse emails using enhanced detection BEFORE UPDATE
-                    domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
-                    logger.info(f"🏢 Extracting registrar info for {url}")
-                    logger.info(f"📧 Getting enhanced abuse emails for {domain}")
-                    abuse_list = []  # Initialize to prevent UnboundLocalError
-                    try:
-                        abuse_list = (
-                            self.abuse_detector.get_enhanced_abuse_email(
-                                domain, whois_info, registrar
+                        # Additional check: if Cloudflare detected, enhance the logic
+                        if cloudflare_detected and not abuse_list:
+                            logger.info(
+                                f"☁️  Cloudflare detected for {url}, no hosting provider found. Using abuse@cloudflare.com only"
                             )
-                            or []
-                        )  # Ensure it's never None
-                    except Exception as e:
-                        logger.warning(f"⚠️  Error getting enhanced abuse email for {domain}: {e}")
-                        abuse_list = []
+                            abuse_list = ["abuse@cloudflare.com"]
+                        elif cloudflare_detected and abuse_list:
+                            # Ensure Cloudflare is in the list but as a secondary option
+                            cloudflare_email = "abuse@cloudflare.com"
+                            if cloudflare_email not in abuse_list:
+                                abuse_list.append(cloudflare_email)
+                            logger.info(
+                                f"☁️  Cloudflare detected for {url}. Will report to hosting provider first, then Cloudflare: {abuse_list}"
+                            )
+                        elif cloudflare_detected:
+                            # Pure Cloudflare case
+                            logger.info(
+                                f"☁️  Cloudflare detected for {url}, using Cloudflare abuse only"
+                            )
+                            abuse_list = ["abuse@cloudflare.com"]
 
-                    # Update WHOIS information in database
-                    conn.execute(
-                        text(
-                            """
-                            UPDATE phishing_sites
-                            SET whois_info=:whois_str, last_seen=:timestamp, reported=1,
-                                resolved_ip=:resolved_ip, asn_provider=:asn_provider, is_cloudflare=:is_cloudflare,
-                                registrar=:registrar, abuse_email=:abuse_email
-                            WHERE url=:url
-                        """
-                        ),
-                        {
-                            "whois_str": (
-                                json.dumps(serialize_for_json(whois_info)) if whois_info else None
-                            ),
-                            "timestamp": timestamp,
-                            "resolved_ip": resolved_ip,
-                            "asn_provider": asn_provider,
-                            "is_cloudflare": 1 if cloudflare_detected else 0,
-                            "registrar": registrar,
-                            "abuse_email": json.dumps(abuse_list) if abuse_list else None,
-                            "url": url,
-                        },
-                    )
-                    conn.commit()
-                    logger.info(f"📊 Manually processed WHOIS data for {url}")
-                    logger.info(
-                        f"✅ Found {len(abuse_list) if abuse_list else 0} abuse emails: {abuse_list}"
-                    )
+                        # Fall back to stored abuse email if no enhanced detection result and different domain
+                        if not abuse_list and stored_abuse:
+                            if self.abuse_detector.validate_abuse_email_domain(
+                                stored_abuse, domain
+                            ):
+                                abuse_list = [stored_abuse]
+                            else:
+                                logger.warning(
+                                    f"⚠️  Stored abuse email {stored_abuse} is same domain as reported site {url}, skipping"
+                                )
 
-                    # Additional check: if Cloudflare detected, enhance the logic
-                    if cloudflare_detected and not abuse_list:
-                        logger.info(
-                            f"☁️  Cloudflare detected for {url}, no hosting provider found. Using abuse@cloudflare.com only"
-                        )
-                        abuse_list = ["abuse@cloudflare.com"]
-                    elif cloudflare_detected and abuse_list:
-                        # Ensure Cloudflare is in the list but as a secondary option
-                        cloudflare_email = "abuse@cloudflare.com"
-                        if cloudflare_email not in abuse_list:
-                            abuse_list.append(cloudflare_email)
-                        logger.info(
-                            f"☁️  Cloudflare detected for {url}. Will report to hosting provider first, then Cloudflare: {abuse_list}"
-                        )
-                    elif cloudflare_detected:
-                        # Pure Cloudflare case
-                        logger.info(
-                            f"☁️  Cloudflare detected for {url}, using Cloudflare abuse only"
-                        )
-                        abuse_list = ["abuse@cloudflare.com"]
+                        if abuse_list and abuse_report_sent == 0:
+                            logger.info(f"📧 SENDING ABUSE REPORT for {url} to {abuse_list}")
+                            logger.info(
+                                f"🏁 ABOUT TO CALL send_abuse_report - THIS IS WHERE IT MIGHT HANG!"
+                            )
 
-                    # Fall back to stored abuse email if no enhanced detection result and different domain
-                    if not abuse_list and stored_abuse:
-                        if self.abuse_detector.validate_abuse_email_domain(stored_abuse, domain):
-                            abuse_list = [stored_abuse]
-                        else:
+                            report_result = self.send_abuse_report(
+                                abuse_list,
+                                url,
+                                whois_str,
+                                attachment_paths=attachment_paths,
+                                multi_api_results=multi_api_results,
+                            )
+                            logger.info(f"🎉 SEND_ABUSE_REPORT RETURNED: {report_result} for {url}")
+
+                            if report_result:
+                                # Update handled by report_tracker.track_report() - no need to duplicate here
+                                logger.info(f"✅ Abuse report sent successfully for {url}")
+                                pass
+                        elif not abuse_list:
                             logger.warning(
-                                f"⚠️  Stored abuse email {stored_abuse} is same domain as reported site {url}, skipping"
+                                f"❌ No valid abuse emails found for {url} - all emails were same domain or invalid"
+                            )
+                            # Mark as reported to avoid infinite loop - we tried but couldn't find valid emails
+                            conn.execute(
+                                text("UPDATE phishing_sites SET reported=1 WHERE url=:url"),
+                                {"url": url},
                             )
 
-                    if abuse_list and abuse_report_sent == 0:
-                        logger.info(f"📧 SENDING ABUSE REPORT for {url} to {abuse_list}")
-                        logger.info(
-                            f"🏁 ABOUT TO CALL send_abuse_report - THIS IS WHERE IT MIGHT HANG!"
-                        )
-
-                        report_result = self.send_abuse_report(
-                            abuse_list,
-                            url,
-                            whois_str,
-                            attachment_paths=attachment_paths,
-                            multi_api_results=multi_api_results,
-                        )
-                        logger.info(f"🎉 SEND_ABUSE_REPORT RETURNED: {report_result} for {url}")
-
-                        if report_result:
-                            # Update handled by report_tracker.track_report() - no need to duplicate here
-                            logger.info(f"✅ Abuse report sent successfully for {url}")
-                            pass
-                    elif not abuse_list:
-                        logger.warning(
-                            f"❌ No valid abuse emails found for {url} - all emails were same domain or invalid"
-                        )
-                        # Mark as reported to avoid infinite loop - we tried but couldn't find valid emails
-                        conn.execute(
-                            text("UPDATE phishing_sites SET reported=1 WHERE url=:url"),
-                            {"url": url},
-                        )
-
-                    # Commit changes
-                    conn.commit()
-                    logger.debug(f"🔒 Changes committed for {url}")
+                        # Commit changes
+                        conn.commit()
+                        logger.debug(f"🔒 Changes committed for {url}")
+                        logger.debug(f"🔒 Connection closed for {url}")
 
                 except Exception as e:
                     logger.error(f"❌ WHOIS query failed for {url}: {e}")
-                    if conn:
-                        conn.rollback()
-                        logger.debug(f"🔄 Changes rolled back for {url}")
                     logger.info(f"⚠️  Continuing to next site after error for {url}")
-                finally:
-                    if conn:
-                        conn.close()
-                        logger.debug(f"🔒 Connection closed for {url}")
 
                 logger.info(f"✅ Finished processing site {i}/{len(sites_to_process)}: {url}")
 
