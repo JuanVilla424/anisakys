@@ -179,23 +179,30 @@ class TestDatabaseUpgrade:
 
     def test_database_manager_init(self):
         """Test DatabaseManager initialization"""
-        db_manager = DatabaseManager(db_url="sqlite:///:memory:")
+        # Use the main DATABASE_URL (which is PostgreSQL in tests)
+        from src.main import DATABASE_URL
+
+        db_manager = DatabaseManager(db_url=DATABASE_URL)
 
         # Initialize tables
         db_manager.init_db()
         db_manager.init_phishing_db()
 
-        # Check tables exist
+        # Check tables exist using PostgreSQL system tables
         with db_manager.engine.begin() as conn:
             # Check scan_results table
             result = conn.execute(
-                text("SELECT name FROM sqlite_master WHERE type='table' AND name='scan_results'")
+                text(
+                    "SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename='scan_results'"
+                )
             )
             assert result.fetchone() is not None
 
             # Check phishing_sites table
             result = conn.execute(
-                text("SELECT name FROM sqlite_master WHERE type='table' AND name='phishing_sites'")
+                text(
+                    "SELECT tablename FROM pg_tables WHERE schemaname='public' AND tablename='phishing_sites'"
+                )
             )
             assert result.fetchone() is not None
 

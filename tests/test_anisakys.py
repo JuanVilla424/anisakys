@@ -3,56 +3,13 @@ import ipaddress
 import time
 from itertools import permutations, islice
 from typing import List, Optional
-import importlib.util
 import sys
 import pytest
-from pathlib import Path
-from urllib.parse import urlparse
-import psycopg2
 from sqlalchemy import text
+from pathlib import Path
 
-
-# --- Fixture: Create Test Database ---
-@pytest.fixture(scope="session", autouse=True)
-def create_test_database():
-    """
-    Creates the test database if it does not exist.
-    Assumes main.DATABASE_URL is in the form:
-      postgresql://user:password@host:port/test_db
-    This fixture runs once per test session.
-    """
-    # Load the main module to get DATABASE_URL
-    module_path = Path(__file__).parent.parent / "src" / "main.py"
-    spec = importlib.util.spec_from_file_location("src.main", str(module_path))
-    main = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(main)
-
-    db_url = main.DATABASE_URL  # e.g. "postgresql://postgres:postgres@localhost:5332/test_db"
-    parsed = urlparse(db_url)
-    test_db = parsed.path.lstrip("/")  # "test_db"
-    # Build a connection URL to the default database ("postgres")
-    default_db = "postgres"
-    default_db_url = db_url.replace(f"/{test_db}", f"/{default_db}")
-
-    conn = psycopg2.connect(default_db_url)
-    conn.autocommit = True
-    cur = conn.cursor()
-    cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (test_db,))
-    exists = cur.fetchone()
-    if not exists:
-        cur.execute(f"CREATE DATABASE {test_db}")
-        print(f"Created test database '{test_db}'.")
-    else:
-        print(f"Test database '{test_db}' already exists.")
-    cur.close()
-    conn.close()
-
-
-# --- Load main module ---
-module_path = Path(__file__).parent.parent / "src" / "main.py"
-spec = importlib.util.spec_from_file_location("src.main", str(module_path))
-main = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(main)
+# Import main module
+from src import main
 
 # Override production file names with test-only names.
 # (For Postgres tests, the DATABASE_URL is already set via our fixture.)
@@ -250,7 +207,11 @@ def test_mark_site_as_phishing():
     log(f"Mark site query returned: {row}")
     assert row is not None
     assert row[1] == 1
-    assert row[2] == "abuse@malicious.com"
+    # The abuse_email field is now stored as a JSON array
+    import json
+
+    abuse_emails = json.loads(row[2])
+    assert "abuse@malicious.com" in abuse_emails
     log("Completed test_mark_site_as_phishing")
 
 

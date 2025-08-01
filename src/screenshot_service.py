@@ -98,18 +98,56 @@ class ScreenshotService:
                         "--disable-gpu",
                         "--disable-web-security",
                         "--disable-features=VizDisplayCompositor",
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-extensions",
+                        "--no-first-run",
+                        "--disable-default-apps",
+                        "--disable-component-extensions-with-background-pages",
+                        "--disable-background-timer-throttling",
+                        "--disable-backgrounding-occluded-windows",
+                        "--disable-renderer-backgrounding",
+                        "--disable-field-trial-config",
+                        "--disable-back-forward-cache",
+                        "--disable-ipc-flooding-protection",
+                        "--enable-features=NetworkService,NetworkServiceInProcess",
+                        "--force-color-profile=srgb",
+                        "--metrics-recording-only",
+                        "--use-mock-keychain",
                     ],
                 )
 
                 context = await browser.new_context(
                     viewport={"width": 1920, "height": 1080},
-                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                    extra_http_headers={
+                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+                        "Accept-Language": "en-US,en;q=0.9",
+                        "Accept-Encoding": "gzip, deflate, br",
+                        "DNT": "1",
+                        "Connection": "keep-alive",
+                        "Upgrade-Insecure-Requests": "1",
+                        "Sec-Fetch-Dest": "document",
+                        "Sec-Fetch-Mode": "navigate",
+                        "Sec-Fetch-Site": "none",
+                        "Sec-Fetch-User": "?1",
+                        "Cache-Control": "max-age=0",
+                    },
                 )
 
                 page = await context.new_page()
 
                 # Set longer timeout for phishing sites that might be slow
                 page.set_default_timeout(self.timeout * 1000)
+
+                # Remove webdriver detection
+                await page.add_init_script(
+                    """
+                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
+                    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
+                    delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
+                """
+                )
 
                 try:
                     await page.goto(url, wait_until="domcontentloaded")
@@ -172,15 +210,42 @@ class ScreenshotService:
 
         screenshot_path = self.screenshots_dir / filename
 
-        # Configure Chrome options for headless operation
+        # Configure Chrome options for headless operation with anti-detection measures
         chrome_options = ChromeOptions()
         chrome_options.add_argument("--headless")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--window-size=1920,1080")
+        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--no-first-run")
+        chrome_options.add_argument("--disable-default-apps")
+        chrome_options.add_argument("--disable-component-extensions-with-background-pages")
+        chrome_options.add_argument("--disable-background-timer-throttling")
+        chrome_options.add_argument("--disable-backgrounding-occluded-windows")
+        chrome_options.add_argument("--disable-renderer-backgrounding")
+        chrome_options.add_argument("--disable-field-trial-config")
+        chrome_options.add_argument("--disable-back-forward-cache")
+        chrome_options.add_argument("--disable-ipc-flooding-protection")
+        chrome_options.add_argument("--enable-features=NetworkService,NetworkServiceInProcess")
+        chrome_options.add_argument("--force-color-profile=srgb")
+        chrome_options.add_argument("--metrics-recording-only")
+        chrome_options.add_argument("--use-mock-keychain")
         chrome_options.add_argument(
-            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        )
+
+        # Exclude automation switches and add preferences to appear more human-like
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        chrome_options.add_experimental_option("useAutomationExtension", False)
+        chrome_options.add_experimental_option(
+            "prefs",
+            {
+                "profile.default_content_setting_values.notifications": 2,
+                "profile.default_content_settings.popups": 0,
+                "profile.managed_default_content_settings.images": 2,
+            },
         )
 
         driver = None
@@ -196,6 +261,14 @@ class ScreenshotService:
 
             driver.set_page_load_timeout(self.timeout)
             driver.implicitly_wait(5)
+
+            # Execute JavaScript to remove webdriver detection
+            driver.execute_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            )
+            driver.execute_script("delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array")
+            driver.execute_script("delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise")
+            driver.execute_script("delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol")
 
             # Navigate to the URL
             driver.get(url)
