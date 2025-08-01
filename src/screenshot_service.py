@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 class ScreenshotService:
     """Service for capturing screenshots of phishing sites"""
 
-    def __init__(self, screenshots_dir: str = None, timeout: int = 10):
+    def __init__(self, screenshots_dir: str = None, timeout: int = 30):
         """
         Initialize screenshot service
 
@@ -152,8 +152,8 @@ class ScreenshotService:
                 try:
                     await page.goto(url, wait_until="domcontentloaded")
 
-                    # Wait a bit for dynamic content to load
-                    await page.wait_for_timeout(2000)
+                    # Wait for dynamic content to load
+                    await page.wait_for_timeout(6000)
 
                     # Capture full page screenshot
                     await page.screenshot(path=str(screenshot_path), full_page=True, type="png")
@@ -276,6 +276,11 @@ class ScreenshotService:
             # Wait for page to load
             WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
 
+            # Wait 6 seconds for dynamic content to load
+            import time
+
+            time.sleep(6)
+
             # Get page info
             title = driver.title
             final_url = driver.current_url
@@ -375,7 +380,7 @@ class ScreenshotService:
 
 # Convenience function for simple usage
 def capture_phishing_screenshot(
-    url: str, screenshots_dir: str = None, timeout: int = 10
+    url: str, screenshots_dir: str = None, timeout: int = 30
 ) -> Optional[Dict[str, Any]]:
     """
     Simple function to capture a screenshot of a phishing site
