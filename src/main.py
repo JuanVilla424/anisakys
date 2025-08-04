@@ -2065,25 +2065,36 @@ class TimeoutError(Exception):
 
 
 def timeout(seconds=10):
-    """Decorator to add timeout to functions"""
+    """Thread-safe decorator to add timeout to functions"""
 
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            def handler(signum, frame):
+            import threading
+            import time
+
+            result = [None]
+            error = [None]
+
+            def target():
+                try:
+                    result[0] = func(*args, **kwargs)
+                except Exception as e:
+                    error[0] = e
+
+            thread = threading.Thread(target=target)
+            thread.daemon = True
+            thread.start()
+            thread.join(timeout=seconds)
+
+            if thread.is_alive():
+                # Thread is still running, it timed out
                 raise TimeoutError(f"Operation timed out after {seconds} seconds")
 
-            # Set the signal handler and alarm
-            old_handler = signal.signal(signal.SIGALRM, handler)
-            signal.alarm(seconds)
+            if error[0]:
+                raise error[0]
 
-            try:
-                result = func(*args, **kwargs)
-            finally:
-                signal.alarm(0)
-                signal.signal(signal.SIGALRM, old_handler)
-
-            return result
+            return result[0]
 
         return wrapper
 
