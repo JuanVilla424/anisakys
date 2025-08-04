@@ -45,6 +45,8 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import logging as flask_logging
 from functools import wraps
+import signal
+import sys
 
 from src.config import settings, CLOUDFLARE_IP_RANGES
 from src.logger import logger
@@ -2942,6 +2944,64 @@ def basic_whois_lookup(url: str) -> dict:
         return {}
 
 
+class TimeoutError(Exception):
+    """Raised when an operation times out"""
+
+    pass
+
+
+def timeout(seconds=10):
+    """Decorator to add timeout to functions"""
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            def handler(signum, frame):
+                raise TimeoutError(f"Operation timed out after {seconds} seconds")
+
+            # Set the signal handler and alarm
+            old_handler = signal.signal(signal.SIGALRM, handler)
+            signal.alarm(seconds)
+
+            try:
+                result = func(*args, **kwargs)
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
+
+            return result
+
+        return wrapper
+
+    return decorator
+
+
+# Global flag for graceful shutdown
+shutdown_requested = False
+
+
+def signal_handler(signum, frame):
+    """Handle interrupt signals gracefully"""
+    global shutdown_requested
+    shutdown_requested = True
+    logger.info("\n🛑 Interrupt received, shutting down gracefully...")
+    logger.info("⏳ Please wait for current operations to complete...")
+
+    # Force exit after 5 seconds if still hanging
+    def force_exit():
+        logger.error("⚠️ Forced shutdown after timeout")
+        os._exit(1)
+
+    timer = threading.Timer(5.0, force_exit)
+    timer.daemon = True
+    timer.start()
+
+
+# Install signal handlers
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+
 class AbuseReportManager:
     """Enhanced abuse report manager with Grinder integration for IP reporting."""
 
@@ -3140,7 +3200,7 @@ class AbuseReportManager:
                 logger.info(f"📸 Calling screenshot_service.capture_screenshot for {site_url}")
                 logger.info("🏁 ABOUT TO CALL SCREENSHOT SERVICE - THIS MIGHT HANG!")
                 screenshot_info = self.screenshot_service.capture_screenshot(
-                    site_url, use_async=False
+                    site_url, use_async=True
                 )
                 logger.info(f"✅ Screenshot service returned: {bool(screenshot_info)}")
 
@@ -3560,12 +3620,25 @@ class AbuseReportManager:
                         screenshot_included=screenshot_included,
                     )
 
-                    if self.report_tracker.track_report(report_record):
-                        logger.info(f"📋 Abuse report tracked: {report_record.report_id}")
-                    else:
-                        logger.warning(
-                            "⚠️  Failed to track abuse report in database (emails were sent successfully)"
+                    # Track report with timeout to prevent hanging
+                    try:
+
+                        @timeout(5)  # 5 second timeout for database operations
+                        def track_with_timeout():
+                            return self.report_tracker.track_report(report_record)
+
+                        if track_with_timeout():
+                            logger.info(f"📋 Abuse report tracked: {report_record.report_id}")
+                        else:
+                            logger.warning(
+                                "⚠️  Failed to track abuse report in database (emails were sent successfully)"
+                            )
+                    except TimeoutError:
+                        logger.error(
+                            "❌ Database operation timed out - report was sent but not tracked"
                         )
+                    except Exception as e:
+                        logger.error(f"❌ Error tracking report: {e}")
 
                 except Exception as track_error:
                     logger.warning(
@@ -3807,7 +3880,7 @@ Phishing Detection Team
             self.monitoring_event.wait()
             logger.info("✅ Monitoring thread initial cycle complete. Starting abuse reporting.")
 
-        while True:
+        while not shutdown_requested:
             try:
                 with self.db_manager.engine.begin() as conn:
                     # Process both manual flags and auto-detected sites
@@ -4261,31 +4334,41 @@ Phishing Detection Team
                             database=parsed.path[1:],  # Remove leading slash
                             user=parsed.username,
                             password=parsed.password,
+                            connect_timeout=5,  # 5 second connection timeout
+                            options="-c statement_timeout=5000",  # 5 second statement timeout
                         )
                         conn_api.autocommit = True  # Enable autocommit
 
                         cursor = conn_api.cursor()
                         logger.info(f"✅ Direct connection established, executing API UPDATE")
 
-                        cursor.execute(
-                            """
-                            UPDATE phishing_sites
-                            SET virustotal_result = %s,
-                                urlvoid_result = %s,
-                                phishtank_result = %s,
-                                multi_api_threat_level = %s,
-                                api_confidence_score = %s
-                            WHERE url = %s
-                            """,
-                            (
-                                json.dumps(multi_api_results.get("virustotal", {})),
-                                json.dumps(multi_api_results.get("urlvoid", {})),
-                                json.dumps(multi_api_results.get("phishtank", {})),
-                                multi_api_results.get("aggregated_threat_level"),
-                                multi_api_results.get("confidence_score"),
-                                url,
-                            ),
-                        )
+                        try:
+                            cursor.execute(
+                                """
+                                UPDATE phishing_sites
+                                SET virustotal_result = %s,
+                                    urlvoid_result = %s,
+                                    phishtank_result = %s,
+                                    multi_api_threat_level = %s,
+                                    api_confidence_score = %s
+                                WHERE url = %s
+                                """,
+                                (
+                                    json.dumps(multi_api_results.get("virustotal", {})),
+                                    json.dumps(multi_api_results.get("urlvoid", {})),
+                                    json.dumps(multi_api_results.get("phishtank", {})),
+                                    multi_api_results.get("aggregated_threat_level"),
+                                    multi_api_results.get("confidence_score"),
+                                    url,
+                                ),
+                            )
+                        except psycopg2.OperationalError as e:
+                            logger.error(f"❌ Database operation timed out: {e}")
+                        except Exception as e:
+                            logger.error(f"❌ Database update failed: {e}")
+                        finally:
+                            cursor.close()
+                            conn_api.close()
                         logger.info(f"✅ API results stored for {url}")
                     except Exception as e:
                         logger.error(f"❌ Failed to store API results for {url}: {e}")
@@ -4523,7 +4606,7 @@ class TakedownMonitor:
         """Main monitoring loop."""
         first_cycle_done = False
 
-        while True:
+        while not shutdown_requested:
             try:
                 with self.db_manager.engine.begin() as conn:
                     sites = conn.execute(
@@ -5570,7 +5653,7 @@ class PhishingScanner:
         logger.debug(f"📊 Total queries to process: {self.total_queries}")
 
         cycle_count = 0
-        while True:
+        while not shutdown_requested:
             cycle_count += 1
             logger.debug(f"🔄 Starting scan cycle #{cycle_count}")
 
@@ -6067,7 +6150,7 @@ class Engine:
 
             logger.info("✅ System ready. Press Ctrl+C to stop.")
 
-            while True:
+            while not shutdown_requested:
                 time.sleep(60)
 
         elif self.mode.scanning_mode:
