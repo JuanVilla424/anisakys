@@ -2128,17 +2128,36 @@ class PhishingAPI:
                 priority = data.get("priority", "medium")
                 description = data.get("description", "")
 
+                # Log if this is from Grinder
+                if source.lower() == "grinder":
+                    logger.info(f"📥 Received report from GRINDER for {url}")
+
                 # Validate abuse_email if provided
                 if abuse_email and not self.abuse_detector.validate_email(abuse_email):
                     return jsonify({"error": "Invalid abuse email format"}), 400
 
                 # Process the report
-                result = self.process_phishing_report(
-                    url, abuse_email, source, priority, description
-                )
+                try:
+                    result = self.process_phishing_report(
+                        url, abuse_email, source, priority, description
+                    )
+                except TimeoutError:
+                    logger.error(f"❌ Database timeout while processing report for {url}")
+                    return jsonify({"error": "Database operation timed out", "url": url}), 503
+                except Exception as e:
+                    logger.error(f"❌ Error processing report: {e}")
+                    return (
+                        jsonify({"error": f"Failed to process report: {str(e)}", "url": url}),
+                        500,
+                    )
 
                 # If successful, also try to report the IP to Grinder
-                if result.get("status") in ["created", "updated"] and GRINDER_INTEGRATION_ENABLED:
+                # IMPORTANT: Don't report back to Grinder if this report came from Grinder
+                if source.lower() == "grinder":
+                    logger.info(
+                        f"⏭️ Skipping Grinder reporting for {url} - report came from Grinder"
+                    )
+                elif result.get("status") in ["created", "updated"] and GRINDER_INTEGRATION_ENABLED:
                     try:
                         domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
                         ip_address = socket.gethostbyname(domain)
@@ -2334,6 +2353,7 @@ class PhishingAPI:
                 200,
             )
 
+    @timeout(10)  # 10 second timeout for API database operations
     def process_phishing_report(
         self, url: str, abuse_email: Optional[str], source: str, priority: str, description: str
     ) -> Dict[str, Any]:
