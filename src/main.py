@@ -2058,6 +2058,49 @@ class EnhancedAbuseEmailDetector:
         return {}
 
 
+class TimeoutError(Exception):
+    """Raised when an operation times out"""
+
+    pass
+
+
+def timeout(seconds=10):
+    """Thread-safe decorator to add timeout to functions"""
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            import threading
+            import time
+
+            result = [None]
+            error = [None]
+
+            def target():
+                try:
+                    result[0] = func(*args, **kwargs)
+                except Exception as e:
+                    error[0] = e
+
+            thread = threading.Thread(target=target)
+            thread.daemon = True
+            thread.start()
+            thread.join(timeout=seconds)
+
+            if thread.is_alive():
+                # Thread is still running, it timed out
+                raise TimeoutError(f"Operation timed out after {seconds} seconds")
+
+            if error[0]:
+                raise error[0]
+
+            return result[0]
+
+        return wrapper
+
+    return decorator
+
+
 class PhishingAPI:
     """REST API for external phishing reports with multi-API integration and Grinder integration."""
 
@@ -2128,17 +2171,36 @@ class PhishingAPI:
                 priority = data.get("priority", "medium")
                 description = data.get("description", "")
 
+                # Log if this is from Grinder
+                if source.lower() == "grinder":
+                    logger.info(f"📥 Received report from GRINDER for {url}")
+
                 # Validate abuse_email if provided
                 if abuse_email and not self.abuse_detector.validate_email(abuse_email):
                     return jsonify({"error": "Invalid abuse email format"}), 400
 
                 # Process the report
-                result = self.process_phishing_report(
-                    url, abuse_email, source, priority, description
-                )
+                try:
+                    result = self.process_phishing_report(
+                        url, abuse_email, source, priority, description
+                    )
+                except TimeoutError:
+                    logger.error(f"❌ Database timeout while processing report for {url}")
+                    return jsonify({"error": "Database operation timed out", "url": url}), 503
+                except Exception as e:
+                    logger.error(f"❌ Error processing report: {e}")
+                    return (
+                        jsonify({"error": f"Failed to process report: {str(e)}", "url": url}),
+                        500,
+                    )
 
                 # If successful, also try to report the IP to Grinder
-                if result.get("status") in ["created", "updated"] and GRINDER_INTEGRATION_ENABLED:
+                # IMPORTANT: Don't report back to Grinder if this report came from Grinder
+                if source.lower() == "grinder":
+                    logger.info(
+                        f"⏭️ Skipping Grinder reporting for {url} - report came from Grinder"
+                    )
+                elif result.get("status") in ["created", "updated"] and GRINDER_INTEGRATION_ENABLED:
                     try:
                         domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
                         ip_address = socket.gethostbyname(domain)
@@ -2334,6 +2396,7 @@ class PhishingAPI:
                 200,
             )
 
+    @timeout(10)  # 10 second timeout for API database operations
     def process_phishing_report(
         self, url: str, abuse_email: Optional[str], source: str, priority: str, description: str
     ) -> Dict[str, Any]:
@@ -2942,38 +3005,6 @@ def basic_whois_lookup(url: str) -> dict:
     except Exception as e:
         logger.error(f"❌ Enhanced WHOIS lookup failed for {url}: {e}")
         return {}
-
-
-class TimeoutError(Exception):
-    """Raised when an operation times out"""
-
-    pass
-
-
-def timeout(seconds=10):
-    """Decorator to add timeout to functions"""
-
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            def handler(signum, frame):
-                raise TimeoutError(f"Operation timed out after {seconds} seconds")
-
-            # Set the signal handler and alarm
-            old_handler = signal.signal(signal.SIGALRM, handler)
-            signal.alarm(seconds)
-
-            try:
-                result = func(*args, **kwargs)
-            finally:
-                signal.alarm(0)
-                signal.signal(signal.SIGALRM, old_handler)
-
-            return result
-
-        return wrapper
-
-    return decorator
 
 
 # Global flag for graceful shutdown
