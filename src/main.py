@@ -2171,9 +2171,14 @@ class PhishingAPI:
                 priority = data.get("priority", "medium")
                 description = data.get("description", "")
 
+                # Log all API requests with source information
+                logger.info(
+                    f"📥 API report received - URL: {url}, Source: '{source}', Priority: {priority}"
+                )
+
                 # Log if this is from Grinder
                 if source.lower() == "grinder":
-                    logger.info(f"📥 Received report from GRINDER for {url}")
+                    logger.info(f"📥 Confirmed GRINDER report for {url}")
 
                 # Validate abuse_email if provided
                 if abuse_email and not self.abuse_detector.validate_email(abuse_email):
@@ -6104,12 +6109,25 @@ class Engine:
                 logger.error("   Use --api-key parameter to provide authentication key")
                 return
 
+            # Start background threads for abuse reporting and monitoring BEFORE starting API
+            logger.info("🧵 Starting background threads for API mode...")
+            reporting_thread = threading.Thread(
+                target=self.report_manager.report_phishing_sites, daemon=True
+            )
+            reporting_thread.start()
+            logger.info("📧 Abuse reporting thread started")
+
+            takedown_thread = threading.Thread(target=self.takedown_monitor.run, daemon=True)
+            takedown_thread.start()
+            logger.info("📡 Takedown monitoring thread started")
+
             # Store the API key globally for decorator access
             global flask_app
 
             api = PhishingAPI(self.db_manager, self.abuse_detector, api_key=api_key)
             flask_app = api.app
 
+            logger.info("🚀 Starting API server with background reporting enabled...")
             api.run(
                 host=getattr(self.args, "api_host", "0.0.0.0"),
                 port=getattr(self.args, "api_port", 8080),
