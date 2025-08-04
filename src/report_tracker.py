@@ -347,7 +347,8 @@ class ReportTracker:
             True if successfully tracked
         """
         try:
-            with self.db_engine.begin() as conn:
+            # Use separate transactions to avoid blocking
+            with self.db_engine.connect() as conn:
                 # Get site_id from phishing_sites table
                 site_result = conn.execute(
                     text("SELECT id FROM phishing_sites WHERE url = :site_url"),
@@ -398,8 +399,9 @@ class ReportTracker:
                         "updated_at": report.updated_at,
                     },
                 )
+                conn.commit()
 
-                # Update existing phishing_sites table - keep minimal fields
+                # Update phishing_sites in a separate transaction
                 conn.execute(
                     text(
                         """
@@ -415,6 +417,7 @@ class ReportTracker:
                         "report_date": report.report_date,
                     },
                 )
+                conn.commit()
 
                 logger.info(f"✅ Tracked abuse report: {report.report_id} for {report.site_url}")
                 return True
