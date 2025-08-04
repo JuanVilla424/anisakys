@@ -2058,6 +2058,38 @@ class EnhancedAbuseEmailDetector:
         return {}
 
 
+class TimeoutError(Exception):
+    """Raised when an operation times out"""
+
+    pass
+
+
+def timeout(seconds=10):
+    """Decorator to add timeout to functions"""
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            def handler(signum, frame):
+                raise TimeoutError(f"Operation timed out after {seconds} seconds")
+
+            # Set the signal handler and alarm
+            old_handler = signal.signal(signal.SIGALRM, handler)
+            signal.alarm(seconds)
+
+            try:
+                result = func(*args, **kwargs)
+            finally:
+                signal.alarm(0)
+                signal.signal(signal.SIGALRM, old_handler)
+
+            return result
+
+        return wrapper
+
+    return decorator
+
+
 class PhishingAPI:
     """REST API for external phishing reports with multi-API integration and Grinder integration."""
 
@@ -2962,38 +2994,6 @@ def basic_whois_lookup(url: str) -> dict:
     except Exception as e:
         logger.error(f"❌ Enhanced WHOIS lookup failed for {url}: {e}")
         return {}
-
-
-class TimeoutError(Exception):
-    """Raised when an operation times out"""
-
-    pass
-
-
-def timeout(seconds=10):
-    """Decorator to add timeout to functions"""
-
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            def handler(signum, frame):
-                raise TimeoutError(f"Operation timed out after {seconds} seconds")
-
-            # Set the signal handler and alarm
-            old_handler = signal.signal(signal.SIGALRM, handler)
-            signal.alarm(seconds)
-
-            try:
-                result = func(*args, **kwargs)
-            finally:
-                signal.alarm(0)
-                signal.signal(signal.SIGALRM, old_handler)
-
-            return result
-
-        return wrapper
-
-    return decorator
 
 
 # Global flag for graceful shutdown
