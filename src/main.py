@@ -3765,6 +3765,24 @@ class AbuseReportManager:
                         f"⚠️  Processing overdue report: {report_id} for {site_url} ({overdue_hours}h overdue)"
                     )
 
+                    # Double-check if site is still up before sending follow-up
+                    domain = re.sub(r"^https?://", "", site_url).strip().split("/")[0]
+                    resolved_ip, _ = get_ip_info(domain)
+                    current_status, _ = PhishingUtils.determine_site_status(
+                        site_url,
+                        resolved_ip,
+                        None,
+                        None,
+                        datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        self.timeout,
+                    )
+
+                    if current_status in ["down", "timeout", "resolved"]:
+                        logger.info(
+                            f"🎯 Site {site_url} is now {current_status}, skipping follow-up but continuing monitoring"
+                        )
+                        continue
+
                     # Get original recipients
                     recipients = json.loads(report["recipients"]) if report["recipients"] else []
 
