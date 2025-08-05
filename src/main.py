@@ -72,11 +72,11 @@ DATABASE_URL = getattr(settings, "DATABASE_URL", None)
 if not DATABASE_URL:
     raise Exception("DATABASE_URL must be set in your .env file")
 
-QUERIES_FILE = getattr(settings, "QUERIES_FILE", "queries_test.txt")
+QUERIES_FILE = getattr(settings, "QUERIES_FILE")
 if not QUERIES_FILE:
     raise Exception("QUERIES_FILE must be set in your .env file")
 
-OFFSET_FILE = getattr(settings, "OFFSET_FILE", "offset_test.txt")
+OFFSET_FILE = getattr(settings, "OFFSET_FILE")
 
 # API Configuration
 VIRUSTOTAL_API_KEY = getattr(settings, "VIRUSTOTAL_API_KEY", None)
@@ -115,10 +115,10 @@ GRINDER0X_API_URL = getattr(settings, "GRINDER0X_API_URL", None)
 GRINDER0X_API_KEY = getattr(settings, "GRINDER0X_API_KEY", None)
 
 # Auto-Analysis Configuration
-AUTO_MULTI_API_SCAN = getattr(settings, "AUTO_MULTI_API_SCAN", True)
-AUTO_REPORT_THRESHOLD_CONFIDENCE = getattr(settings, "AUTO_REPORT_THRESHOLD_CONFIDENCE", 85)
-MANUAL_REVIEW_THRESHOLD_CONFIDENCE = getattr(settings, "MANUAL_REVIEW_THRESHOLD_CONFIDENCE", 70)
-AUTO_ANALYSIS_DELAY_SECONDS = getattr(settings, "AUTO_ANALYSIS_DELAY_SECONDS", 30)
+AUTO_MULTI_API_SCAN = getattr(settings, "AUTO_MULTI_API_SCAN")
+AUTO_REPORT_THRESHOLD_CONFIDENCE = getattr(settings, "AUTO_REPORT_THRESHOLD_CONFIDENCE")
+MANUAL_REVIEW_THRESHOLD_CONFIDENCE = getattr(settings, "MANUAL_REVIEW_THRESHOLD_CONFIDENCE")
+AUTO_ANALYSIS_DELAY_SECONDS = getattr(settings, "AUTO_ANALYSIS_DELAY_SECONDS")
 
 # Auto-analysis is only truly enabled if we have API keys AND the setting is enabled
 AUTO_ANALYSIS_ENABLED = AUTO_MULTI_API_SCAN and (
@@ -127,6 +127,7 @@ AUTO_ANALYSIS_ENABLED = AUTO_MULTI_API_SCAN and (
 
 # Grinder integration is enabled if both URL and API key are configured
 GRINDER_INTEGRATION_ENABLED = bool(GRINDER0X_API_URL and GRINDER0X_API_KEY)
+
 
 # Constants
 ALLOWED_HEAD_STATUS = {200, 201, 202, 203, 204, 205, 206, 301, 302, 403, 405, 503, 504}
@@ -3062,7 +3063,11 @@ class AbuseReportManager:
         self.report_tracker = ReportTracker(db_manager.engine)
 
         if cc_emails is None:
-            default_cc = getattr(settings, "DEFAULT_CC_ESCALATION_LEVEL2", "")
+            default_cc = (
+                getattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL2")
+                if hasattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL2")
+                else None
+            )
             self.cc_emails = (
                 [email.strip() for email in default_cc.split(",")] if default_cc else []
             )
@@ -3187,8 +3192,8 @@ class AbuseReportManager:
         logger.info("⚙️ Getting SMTP configuration...")
         smtp_host = getattr(settings, "SMTP_HOST")
         smtp_port = getattr(settings, "SMTP_PORT")
-        smtp_user = getattr(settings, "SMTP_USER", "")
-        smtp_pass = getattr(settings, "SMTP_PASS", "")
+        smtp_user = getattr(settings, "SMTP_USER") if hasattr(settings, "SMTP_USER") else None
+        smtp_pass = getattr(settings, "SMTP_PASS") if hasattr(settings, "SMTP_PASS") else None
         sender_email = getattr(settings, "ABUSE_EMAIL_SENDER")
         subject = f"{getattr(settings, 'ABUSE_EMAIL_SUBJECT')} for {site_url}"
         logger.info(f"📧 SMTP: {smtp_host}:{smtp_port}, sender: {sender_email}")
@@ -3345,8 +3350,16 @@ class AbuseReportManager:
                     final_cc.insert(0, sender_email)
 
                 if not self.cc_emails:
-                    escalation2 = getattr(settings, "DEFAULT_CC_ESCALATION_LEVEL2", "")
-                    escalation3 = getattr(settings, "DEFAULT_CC_ESCALATION_LEVEL3", "")
+                    escalation2 = (
+                        getattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL2")
+                        if hasattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL2")
+                        else None
+                    )
+                    escalation3 = (
+                        getattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL3")
+                        if hasattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL3")
+                        else None
+                    )
                     for var in [escalation2, escalation3]:
                         if var:
                             for email in var.split(","):
@@ -3517,9 +3530,7 @@ class AbuseReportManager:
                                     file_data = f.read()
 
                                 # Check file size (limit to 25MB per file)
-                                max_size = (
-                                    getattr(settings, "MAX_ATTACHMENT_SIZE_MB", 25) * 1024 * 1024
-                                )
+                                max_size = getattr(settings, "MAX_ATTACHMENT_SIZE_MB") * 1024 * 1024
                                 if len(file_data) > max_size:
                                     logger.warning(
                                         f"⚠️  Skipping large attachment: {attachment_path} "
@@ -3545,7 +3556,7 @@ class AbuseReportManager:
 
                 # Check total email size
                 total_size = len(msg.as_string())
-                max_email_size = getattr(settings, "MAX_EMAIL_SIZE_MB", 25) * 1024 * 1024
+                max_email_size = getattr(settings, "MAX_EMAIL_SIZE_MB") * 1024 * 1024
                 if total_size > max_email_size:
                     logger.error(
                         f"❌ Email too large ({total_size / 1024 / 1024:.1f}MB), skipping send to {primary}"
@@ -3573,7 +3584,7 @@ class AbuseReportManager:
                     grinder_info = " [IP reported to threat intelligence]"
 
                 logger.info(f"🌐 CONNECTING TO SMTP {smtp_host}:{smtp_port}")
-                with smtplib.SMTP(smtp_host, smtp_port) as server:
+                with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
                     if smtp_user and smtp_pass:
                         logger.info(f"🔐 LOGGING IN TO SMTP SERVER")
                         server.login(smtp_user, smtp_pass)
@@ -3754,6 +3765,24 @@ class AbuseReportManager:
                         f"⚠️  Processing overdue report: {report_id} for {site_url} ({overdue_hours}h overdue)"
                     )
 
+                    # Double-check if site is still up before sending follow-up
+                    domain = re.sub(r"^https?://", "", site_url).strip().split("/")[0]
+                    resolved_ip, _ = get_ip_info(domain)
+                    current_status, _ = PhishingUtils.determine_site_status(
+                        site_url,
+                        resolved_ip,
+                        None,
+                        None,
+                        datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        self.timeout,
+                    )
+
+                    if current_status in ["down", "timeout", "resolved"]:
+                        logger.info(
+                            f"🎯 Site {site_url} is now {current_status}, skipping follow-up but continuing monitoring"
+                        )
+                        continue
+
                     # Get original recipients
                     recipients = json.loads(report["recipients"]) if report["recipients"] else []
 
@@ -3767,9 +3796,30 @@ class AbuseReportManager:
                     # Add escalation CCs for overdue reports
                     escalation_cc = self.cc_emails.copy() if self.cc_emails else []
 
-                    # Add additional escalation based on how overdue
-                    if overdue_hours > 72:  # 3+ days overdue
-                        escalation_level3 = getattr(settings, "DEFAULT_CC_ESCALATION_LEVEL3", "")
+                    # Always include sender email in CC for follow-ups
+                    sender_email = getattr(settings, "ABUSE_EMAIL_SENDER")
+                    if sender_email and sender_email not in escalation_cc:
+                        escalation_cc.append(sender_email)
+
+                    # Add escalation based on how overdue
+                    if overdue_hours > 48:  # 2+ days overdue - Level 2 escalation
+                        escalation_level2 = (
+                            getattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL2")
+                            if hasattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL2")
+                            else None
+                        )
+                        if escalation_level2:
+                            for email in escalation_level2.split(","):
+                                email = email.strip()
+                                if email and email not in escalation_cc:
+                                    escalation_cc.append(email)
+
+                    if overdue_hours > 72:  # 3+ days overdue - Level 3 escalation
+                        escalation_level3 = (
+                            getattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL3")
+                            if hasattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL3")
+                            else None
+                        )
                         if escalation_level3:
                             for email in escalation_level3.split(","):
                                 email = email.strip()
@@ -3833,9 +3883,9 @@ If the reported site has been taken down, please confirm. If not, please provide
         """Send a follow-up email for overdue reports"""
         try:
             # Use simplified email sending for follow-ups
-            smtp_host = getattr(settings, "SMTP_HOST", "localhost")
-            smtp_port = getattr(settings, "SMTP_PORT", 1125)
-            sender_email = getattr(settings, "SENDER_EMAIL", "abuse@example.com")
+            smtp_host = getattr(settings, "SMTP_HOST")
+            smtp_port = getattr(settings, "SMTP_PORT")
+            sender_email = getattr(settings, "ABUSE_EMAIL_SENDER")
 
             success_count = 0
 
@@ -3866,7 +3916,7 @@ Phishing Detection Team
                     msg.attach(MIMEText(body, "plain"))
 
                     # Send email
-                    with smtplib.SMTP(smtp_host, smtp_port) as server:
+                    with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
                         all_recipients = [recipient] + escalation_cc
                         server.send_message(msg, to_addrs=all_recipients)
 
@@ -5751,7 +5801,9 @@ class Engine:
     def __init__(self, args):
         self.timeout = args.timeout if args.timeout is not None else settings.TIMEOUT
         self.log_level = (
-            args.log_level if args.log_level is not None else getattr(settings, "LOG_LEVEL", "INFO")
+            args.log_level
+            if args.log_level is not None
+            else (getattr(settings, "LOG_LEVEL") if hasattr(settings, "LOG_LEVEL") else "INFO")
         )
         self.abuse_email = (
             args.abuse_email
@@ -5774,8 +5826,8 @@ class Engine:
             self.cc_emails = [email.strip() for email in args.cc.split(",")]
         else:
             self.cc_emails = (
-                [email.strip() for email in getattr(settings, "CC", "").split(",")]
-                if getattr(settings, "CC", "")
+                [email.strip() for email in getattr(settings, "DEFAULT_CC_EMAILS").split(",")]
+                if hasattr(settings, "DEFAULT_CC_EMAILS") and getattr(settings, "DEFAULT_CC_EMAILS")
                 else None
             )
 
@@ -5834,7 +5886,9 @@ class Engine:
         )
         self.keywords = transform_to_list(settings.KEYWORDS)
         self.domains = transform_to_list(settings.DOMAINS)
-        self.allowed_sites = transform_to_list(getattr(settings, "ALLOWED_SITES", ""))
+        self.allowed_sites = transform_to_list(
+            getattr(settings, "ALLOWED_SITES") if hasattr(settings, "ALLOWED_SITES") else None
+        )
 
         # Determine operational mode
         self.mode = EngineMode(self.args)
@@ -6647,9 +6701,8 @@ def test_grinder_integration():
 def main():
     """Main entry point with enhanced Grinder integration."""
     args = parse_arguments()
-    logger.setLevel(
-        args.log_level if args.log_level is not None else getattr(settings, "LOG_LEVEL", "INFO")
-    )
+    log_level = args.log_level or getattr(settings, "LOG_LEVEL", None) or "INFO"
+    logger.setLevel(log_level)
 
     logger.debug("🚀 Anisakys with Grinder integration starting up...")
     logger.debug(f"⚙️  Arguments: {vars(args)}")
