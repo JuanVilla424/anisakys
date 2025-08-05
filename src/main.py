@@ -3934,16 +3934,16 @@ Phishing Detection Team
             return False
 
     def followup_worker(self):
-        """Background worker that checks for overdue reports every 2 hours"""
-        logger.info("🚀 Starting follow-up worker for ICANN compliance (checks every 2 hours)...")
+        """Background worker that checks for overdue reports every 24 hours"""
+        logger.info("🚀 Starting follow-up worker for ICANN compliance (checks every 24 hours)...")
 
         while self.running:
             try:
                 # Process overdue reports
                 self.process_overdue_followups()
 
-                # Wait 2 hours before next check
-                for _ in range(120):  # 120 minutes = 2 hours
+                # Wait 24 hours before next check
+                for _ in range(1440):  # 1440 minutes = 24 hours
                     if not self.running:
                         break
                     time.sleep(60)  # Sleep 1 minute at a time for responsive shutdown
@@ -6202,10 +6202,10 @@ class Engine:
         takedown_thread.start()
         logger.debug("🔍 Takedown monitoring thread started")
 
-        # Start follow-up worker for ICANN compliance (every 2 hours)
+        # Start follow-up worker for ICANN compliance (every 24 hours)
         followup_thread = threading.Thread(target=self.report_manager.followup_worker, daemon=True)
         followup_thread.start()
-        logger.debug("🔄 ICANN follow-up worker started (checks every 2 hours)")
+        logger.debug("🔄 ICANN follow-up worker started (checks every 24 hours)")
 
         # Start auto-analysis worker if APIs are configured
         if AUTO_ANALYSIS_ENABLED:
@@ -6245,7 +6245,7 @@ class Engine:
             logger.info("🔄 Background threads running:")
             logger.info("  📧 Abuse Report Manager: Processing flagged phishing sites")
             logger.info("  🔍 Takedown Monitor: Monitoring site status changes")
-            logger.info("  🔄 ICANN Follow-up Worker: Checking overdue reports every 2 hours")
+            logger.info("  🔄 ICANN Follow-up Worker: Checking overdue reports every 24 hours")
             if AUTO_ANALYSIS_ENABLED:
                 logger.info(
                     "  🤖 Auto-Analysis Worker: Analyzing detected sites with multi-API validation"
