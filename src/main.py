@@ -3064,8 +3064,8 @@ class AbuseReportManager:
 
         if cc_emails is None:
             default_cc = (
-                getattr(settings, "DEFAULT_CC_ESCALATION_LEVEL2")
-                if hasattr(settings, "DEFAULT_CC_ESCALATION_LEVEL2")
+                getattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL2")
+                if hasattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL2")
                 else None
             )
             self.cc_emails = (
@@ -3351,13 +3351,13 @@ class AbuseReportManager:
 
                 if not self.cc_emails:
                     escalation2 = (
-                        getattr(settings, "DEFAULT_CC_ESCALATION_LEVEL2")
-                        if hasattr(settings, "DEFAULT_CC_ESCALATION_LEVEL2")
+                        getattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL2")
+                        if hasattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL2")
                         else None
                     )
                     escalation3 = (
-                        getattr(settings, "DEFAULT_CC_ESCALATION_LEVEL3")
-                        if hasattr(settings, "DEFAULT_CC_ESCALATION_LEVEL3")
+                        getattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL3")
+                        if hasattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL3")
                         else None
                     )
                     for var in [escalation2, escalation3]:
@@ -3778,11 +3778,28 @@ class AbuseReportManager:
                     # Add escalation CCs for overdue reports
                     escalation_cc = self.cc_emails.copy() if self.cc_emails else []
 
-                    # Add additional escalation based on how overdue
-                    if overdue_hours > 72:  # 3+ days overdue
+                    # Always include sender email in CC for follow-ups
+                    sender_email = getattr(settings, "ABUSE_EMAIL_SENDER")
+                    if sender_email and sender_email not in escalation_cc:
+                        escalation_cc.append(sender_email)
+
+                    # Add escalation based on how overdue
+                    if overdue_hours > 48:  # 2+ days overdue - Level 2 escalation
+                        escalation_level2 = (
+                            getattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL2")
+                            if hasattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL2")
+                            else None
+                        )
+                        if escalation_level2:
+                            for email in escalation_level2.split(","):
+                                email = email.strip()
+                                if email and email not in escalation_cc:
+                                    escalation_cc.append(email)
+
+                    if overdue_hours > 72:  # 3+ days overdue - Level 3 escalation
                         escalation_level3 = (
-                            getattr(settings, "DEFAULT_CC_ESCALATION_LEVEL3")
-                            if hasattr(settings, "DEFAULT_CC_ESCALATION_LEVEL3")
+                            getattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL3")
+                            if hasattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL3")
                             else None
                         )
                         if escalation_level3:
@@ -5791,8 +5808,8 @@ class Engine:
             self.cc_emails = [email.strip() for email in args.cc.split(",")]
         else:
             self.cc_emails = (
-                [email.strip() for email in getattr(settings, "CC").split(",")]
-                if hasattr(settings, "CC") and getattr(settings, "CC")
+                [email.strip() for email in getattr(settings, "DEFAULT_CC_EMAILS").split(",")]
+                if hasattr(settings, "DEFAULT_CC_EMAILS") and getattr(settings, "DEFAULT_CC_EMAILS")
                 else None
             )
 
