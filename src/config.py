@@ -42,6 +42,13 @@ class Settings(BaseSettings):
     PHISHTANK_API_KEY: Optional[str] = None
     GRINDER0X_API_URL: Optional[str] = None
     GRINDER0X_API_KEY: Optional[str] = None
+    MAX_ATTACHMENT_SIZE_MB: Optional[int] = None
+    MAX_EMAIL_SIZE_MB: Optional[int] = None
+    SCREENSHOTS_DIR: Optional[str] = None
+    SMTP_USER: Optional[str] = None
+    SMTP_PASS: Optional[str] = None
+    DEFAULT_ATTACHMENT: Optional[str] = None
+    LOG_LEVEL: Optional[str] = None
 
     model_config = {
         "env_file": env_file,

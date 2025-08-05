@@ -5766,7 +5766,9 @@ class Engine:
     def __init__(self, args):
         self.timeout = args.timeout if args.timeout is not None else settings.TIMEOUT
         self.log_level = (
-            args.log_level if args.log_level is not None else getattr(settings, "LOG_LEVEL")
+            args.log_level
+            if args.log_level is not None
+            else (getattr(settings, "LOG_LEVEL") if hasattr(settings, "LOG_LEVEL") else "INFO")
         )
         self.abuse_email = (
             args.abuse_email
