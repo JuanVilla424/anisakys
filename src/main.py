@@ -6666,9 +6666,8 @@ def test_grinder_integration():
 def main():
     """Main entry point with enhanced Grinder integration."""
     args = parse_arguments()
-    logger.setLevel(
-        args.log_level if args.log_level is not None else getattr(settings, "LOG_LEVEL", "INFO")
-    )
+    log_level = args.log_level or getattr(settings, "LOG_LEVEL", None) or "INFO"
+    logger.setLevel(log_level)
 
     logger.debug("🚀 Anisakys with Grinder integration starting up...")
     logger.debug(f"⚙️  Arguments: {vars(args)}")
