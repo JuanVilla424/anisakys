@@ -3530,7 +3530,8 @@ class AbuseReportManager:
                                     file_data = f.read()
 
                                 # Check file size (limit to 25MB per file)
-                                max_size = getattr(settings, "MAX_ATTACHMENT_SIZE_MB") * 1024 * 1024
+                                max_size_mb = getattr(settings, "MAX_ATTACHMENT_SIZE_MB", 25)
+                                max_size = max_size_mb * 1024 * 1024
                                 if len(file_data) > max_size:
                                     logger.warning(
                                         f"⚠️  Skipping large attachment: {attachment_path} "
@@ -3556,7 +3557,8 @@ class AbuseReportManager:
 
                 # Check total email size
                 total_size = len(msg.as_string())
-                max_email_size = getattr(settings, "MAX_EMAIL_SIZE_MB") * 1024 * 1024
+                max_email_size_mb = getattr(settings, "MAX_EMAIL_SIZE_MB", 50)
+                max_email_size = max_email_size_mb * 1024 * 1024
                 if total_size > max_email_size:
                     logger.error(
                         f"❌ Email too large ({total_size / 1024 / 1024:.1f}MB), skipping send to {primary}"
@@ -3937,10 +3939,28 @@ Phishing Detection Team
         """Background worker that checks for overdue reports every 24 hours"""
         logger.info("🚀 Starting follow-up worker for ICANN compliance (checks every 24 hours)...")
 
+        # Check last follow-up time from database
+        last_followup_time = self._get_last_followup_time()
+
+        if last_followup_time:
+            hours_since_last = (datetime.datetime.now() - last_followup_time).total_seconds() / 3600
+            if hours_since_last < 24:
+                wait_hours = 24 - hours_since_last
+                logger.info(
+                    f"⏰ Last follow-up was {hours_since_last:.1f} hours ago. Waiting {wait_hours:.1f} hours before first check."
+                )
+                # Wait until 24 hours have passed since last follow-up
+                for _ in range(int(wait_hours * 60)):  # Convert hours to minutes
+                    if not self.running:
+                        return
+                    time.sleep(60)
+
         while self.running:
             try:
                 # Process overdue reports
                 self.process_overdue_followups()
+                # Save the time of this follow-up run
+                self._save_followup_time()
 
                 # Wait 24 hours before next check
                 for _ in range(1440):  # 1440 minutes = 24 hours
@@ -3956,6 +3976,55 @@ Phishing Detection Team
         """Stop the follow-up worker gracefully"""
         self.running = False
         logger.info("🛑 Follow-up worker stopped")
+
+    def _get_last_followup_time(self) -> Optional[datetime.datetime]:
+        """Get the last follow-up time from database"""
+        try:
+            with self.db_manager.engine.begin() as conn:
+                result = conn.execute(
+                    text("SELECT last_run FROM system_status WHERE task_name = 'followup_worker'")
+                ).fetchone()
+
+                if result and result[0]:
+                    return result[0]
+                return None
+        except Exception as e:
+            logger.debug(f"No previous follow-up time found: {e}")
+            return None
+
+    def _save_followup_time(self):
+        """Save the current time as last follow-up time"""
+        try:
+            with self.db_manager.engine.begin() as conn:
+                # Create table if not exists
+                conn.execute(
+                    text(
+                        """
+                    CREATE TABLE IF NOT EXISTS system_status (
+                        task_name VARCHAR(100) PRIMARY KEY,
+                        last_run TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """
+                    )
+                )
+
+                # Upsert the follow-up time
+                conn.execute(
+                    text(
+                        """
+                    INSERT INTO system_status (task_name, last_run, updated_at)
+                    VALUES ('followup_worker', :last_run, :updated_at)
+                    ON CONFLICT (task_name)
+                    DO UPDATE SET last_run = :last_run, updated_at = :updated_at
+                """
+                    ),
+                    {"last_run": datetime.datetime.now(), "updated_at": datetime.datetime.now()},
+                )
+
+                logger.debug("✅ Saved follow-up run time")
+        except Exception as e:
+            logger.error(f"❌ Failed to save follow-up time: {e}")
 
     def report_phishing_sites(self):
         """Main loop for reporting phishing sites with enhanced multi-API validation and auto-reporting."""
