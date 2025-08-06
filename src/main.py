@@ -3530,7 +3530,8 @@ class AbuseReportManager:
                                     file_data = f.read()
 
                                 # Check file size (limit to 25MB per file)
-                                max_size = getattr(settings, "MAX_ATTACHMENT_SIZE_MB") * 1024 * 1024
+                                max_size_mb = getattr(settings, "MAX_ATTACHMENT_SIZE_MB", 25)
+                                max_size = max_size_mb * 1024 * 1024
                                 if len(file_data) > max_size:
                                     logger.warning(
                                         f"⚠️  Skipping large attachment: {attachment_path} "
