@@ -627,11 +627,11 @@ class ReportTracker:
                     text(
                         """
                         SELECT ar.* FROM abuse_reports ar
-                        LEFT JOIN phishing_sites ps ON ar.site_url = ps.url
+                        INNER JOIN phishing_sites ps ON ar.site_url = ps.url
                         WHERE ar.sla_deadline < CURRENT_TIMESTAMP
                         AND ar.status NOT IN ('resolved', 'rejected', 'timeout')
                         AND ar.response_received = 0
-                        AND (ps.site_status IS NULL OR ps.site_status NOT IN ('down', 'timeout', 'resolved'))
+                        AND ps.site_status NOT IN ('down', 'timeout', 'resolved')
                         ORDER BY ar.sla_deadline ASC
                     """
                     )

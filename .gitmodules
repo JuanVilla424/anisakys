@@ -5,3 +5,6 @@
 [submodule "smtp-relay"]
 	path = smtp-relay
 	url = https://github.com/JuanVilla424/smtp-relay.git
+[submodule "database"]
+	path = database
+	url = git@github.com:JuanVilla424/postgres-container-db.git
