@@ -1690,7 +1690,9 @@ class EnhancedAbuseEmailDetector:
         # Check the database cache first
         with self.db_manager.engine.begin() as conn:
             result = conn.execute(
-                text("SELECT abuse_email FROM registrar_abuse WHERE LOWER(registrar) LIKE :param"),
+                text(
+                    "SELECT abuse_emails FROM registrar_abuse WHERE LOWER(registrar_name) LIKE :param"
+                ),
                 {"param": "%" + registrar.lower() + "%"},
             ).fetchone()
             if result:
@@ -1705,7 +1707,7 @@ class EnhancedAbuseEmailDetector:
                     with self.db_manager.engine.begin() as conn:
                         conn.execute(
                             text(
-                                "INSERT INTO registrar_abuse (registrar, abuse_email) VALUES (:registrar, :email) ON CONFLICT (registrar) DO NOTHING"
+                                "INSERT INTO registrar_abuse (registrar_name, abuse_emails) VALUES (:registrar, :email) ON CONFLICT (registrar_name) DO NOTHING"
                             ),
                             {"registrar": registrar, "email": email},
                         )
@@ -2841,6 +2843,7 @@ def upgrade_phishing_db():
         ("screenshot_taken", "INTEGER DEFAULT 0"),
         ("screenshot_path", "TEXT"),
         ("screenshot_timestamp", "TIMESTAMP"),
+        ("manual_emails", "INTEGER DEFAULT 0"),
     ]
 
     # New table for tracking abuse reports (ICANN compliance)
@@ -3006,7 +3009,8 @@ class DatabaseManager:
                         auto_analysis_timestamp TIMESTAMP,
                         detection_keywords TEXT,
                         auto_report_eligible INTEGER DEFAULT 0,
-                        requires_manual_review INTEGER DEFAULT 0
+                        requires_manual_review INTEGER DEFAULT 0,
+                        manual_emails INTEGER DEFAULT 0
                     )
                 """
                 )
@@ -3015,20 +3019,111 @@ class DatabaseManager:
             logger.info("🗄️  Initialized phishing_sites table with enhanced multi-API support.")
 
     def init_registrar_abuse_db(self):
-        """Initialize registrar abuse table."""
+        """Initialize registrar abuse table with enhanced fields."""
         with self.engine.connect() as conn:
+            # First, check if table exists with old schema
+            result = conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns WHERE table_name = 'registrar_abuse'"
+                )
+            ).fetchall()
+
+            if result and len(result) == 2:  # Old schema with only 2 columns
+                # Backup existing data
+                conn.execute(text("ALTER TABLE registrar_abuse RENAME TO registrar_abuse_old"))
+                conn.commit()
+
+            # Create enhanced table
             conn.execute(
                 text(
                     """
                     CREATE TABLE IF NOT EXISTS registrar_abuse (
-                        registrar TEXT PRIMARY KEY,
-                        abuse_email TEXT
+                        id SERIAL PRIMARY KEY,
+                        registrar_name TEXT UNIQUE NOT NULL,
+                        abuse_emails TEXT,
+                        verified INTEGER DEFAULT 0,
+                        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        notes TEXT,
+                        manual_override INTEGER DEFAULT 0
+                    )
+                """
+                )
+            )
+
+            # Migrate old data if exists
+            try:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO registrar_abuse (registrar_name, abuse_emails)
+                        SELECT registrar, abuse_email FROM registrar_abuse_old
+                        ON CONFLICT (registrar_name) DO NOTHING
+                        """
+                    )
+                )
+                conn.execute(text("DROP TABLE IF EXISTS registrar_abuse_old"))
+            except:
+                pass  # Old table doesn't exist or migration not needed
+
+            conn.commit()
+            logger.info("🗄️  Initialized enhanced registrar_abuse table.")
+
+    def init_hosting_abuse_db(self):
+        """Initialize hosting provider abuse table."""
+        with self.engine.connect() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS hosting_abuse (
+                        id SERIAL PRIMARY KEY,
+                        provider_name TEXT NOT NULL,
+                        asn TEXT,
+                        abuse_emails TEXT,
+                        verified INTEGER DEFAULT 0,
+                        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        notes TEXT,
+                        manual_override INTEGER DEFAULT 0,
+                        UNIQUE(provider_name, asn)
                     )
                 """
                 )
             )
             conn.commit()
-            logger.info("🗄️  Initialized registrar_abuse table.")
+            logger.info("🗄️  Initialized hosting_abuse table.")
+
+    def get_registrar_abuse_emails(self, registrar_name: str) -> Optional[str]:
+        """Get abuse emails for a registrar from the cache table."""
+        if not registrar_name:
+            return None
+
+        with self.engine.connect() as conn:
+            result = conn.execute(
+                text("SELECT abuse_emails FROM registrar_abuse WHERE registrar_name = :registrar"),
+                {"registrar": registrar_name},
+            ).fetchone()
+
+            return result[0] if result else None
+
+    def get_hosting_abuse_emails(self, provider_name: str, asn: str = None) -> Optional[str]:
+        """Get abuse emails for a hosting provider from the cache table."""
+        if not provider_name:
+            return None
+
+        with self.engine.connect() as conn:
+            if asn:
+                result = conn.execute(
+                    text(
+                        "SELECT abuse_emails FROM hosting_abuse WHERE provider_name = :provider AND asn = :asn"
+                    ),
+                    {"provider": provider_name, "asn": asn},
+                ).fetchone()
+            else:
+                result = conn.execute(
+                    text("SELECT abuse_emails FROM hosting_abuse WHERE provider_name = :provider"),
+                    {"provider": provider_name},
+                ).fetchone()
+
+            return result[0] if result else None
 
     def store_detected_phishing_site(
         self, url: str, keywords: List[str], source: str = "auto_detection"
@@ -3436,23 +3531,73 @@ class AbuseReportManager:
         return result
 
     def get_enhanced_abuse_emails(self, whois_info, domain: str) -> List[str]:
-        """Get abuse emails using enhanced detection methods."""
+        """Get abuse emails using enhanced detection methods, checking cached tables first."""
+        abuse_emails = []
+
+        # Extract registrar and check cached table first
         registrar = self.abuse_detector.extract_registrar(whois_info) or ""
+        if registrar:
+            cached_emails = self.db_manager.get_registrar_abuse_emails(registrar)
+            if cached_emails:
+                logger.info(f"📚 Found cached registrar emails for {registrar}: {cached_emails}")
+                # Parse if it's a JSON string
+                try:
+                    if cached_emails.startswith("["):
+                        abuse_emails.extend(json.loads(cached_emails))
+                    else:
+                        abuse_emails.extend(
+                            [e.strip() for e in cached_emails.split(",") if e.strip()]
+                        )
+                except:
+                    abuse_emails.append(cached_emails)
 
-        # Use the enhanced method from abuse_detector
-        abuse_emails = self.abuse_detector.get_enhanced_abuse_email(domain, whois_info, registrar)
+        # Check hosting provider cache
+        try:
+            ip = socket.gethostbyname(domain)
+            asn_info = self.abuse_detector.get_asn_info(ip)
+            if asn_info and asn_info.get("provider"):
+                provider = asn_info["provider"]
+                asn = asn_info.get("asn")
+                cached_hosting = self.db_manager.get_hosting_abuse_emails(provider, asn)
+                if cached_hosting:
+                    logger.info(f"📚 Found cached hosting emails for {provider}: {cached_hosting}")
+                    try:
+                        if cached_hosting.startswith("["):
+                            abuse_emails.extend(json.loads(cached_hosting))
+                        else:
+                            abuse_emails.extend(
+                                [e.strip() for e in cached_hosting.split(",") if e.strip()]
+                            )
+                    except:
+                        abuse_emails.append(cached_hosting)
+        except:
+            pass
 
-        # If no emails found, try fallback methods with domain validation
+        # If no cached emails found, use the enhanced detection method
         if not abuse_emails:
-            whois_str = str(whois_info)
-            emails = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", whois_str)
-            for email in emails:
-                if "abuse" in email.lower() and self.abuse_detector.validate_abuse_email_domain(
-                    email, domain
-                ):
-                    abuse_emails.append(email)
+            abuse_emails = self.abuse_detector.get_enhanced_abuse_email(
+                domain, whois_info, registrar
+            )
 
-        return abuse_emails
+            # If still no emails found, try fallback methods with domain validation
+            if not abuse_emails:
+                whois_str = str(whois_info)
+                emails = re.findall(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", whois_str)
+                for email in emails:
+                    if "abuse" in email.lower() and self.abuse_detector.validate_abuse_email_domain(
+                        email, domain
+                    ):
+                        abuse_emails.append(email)
+
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_emails = []
+        for email in abuse_emails:
+            if email and email not in seen:
+                seen.add(email)
+                unique_emails.append(email)
+
+        return unique_emails
 
     def send_abuse_report(
         self,
@@ -4078,9 +4223,32 @@ class AbuseReportManager:
                         self.timeout,
                     )
 
+                    # Update site status in database regardless of status
+                    try:
+                        with self.db_manager.engine.begin() as conn:
+                            conn.execute(
+                                text(
+                                    """UPDATE phishing_sites
+                                    SET site_status = :status,
+                                        last_seen = CURRENT_TIMESTAMP,
+                                        takedown_date = CASE
+                                            WHEN :status = 'down' THEN CURRENT_TIMESTAMP
+                                            ELSE takedown_date
+                                        END
+                                    WHERE url = :url"""
+                                ),
+                                {"status": current_status, "url": site_url},
+                            )
+                            logger.info(
+                                f"✅ Updated site status to {current_status} for {site_url}"
+                            )
+                    except Exception as e:
+                        logger.error(f"❌ Error updating site status: {e}")
+
+                    # Skip follow-up if site is down
                     if current_status in ["down", "timeout", "resolved"]:
                         logger.info(
-                            f"🎯 Site {site_url} is now {current_status}, skipping follow-up but continuing monitoring"
+                            f"🎯 Site {site_url} is now {current_status}, skipping follow-up"
                         )
                         continue
 
@@ -4091,8 +4259,8 @@ class AbuseReportManager:
                         logger.warning(f"⚠️  No recipients found for {report_id}, skipping")
                         continue
 
-                    # Prepare follow-up email subject
-                    follow_up_subject = f"FOLLOW-UP: Phishing Report {report_id} - Response Required (ICANN Compliance)"
+                    # Prepare follow-up email subject with site URL
+                    follow_up_subject = f"FOLLOW-UP: Phishing Report {report_id} for {site_url} - Response Required (ICANN Compliance)"
 
                     # Add escalation CCs for overdue reports
                     escalation_cc = self.cc_emails.copy() if self.cc_emails else []
@@ -4650,7 +4818,12 @@ Phishing Detection Team
                                         text(
                                             """
                                             UPDATE phishing_sites
-                                            SET abuse_report_sent=1, abuse_email=:abuse_email, last_report_sent=:timestamp
+                                            SET abuse_report_sent=1,
+                                                abuse_email = CASE
+                                                    WHEN manual_emails = 1 THEN abuse_email
+                                                    ELSE :abuse_email
+                                                END,
+                                                last_report_sent=:timestamp
                                             WHERE url=:url
                                         """
                                         ),
@@ -4903,7 +5076,11 @@ Phishing Detection Team
                                 UPDATE phishing_sites
                                 SET whois_info=:whois_str, last_seen=:timestamp, reported=1,
                                     resolved_ip=:resolved_ip, asn_provider=:asn_provider, is_cloudflare=:is_cloudflare,
-                                    registrar=:registrar, abuse_email=:abuse_email
+                                    registrar=:registrar,
+                                    abuse_email = CASE
+                                        WHEN manual_emails = 1 THEN abuse_email
+                                        ELSE :abuse_email
+                                    END
                                 WHERE url=:url
                             """
                             ),
@@ -5566,7 +5743,10 @@ class AutoPhishingAnalyzer:
                                     UPDATE phishing_sites
                                     SET abuse_report_sent = 1,
                                         last_report_sent = :timestamp,
-                                        abuse_email = :abuse_email,
+                                        abuse_email = CASE
+                                            WHEN manual_emails = 1 THEN abuse_email
+                                            ELSE :abuse_email
+                                        END,
                                         reported = 1
                                     WHERE url = :url
                                 """
@@ -6221,6 +6401,7 @@ class Engine:
         self.db_manager.init_phishing_db()
         upgrade_phishing_db()
         self.db_manager.init_registrar_abuse_db()
+        self.db_manager.init_hosting_abuse_db()
 
         # Ensure all initialization connections are closed
         logger.info("🔒 Disposing initialization connections")
@@ -6329,7 +6510,11 @@ class Engine:
                         """
                         UPDATE phishing_sites
                         SET manual_flag=1, last_seen=:timestamp, reported=0,
-                            abuse_report_sent=0, abuse_email=:abuse_email,
+                            abuse_report_sent=0,
+                            abuse_email = CASE
+                                WHEN manual_emails = 1 THEN abuse_email
+                                ELSE :abuse_email
+                            END,
                             whois_info=:whois_info, registrar=:registrar
                         WHERE url=:url
                     """
