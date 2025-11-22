@@ -149,9 +149,6 @@ positive_report.txt
 
 identifier.sqlite
 
-# Database directory (git submodule)
-database/
-
 # Manual test files
 manual_test_*.py
 test_main_logging.py
