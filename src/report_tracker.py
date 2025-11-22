@@ -339,6 +339,7 @@ class ReportTracker:
     def track_report(self, report: AbuseReportRecord) -> bool:
         """
         Track a new abuse report and update phishing_sites table
+        If a report already exists for this site, update it instead
 
         Args:
             report: AbuseReportRecord to track
@@ -357,48 +358,110 @@ class ReportTracker:
 
                 site_id = site_result[0] if site_result else None
 
-                # Insert into abuse_reports table
-                conn.execute(
+                # Check if a report already exists for this site
+                existing_report = conn.execute(
                     text(
-                        """
-                        INSERT INTO abuse_reports (
-                            site_url, site_id, report_date, recipients, cc_recipients, subject,
-                            report_id, status, sla_deadline, icann_compliant,
-                            screenshot_included, screenshot_path, attachment_count,
-                            follow_up_required, created_at, updated_at
-                        ) VALUES (
-                            :site_url, :site_id, :report_date, :recipients, :cc_recipients, :subject,
-                            :report_id, :status, :sla_deadline, :icann_compliant,
-                            :screenshot_included, :screenshot_path, :attachment_count,
-                            :follow_up_required, :created_at, :updated_at
-                        )
-                    """
+                        "SELECT id, report_id FROM abuse_reports WHERE site_url = :site_url ORDER BY created_at DESC LIMIT 1"
                     ),
-                    {
-                        "site_url": report.site_url,
-                        "site_id": site_id,
-                        "report_date": report.report_date,
-                        "recipients": (
-                            json.dumps(report.recipients)
-                            if isinstance(report.recipients, list)
-                            else report.recipients
+                    {"site_url": report.site_url},
+                ).fetchone()
+
+                if existing_report:
+                    # Update existing report
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE abuse_reports SET
+                                site_id = :site_id,
+                                report_date = :report_date,
+                                recipients = :recipients,
+                                cc_recipients = :cc_recipients,
+                                subject = :subject,
+                                report_id = :report_id,
+                                status = :status,
+                                sla_deadline = :sla_deadline,
+                                icann_compliant = :icann_compliant,
+                                screenshot_included = :screenshot_included,
+                                screenshot_path = :screenshot_path,
+                                attachment_count = :attachment_count,
+                                follow_up_required = :follow_up_required,
+                                updated_at = :updated_at
+                            WHERE id = :existing_id
+                            """
                         ),
-                        "cc_recipients": (
-                            json.dumps(report.cc_recipients) if report.cc_recipients else None
+                        {
+                            "existing_id": existing_report[0],
+                            "site_url": report.site_url,
+                            "site_id": site_id,
+                            "report_date": report.report_date,
+                            "recipients": (
+                                json.dumps(report.recipients)
+                                if isinstance(report.recipients, list)
+                                else report.recipients
+                            ),
+                            "cc_recipients": (
+                                json.dumps(report.cc_recipients) if report.cc_recipients else None
+                            ),
+                            "subject": report.subject,
+                            "report_id": report.report_id,
+                            "status": report.status,
+                            "sla_deadline": report.sla_deadline,
+                            "icann_compliant": 1 if report.icann_compliant else 0,
+                            "screenshot_included": 1 if report.screenshot_included else 0,
+                            "screenshot_path": getattr(report, "screenshot_path", None),
+                            "attachment_count": getattr(report, "attachment_count", 0),
+                            "follow_up_required": 1 if report.follow_up_required else 0,
+                            "updated_at": report.updated_at,
+                        },
+                    )
+                    logger.info(
+                        f"✅ Updated existing report for {report.site_url} (old: {existing_report[1]}, new: {report.report_id})"
+                    )
+                else:
+                    # Insert new report (without specifying id, let SERIAL handle it)
+                    conn.execute(
+                        text(
+                            """
+                            INSERT INTO abuse_reports (
+                                site_url, site_id, report_date, recipients, cc_recipients, subject,
+                                report_id, status, sla_deadline, icann_compliant,
+                                screenshot_included, screenshot_path, attachment_count,
+                                follow_up_required, created_at, updated_at
+                            ) VALUES (
+                                :site_url, :site_id, :report_date, :recipients, :cc_recipients, :subject,
+                                :report_id, :status, :sla_deadline, :icann_compliant,
+                                :screenshot_included, :screenshot_path, :attachment_count,
+                                :follow_up_required, :created_at, :updated_at
+                            )
+                        """
                         ),
-                        "subject": report.subject,
-                        "report_id": report.report_id,
-                        "status": report.status,
-                        "sla_deadline": report.sla_deadline,
-                        "icann_compliant": 1 if report.icann_compliant else 0,
-                        "screenshot_included": 1 if report.screenshot_included else 0,
-                        "screenshot_path": getattr(report, "screenshot_path", None),
-                        "attachment_count": getattr(report, "attachment_count", 0),
-                        "follow_up_required": 1 if report.follow_up_required else 0,
-                        "created_at": report.created_at,
-                        "updated_at": report.updated_at,
-                    },
-                )
+                        {
+                            "site_url": report.site_url,
+                            "site_id": site_id,
+                            "report_date": report.report_date,
+                            "recipients": (
+                                json.dumps(report.recipients)
+                                if isinstance(report.recipients, list)
+                                else report.recipients
+                            ),
+                            "cc_recipients": (
+                                json.dumps(report.cc_recipients) if report.cc_recipients else None
+                            ),
+                            "subject": report.subject,
+                            "report_id": report.report_id,
+                            "status": report.status,
+                            "sla_deadline": report.sla_deadline,
+                            "icann_compliant": 1 if report.icann_compliant else 0,
+                            "screenshot_included": 1 if report.screenshot_included else 0,
+                            "screenshot_path": getattr(report, "screenshot_path", None),
+                            "attachment_count": getattr(report, "attachment_count", 0),
+                            "follow_up_required": 1 if report.follow_up_required else 0,
+                            "created_at": report.created_at,
+                            "updated_at": report.updated_at,
+                        },
+                    )
+                    logger.info(f"✅ Created new report: {report.report_id} for {report.site_url}")
+
                 conn.commit()
 
                 # Update phishing_sites in a separate transaction

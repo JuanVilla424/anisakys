@@ -13,6 +13,10 @@ dist/
 .claude
 screenshots
 
+# BMAD directories
+.ai/
+protocols/
+
 # Poetry
 poetry.lock
 
@@ -144,3 +148,18 @@ positive_report.txt
 *queries*
 
 identifier.sqlite
+
+# Database directory (git submodule)
+database/
+
+# Manual test files
+manual_test_*.py
+test_main_logging.py
+
+# BMAD specific files
+.bmadrc.yaml
+.mcp.json
+docs/system/
+docs/auto-continue-system.md
+docs/ENFORCEMENT.md
+docs/temp-structure.md

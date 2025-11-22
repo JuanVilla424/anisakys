@@ -43,6 +43,7 @@ from sqlalchemy import create_engine, text
 from flask import Flask, request, jsonify
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+import logging
 import logging as flask_logging
 from functools import wraps
 import signal
@@ -50,6 +51,19 @@ import sys
 
 from src.config import settings, CLOUDFLARE_IP_RANGES
 from src.logger import logger
+from src.observability.structured_logger import (
+    setup_structured_logging,
+    set_correlation_id,
+    log_with_context,
+    log_detection,
+    log_api_call,
+    log_error,
+)
+from src.circuit_breaker import (
+    CircuitBreaker,
+    CircuitBreakerConfig,
+    CircuitBreakerOpenError,
+)
 from src.screenshot_service import ScreenshotService
 
 # Global testing mode detection - independent of test_mode (used for screenshots)
@@ -583,6 +597,16 @@ class GrinderReportClient:
 
         self.enabled = bool(self.api_url and self.api_key)
 
+        # Initialize circuit breaker for API resilience (EPIC-004)
+        cb_config = CircuitBreakerConfig(
+            failure_threshold=3,  # Open after 3 failures
+            recovery_timeout=60,  # Try again after 60 seconds
+            success_threshold=2,  # Close after 2 successes in half-open
+            max_retries=2,  # Retry failed requests twice
+            retry_backoff_base=2.0,  # Exponential backoff starting at 2s
+        )
+        self.circuit_breaker = CircuitBreaker("Grinder", cb_config, logger)
+
         if self.enabled:
             logger.info(f"🔗 Grinder integration enabled: {self.api_url}")
         else:
@@ -607,7 +631,13 @@ class GrinderReportClient:
             return {"status": "disabled", "message": "Grinder integration not configured"}
 
         if not self._validate_ip_address(ip_address):
-            logger.error(f"❌ Invalid IP address format: {ip_address}")
+            log_with_context(
+                logger,
+                logging.ERROR,
+                "Invalid IP address format for Grinder report",
+                ip_address=ip_address,
+                event_type="grinder_report_validation_error",
+            )
             return {"status": "error", "message": "Invalid IP address format"}
 
         try:
@@ -632,11 +662,29 @@ class GrinderReportClient:
                 },
             }
 
-            # Send the report
+            # Send the report through circuit breaker (EPIC-004)
             endpoint_url = f"{self.api_url.rstrip('/')}/api/v1/report-ip"
-            logger.info(f"📤 Reporting malicious IP {ip_address} to Grinder: {endpoint_url}")
 
-            response = self.session.post(endpoint_url, json=payload, timeout=30)
+            def _make_request():
+                """Internal function for circuit breaker wrapping."""
+                start_time = time.time()
+                response = self.session.post(endpoint_url, json=payload, timeout=30)
+                response_time_ms = int((time.time() - start_time) * 1000)
+                return response, response_time_ms
+
+            # Execute with circuit breaker protection
+            response, response_time_ms = self.circuit_breaker.call(_make_request)
+
+            log_api_call(
+                logger,
+                api_name="Grinder",
+                url=endpoint_url,
+                status_code=response.status_code,
+                response_time_ms=response_time_ms,
+                ip_address=ip_address,
+                categories=categories,
+                confidence=confidence,
+            )
 
             if response.status_code == 200:
                 result = response.json()
@@ -662,7 +710,15 @@ class GrinderReportClient:
 
             elif response.status_code == 400:
                 error_details = response.json() if response.content else {"error": "Bad request"}
-                logger.error(f"❌ Bad request when reporting IP {ip_address}: {error_details}")
+                log_with_context(
+                    logger,
+                    logging.ERROR,
+                    "Bad request when reporting IP to Grinder",
+                    ip_address=ip_address,
+                    status_code=response.status_code,
+                    error_details=error_details,
+                    event_type="grinder_bad_request",
+                )
                 return {
                     "status": "bad_request",
                     "message": error_details.get("error", "Bad request"),
@@ -670,9 +726,14 @@ class GrinderReportClient:
                 }
 
             else:
-                logger.error(
-                    f"❌ Failed to report IP {ip_address} to Grinder: "
-                    f"HTTP {response.status_code} - {response.text}"
+                log_with_context(
+                    logger,
+                    logging.ERROR,
+                    "Failed to report IP to Grinder",
+                    ip_address=ip_address,
+                    status_code=response.status_code,
+                    response_text=response.text[:500],  # Limit response text
+                    event_type="grinder_report_failed",
                 )
                 return {
                     "status": "error",
@@ -680,16 +741,52 @@ class GrinderReportClient:
                     "response_text": response.text,
                 }
 
-        except requests.exceptions.Timeout:
-            logger.error(f"⏰ Timeout reporting IP {ip_address} to Grinder")
+        except CircuitBreakerOpenError as e:
+            # Circuit breaker is open - service is down
+            log_with_context(
+                logger,
+                logging.ERROR,
+                "Grinder API circuit breaker OPEN - service unavailable",
+                ip_address=ip_address,
+                circuit_state="OPEN",
+                event_type="grinder_circuit_open",
+            )
+            return {
+                "status": "circuit_open",
+                "message": "Grinder API temporarily unavailable due to repeated failures",
+                "details": str(e),
+            }
+
+        except requests.exceptions.Timeout as e:
+            log_error(
+                logger,
+                e,
+                {"ip_address": ip_address, "api": "Grinder", "event_type": "grinder_timeout"},
+            )
             return {"status": "timeout", "message": "Request timeout"}
 
         except requests.exceptions.ConnectionError as e:
-            logger.error(f"🌐 Connection error reporting IP {ip_address} to Grinder: {e}")
+            log_error(
+                logger,
+                e,
+                {
+                    "ip_address": ip_address,
+                    "api": "Grinder",
+                    "event_type": "grinder_connection_error",
+                },
+            )
             return {"status": "connection_error", "message": str(e)}
 
         except Exception as e:
-            logger.error(f"❌ Unexpected error reporting IP {ip_address} to Grinder: {e}")
+            log_error(
+                logger,
+                e,
+                {
+                    "ip_address": ip_address,
+                    "api": "Grinder",
+                    "event_type": "grinder_unexpected_error",
+                },
+            )
             return {"status": "error", "message": str(e)}
 
     @staticmethod
@@ -892,6 +989,16 @@ class VirusTotalIntegration:
             }
         )
 
+        # Initialize circuit breaker for API resilience (EPIC-004)
+        cb_config = CircuitBreakerConfig(
+            failure_threshold=5,  # Higher threshold for VirusTotal (public API)
+            recovery_timeout=120,  # Wait 2 minutes before retry (rate limits)
+            success_threshold=2,
+            max_retries=2,
+            retry_backoff_base=3.0,  # Longer backoff for rate-limited API
+        )
+        self.circuit_breaker = CircuitBreaker("VirusTotal", cb_config, logger)
+
     def scan_url(self, url: str) -> Dict[str, Any]:
         """
         Submit URL for analysis and get a comprehensive threat assessment.
@@ -910,8 +1017,24 @@ class VirusTotalIntegration:
             # First, submit the URL for scanning
             url_id = base64.urlsafe_b64encode(url.encode()).decode().strip("=")
 
-            # Check if URL has been analyzed before
-            response = self.session.get(f"{self.base_url}/urls/{url_id}")
+            # Check if URL has been analyzed before (through circuit breaker)
+            def _make_request():
+                """Internal function for circuit breaker wrapping."""
+                start_time = time.time()
+                response = self.session.get(f"{self.base_url}/urls/{url_id}")
+                response_time_ms = int((time.time() - start_time) * 1000)
+                return response, response_time_ms
+
+            response, response_time_ms = self.circuit_breaker.call(_make_request)
+
+            log_api_call(
+                logger,
+                api_name="VirusTotal",
+                url=f"{self.base_url}/urls/{url_id}",
+                status_code=response.status_code,
+                response_time_ms=response_time_ms,
+                target_url=url,
+            )
 
             if response.status_code == 200:
                 data = response.json()
@@ -956,11 +1079,43 @@ class VirusTotalIntegration:
                     return {"error": f"Failed to submit URL: {scan_response.status_code}"}
 
             else:
-                logger.error(f"❌ VirusTotal API error: {response.status_code}")
+                log_with_context(
+                    logger,
+                    logging.ERROR,
+                    "VirusTotal API error",
+                    status_code=response.status_code,
+                    url=url,
+                    event_type="virustotal_api_error",
+                )
                 return {"error": f"API error: {response.status_code}"}
 
+        except CircuitBreakerOpenError as e:
+            # Circuit breaker is open - service is down
+            log_with_context(
+                logger,
+                logging.ERROR,
+                "VirusTotal API circuit breaker OPEN - service unavailable",
+                url=url,
+                circuit_state="OPEN",
+                event_type="virustotal_circuit_open",
+            )
+            return {
+                "error": "VirusTotal API temporarily unavailable",
+                "status": "circuit_open",
+                "details": str(e),
+            }
+
         except Exception as e:
-            logger.error(f"❌ VirusTotal scan failed for {url}: {e}")
+            log_error(
+                logger,
+                e,
+                {
+                    "url": url,
+                    "api": "VirusTotal",
+                    "operation": "url_scan",
+                    "event_type": "virustotal_scan_failed",
+                },
+            )
             return {"error": str(e)}
 
     @staticmethod
@@ -1052,6 +1207,16 @@ class URLVoidIntegration:
         self.base_url = "https://api.urlvoid.com/v1"
         self.session = requests.Session()
 
+        # Initialize circuit breaker for API resilience (EPIC-004)
+        cb_config = CircuitBreakerConfig(
+            failure_threshold=4,
+            recovery_timeout=90,
+            success_threshold=2,
+            max_retries=2,
+            retry_backoff_base=2.5,
+        )
+        self.circuit_breaker = CircuitBreaker("URLVoid", cb_config, logger)
+
     def analyze_domain(self, domain: str) -> Dict[str, Any]:
         """
         Analyze domain using multiple reputation engines and blocklist services.
@@ -1069,7 +1234,24 @@ class URLVoidIntegration:
         try:
             params = {"key": self.api_key, "host": domain}
 
-            response = self.session.get(f"{self.base_url}/host/{domain}", params=params)
+            # Execute through circuit breaker (EPIC-004)
+            def _make_request():
+                """Internal function for circuit breaker wrapping."""
+                start_time = time.time()
+                response = self.session.get(f"{self.base_url}/host/{domain}", params=params)
+                response_time_ms = int((time.time() - start_time) * 1000)
+                return response, response_time_ms
+
+            response, response_time_ms = self.circuit_breaker.call(_make_request)
+
+            log_api_call(
+                logger,
+                api_name="URLVoid",
+                url=f"{self.base_url}/host/{domain}",
+                status_code=response.status_code,
+                response_time_ms=response_time_ms,
+                target_domain=domain,
+            )
 
             if response.status_code == 200:
                 data = response.json()
@@ -1100,11 +1282,43 @@ class URLVoidIntegration:
                 return result
 
             else:
-                logger.error(f"❌ URLVoid API error for {domain}: {response.status_code}")
+                log_with_context(
+                    logger,
+                    logging.ERROR,
+                    "URLVoid API error",
+                    domain=domain,
+                    status_code=response.status_code,
+                    event_type="urlvoid_api_error",
+                )
                 return {"error": f"API error: {response.status_code}"}
 
+        except CircuitBreakerOpenError as e:
+            # Circuit breaker is open - service is down
+            log_with_context(
+                logger,
+                logging.ERROR,
+                "URLVoid API circuit breaker OPEN - service unavailable",
+                domain=domain,
+                circuit_state="OPEN",
+                event_type="urlvoid_circuit_open",
+            )
+            return {
+                "error": "URLVoid API temporarily unavailable",
+                "status": "circuit_open",
+                "details": str(e),
+            }
+
         except Exception as e:
-            logger.error(f"❌ URLVoid analysis failed for {domain}: {e}")
+            log_error(
+                logger,
+                e,
+                {
+                    "domain": domain,
+                    "api": "URLVoid",
+                    "operation": "domain_analysis",
+                    "event_type": "urlvoid_analysis_failed",
+                },
+            )
             return {"error": str(e)}
 
     @staticmethod
@@ -1151,6 +1365,16 @@ class PhishTankIntegration:
         self.base_url = "https://checkurl.phishtank.com/checkurl/"
         self.session = requests.Session()
 
+        # Initialize circuit breaker for API resilience (EPIC-004)
+        cb_config = CircuitBreakerConfig(
+            failure_threshold=4,
+            recovery_timeout=90,
+            success_threshold=2,
+            max_retries=2,
+            retry_backoff_base=2.0,
+        )
+        self.circuit_breaker = CircuitBreaker("PhishTank", cb_config, logger)
+
     def check_phishing_status(self, url: str) -> Dict[str, Any]:
         """
         Check if URL is in PhishTank verified a phishing database.
@@ -1167,7 +1391,24 @@ class PhishTankIntegration:
             if self.api_key:
                 data["app_key"] = self.api_key
 
-            response = self.session.post(self.base_url, data=data)
+            # Execute through circuit breaker (EPIC-004)
+            def _make_request():
+                """Internal function for circuit breaker wrapping."""
+                start_time = time.time()
+                response = self.session.post(self.base_url, data=data)
+                response_time_ms = int((time.time() - start_time) * 1000)
+                return response, response_time_ms
+
+            response, response_time_ms = self.circuit_breaker.call(_make_request)
+
+            log_api_call(
+                logger,
+                api_name="PhishTank",
+                url=self.base_url,
+                status_code=response.status_code,
+                response_time_ms=response_time_ms,
+                target_url=url,
+            )
 
             if response.status_code == 200:
                 result = response.json()
@@ -1197,11 +1438,43 @@ class PhishTankIntegration:
                     }
 
             else:
-                logger.error(f"❌ PhishTank API error for {url}: {response.status_code}")
+                log_with_context(
+                    logger,
+                    logging.ERROR,
+                    "PhishTank API error",
+                    url=url,
+                    status_code=response.status_code,
+                    event_type="phishtank_api_error",
+                )
                 return {"error": f"API error: {response.status_code}"}
 
+        except CircuitBreakerOpenError as e:
+            # Circuit breaker is open - service is down
+            log_with_context(
+                logger,
+                logging.ERROR,
+                "PhishTank API circuit breaker OPEN - service unavailable",
+                url=url,
+                circuit_state="OPEN",
+                event_type="phishtank_circuit_open",
+            )
+            return {
+                "error": "PhishTank API temporarily unavailable",
+                "status": "circuit_open",
+                "details": str(e),
+            }
+
         except Exception as e:
-            logger.error(f"❌ PhishTank check failed for {url}: {e}")
+            log_error(
+                logger,
+                e,
+                {
+                    "url": url,
+                    "api": "PhishTank",
+                    "operation": "check_phishing_status",
+                    "event_type": "phishtank_check_failed",
+                },
+            )
             return {"error": str(e)}
 
     def submit_phishing_url(self, url: str) -> Dict[str, Any]:
@@ -1301,10 +1574,18 @@ class MultiAPIValidator:
         )
         results["recommendations"] = self._generate_recommendations(vt_result, uv_result, pt_result)
 
-        logger.info(
-            f"✅ Multi-API scan complete for {url}: "
-            f"Threat level: {results['aggregated_threat_level']}, "
-            f"Confidence: {results['confidence_score']}%"
+        log_with_context(
+            logger,
+            logging.INFO,
+            "Multi-API scan completed",
+            url=url,
+            domain=domain,
+            threat_level=results["aggregated_threat_level"],
+            confidence_score=results["confidence_score"],
+            virustotal_threat=vt_result.get("threat_level", "unknown"),
+            urlvoid_safety_score=uv_result.get("safety_score", 0),
+            phishtank_verified=pt_result.get("verified", False),
+            event_type="multi_api_scan_complete",
         )
 
         return results
@@ -3190,11 +3471,26 @@ class DatabaseManager:
                             "source": source,
                         },
                     )
-                    logger.info(f"🚨 NEW PHISHING DETECTION: {url} - Keywords: {keywords_str}")
+                    log_detection(
+                        logger,
+                        url=url,
+                        confidence=50,  # Default confidence for keyword-based detection
+                        keywords=keywords.split(", ") if isinstance(keywords, str) else keywords,
+                        source=source,
+                        timestamp=timestamp,
+                    )
                     return True
 
         except Exception as e:
-            logger.error(f"❌ Failed to store detected phishing site {url}: {e}")
+            log_error(
+                logger,
+                e,
+                {
+                    "url": url,
+                    "operation": "store_detected_phishing_site",
+                    "event_type": "phishing_detection_storage_failed",
+                },
+            )
             return False
 
     def get_pending_analysis_sites(self, limit: int = 10) -> List[Dict[str, Any]]:
@@ -3671,7 +3967,13 @@ class AbuseReportManager:
                 logger.info(f"✅ Using emails without validation: {validated_emails}")
 
                 if not validated_emails:
-                    logger.error("❌ No abuse emails found - cannot send report")
+                    log_with_context(
+                        logger,
+                        logging.ERROR,
+                        "No abuse emails found - cannot send report",
+                        url=site_url,
+                        event_type="no_abuse_emails_found",
+                    )
                     return False
 
                 abuse_emails = validated_emails
@@ -4046,7 +4348,16 @@ class AbuseReportManager:
                 logger.info(f"📊 EMAIL SUCCESS COUNT: {success_count}")
 
             except Exception as e:
-                logger.error(f"❌ Failed to send abuse report to {primary}: {e}")
+                log_error(
+                    logger,
+                    e,
+                    {
+                        "recipient": primary,
+                        "url": site_url,
+                        "operation": "send_abuse_email",
+                        "event_type": "abuse_report_send_failed",
+                    },
+                )
                 continue
 
         # Log final summary before report tracking to identify hang point
@@ -4131,15 +4442,37 @@ class AbuseReportManager:
                             "❌ Database operation timed out - report was sent but not tracked"
                         )
                     except Exception as e:
-                        logger.error(f"❌ Error tracking report: {e}")
+                        log_error(
+                            logger,
+                            e,
+                            {
+                                "url": site_url,
+                                "operation": "track_report",
+                                "event_type": "report_tracking_failed",
+                            },
+                        )
 
                 except Exception as track_error:
-                    logger.warning(
-                        f"⚠️  Report tracking failed (emails were sent successfully): {track_error}"
+                    log_error(
+                        logger,
+                        track_error,
+                        {
+                            "url": site_url,
+                            "operation": "track_report_outer",
+                            "emails_sent": True,
+                            "event_type": "report_tracking_failed_after_send",
+                        },
                     )
 
             except Exception as db_error:
-                logger.error(f"❌ CRITICAL: Failed to mark site as reported: {db_error}")
+                log_with_context(
+                    logger,
+                    logging.ERROR,
+                    "CRITICAL: Failed to mark site as reported - infinite loop risk",
+                    url=site_url,
+                    error=str(db_error),
+                    event_type="critical_db_update_failed",
+                )
                 logger.error("❌ This will cause infinite loop - site will be processed again!")
                 import traceback
 
@@ -6019,7 +6352,15 @@ class PhishingScanner:
                     self.total_queries = sum(1 for _ in f)
                 logger.info(f"📊 Total queries in file: {self.total_queries}")
             except Exception as ex:
-                logger.error(f"❌ Error counting total queries: {ex}")
+                log_error(
+                    logger,
+                    ex,
+                    {
+                        "queries_file": QUERIES_FILE,
+                        "operation": "count_queries",
+                        "event_type": "query_count_failed",
+                    },
+                )
                 self.total_queries = 0
 
     def get_dynamic_target_sites(self) -> List[str]:
@@ -7271,10 +7612,21 @@ def main():
     """Main entry point with enhanced Grinder integration."""
     args = parse_arguments()
     log_level = args.log_level or getattr(settings, "LOG_LEVEL", None) or "INFO"
-    logger.setLevel(log_level)
 
-    logger.debug("🚀 Anisakys with Grinder integration starting up...")
-    logger.debug(f"⚙️  Arguments: {vars(args)}")
+    # Setup structured logging (replaces basic logger configuration)
+    setup_structured_logging(log_level=log_level)
+
+    # Generate correlation ID for this execution
+    correlation_id = set_correlation_id()
+
+    log_with_context(
+        logger,
+        logging.INFO,
+        "Anisakys with Grinder integration starting up",
+        correlation_id=correlation_id,
+        log_level=log_level,
+        arguments=vars(args),
+    )
 
     # Handle test Grinder integration command
     if getattr(args, "test_grinder_integration", False):
