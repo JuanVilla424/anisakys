@@ -67,6 +67,7 @@ from src.circuit_breaker import (
 from src.detection.redirect_analyzer import RedirectAnalyzer, RedirectChain
 from src.intelligence.abuse_contact_resolver import AbuseContactResolver
 from src.generators.query_generator import generate_queries_file
+from src.dns.network_utils import get_ip_info, is_cloudflare_ip
 from src.screenshot_service import ScreenshotService
 
 # Global testing mode detection - independent of test_mode (used for screenshots)
@@ -5952,30 +5953,9 @@ class AutoPhishingAnalyzer:
             return 0
 
 
-def get_ip_info(domain: str) -> Tuple[Optional[str], Optional[str]]:
-    """Get IP address and ASN provider information for a domain."""
-    try:
-        resolved_ip = socket.gethostbyname(domain)
-        obj = IPWhois(resolved_ip)
-        res = obj.lookup_rdap(depth=1)
-        asn_provider = res.get("network", {}).get("name", "")
-        return resolved_ip, asn_provider
-    except Exception as e:
-        logger.error(f"❌ Failed to get IP info for {domain}: {e}")
-        return None, None
-
-
-def is_cloudflare_ip(ip: str) -> bool:
-    """Check if an IP address belongs to Cloudflare."""
-    try:
-        ip_obj = ipaddress.ip_address(ip)
-        for net in CLOUDFLARE_IP_RANGES:
-            if ip_obj in net:
-                return True
-        return False
-    except Exception as e:
-        logger.error(f"❌ Error checking Cloudflare IP: {e}")
-        return False
+# EPIC-006: Functions moved to src/dns/network_utils.py
+# - get_ip_info()
+# - is_cloudflare_ip()
 
 
 class PhishingUtils:
