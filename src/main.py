@@ -64,6 +64,7 @@ from src.circuit_breaker import (
     CircuitBreakerConfig,
     CircuitBreakerOpenError,
 )
+from src.detection.redirect_analyzer import RedirectAnalyzer, RedirectChain
 from src.screenshot_service import ScreenshotService
 
 # Global testing mode detection - independent of test_mode (used for screenshots)
@@ -141,6 +142,11 @@ AUTO_ANALYSIS_ENABLED = AUTO_MULTI_API_SCAN and (
 
 # Grinder integration is enabled if both URL and API key are configured
 GRINDER_INTEGRATION_ENABLED = bool(GRINDER0X_API_URL and GRINDER0X_API_KEY)
+
+# Redirect Analysis Configuration (EPIC-001)
+ENABLE_REDIRECT_ANALYSIS = getattr(settings, "ENABLE_REDIRECT_ANALYSIS", True)
+MAX_REDIRECT_HOPS = getattr(settings, "MAX_REDIRECT_HOPS", 5)
+REDIRECT_TIMEOUT_PER_HOP = getattr(settings, "REDIRECT_TIMEOUT_PER_HOP", 10)
 
 
 # Constants
@@ -6334,6 +6340,18 @@ class PhishingScanner:
         else:
             logger.debug("ℹ️  Auto-analysis disabled, skipping database manager for scanner")
 
+        # Initialize Redirect Analyzer (EPIC-001)
+        self.redirect_analyzer = None
+        if ENABLE_REDIRECT_ANALYSIS:
+            self.redirect_analyzer = RedirectAnalyzer(
+                max_hops=MAX_REDIRECT_HOPS, timeout_per_hop=REDIRECT_TIMEOUT_PER_HOP
+            )
+            logger.info(
+                f"🔗 Redirect analysis enabled (max_hops={MAX_REDIRECT_HOPS}, timeout={REDIRECT_TIMEOUT_PER_HOP}s)"
+            )
+        else:
+            logger.debug("ℹ️  Redirect analysis disabled")
+
         if args.test_report:
             logger.info("🧪 Test report mode active: Skipping queries file generation.")
             self.total_queries = 0
@@ -6484,8 +6502,39 @@ class PhishingScanner:
             logger.info(f"🔍 Scanning {url} for keywords: {self.keywords}")
             try:
                 headers = BROWSER_HEADERS.copy()
+
+                # EPIC-001: Analyze redirect chain if enabled
+                redirect_chain = None
+                final_url = url
+                if self.redirect_analyzer:
+                    try:
+                        redirect_chain = self.redirect_analyzer.analyze(url, headers=headers)
+                        final_url = redirect_chain.final_url
+
+                        log_with_context(
+                            logger,
+                            "info",
+                            f"Redirect analysis complete: {redirect_chain.hop_count} hops, risk_score={redirect_chain.risk_score}",
+                            {
+                                "original_url": url,
+                                "final_url": final_url,
+                                "hop_count": redirect_chain.hop_count,
+                                "risk_score": redirect_chain.risk_score,
+                                "has_cloudflare": redirect_chain.has_cloudflare,
+                                "has_suspicious_tld": redirect_chain.has_suspicious_tld,
+                                "event_type": "redirect_analysis_complete",
+                            },
+                        )
+                    except Exception as redirect_error:
+                        log_error(
+                            logger,
+                            redirect_error,
+                            {"url": url, "event_type": "redirect_analysis_failed"},
+                        )
+
+                # Fetch content (use final URL if redirects were analyzed)
                 response = requests.get(
-                    url, timeout=self.timeout, headers=headers, allow_redirects=True
+                    final_url, timeout=self.timeout, headers=headers, allow_redirects=False
                 )
                 response.raise_for_status()
                 code = response.status_code
@@ -6537,6 +6586,71 @@ class PhishingScanner:
 
                             if stored:
                                 logger.info(f"📥 Queued for auto-analysis: {url}")
+
+                                # EPIC-001: Store redirect chain if analyzed
+                                if redirect_chain and redirect_chain.hop_count > 0:
+                                    try:
+                                        # Get site_id from the stored detection
+                                        with self.db_manager.engine.begin() as conn:
+                                            site_result = conn.execute(
+                                                text(
+                                                    "SELECT id FROM phishing_sites WHERE url = :url ORDER BY id DESC LIMIT 1"
+                                                ),
+                                                {"url": url},
+                                            ).fetchone()
+
+                                            if site_result:
+                                                site_id = site_result[0]
+
+                                                # Insert redirect chain
+                                                conn.execute(
+                                                    text(
+                                                        """
+                                                        INSERT INTO redirect_chains (
+                                                            site_id, original_url, final_url, hop_count,
+                                                            chain_urls, status_codes, risk_score,
+                                                            has_cloudflare, has_suspicious_tld, has_url_shortener,
+                                                            has_cross_domain, has_loop, total_time_ms, analyzed_at
+                                                        ) VALUES (
+                                                            :site_id, :original_url, :final_url, :hop_count,
+                                                            :chain_urls::jsonb, :status_codes::jsonb, :risk_score,
+                                                            :has_cloudflare, :has_suspicious_tld, :has_url_shortener,
+                                                            :has_cross_domain, :has_loop, :total_time_ms, NOW()
+                                                        )
+                                                    """
+                                                    ),
+                                                    {
+                                                        "site_id": site_id,
+                                                        "original_url": redirect_chain.original_url,
+                                                        "final_url": redirect_chain.final_url,
+                                                        "hop_count": redirect_chain.hop_count,
+                                                        "chain_urls": json.dumps(
+                                                            redirect_chain.chain_urls
+                                                        ),
+                                                        "status_codes": json.dumps(
+                                                            redirect_chain.status_codes
+                                                        ),
+                                                        "risk_score": redirect_chain.risk_score,
+                                                        "has_cloudflare": redirect_chain.has_cloudflare,
+                                                        "has_suspicious_tld": redirect_chain.has_suspicious_tld,
+                                                        "has_url_shortener": redirect_chain.has_url_shortener,
+                                                        "has_cross_domain": redirect_chain.has_cross_domain,
+                                                        "has_loop": redirect_chain.has_loop,
+                                                        "total_time_ms": redirect_chain.total_time_ms,
+                                                    },
+                                                )
+                                                logger.info(
+                                                    f"🔗 Stored redirect chain for site_id={site_id}: {redirect_chain.hop_count} hops, risk={redirect_chain.risk_score}"
+                                                )
+                                    except Exception as chain_error:
+                                        log_error(
+                                            logger,
+                                            chain_error,
+                                            {
+                                                "url": url,
+                                                "event_type": "redirect_chain_storage_failed",
+                                            },
+                                        )
 
                             # Immediate analysis for critical keywords
                             critical_keywords = [
