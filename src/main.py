@@ -65,6 +65,7 @@ from src.circuit_breaker import (
     CircuitBreakerOpenError,
 )
 from src.detection.redirect_analyzer import RedirectAnalyzer, RedirectChain
+from src.intelligence.abuse_contact_resolver import AbuseContactResolver
 from src.screenshot_service import ScreenshotService
 
 # Global testing mode detection - independent of test_mode (used for screenshots)
@@ -2127,8 +2128,10 @@ class EnhancedAbuseEmailDetector:
                     else:
                         logger.warning(f"⚠️  No ASN abuse email found for ASN: {asn}")
 
-                        # Try provider-based fallback if ASN lookup failed
-                        provider_abuse_emails = self.get_abuse_email_by_provider(provider_name)
+                        # EPIC-005: Try provider-based fallback if ASN lookup failed using resolver
+                        provider_abuse_emails = self.abuse_resolver.resolve(
+                            provider_name=provider_name, target_domain=domain
+                        )
                         if provider_abuse_emails:
                             for email in provider_abuse_emails:
                                 if email and self.validate_abuse_email_domain(email, domain):
@@ -2378,193 +2381,33 @@ class EnhancedAbuseEmailDetector:
 
             logger.info(f"🏢 Provider: {provider_name}, ASN: {asn}")
 
-            # Get ASN abuse email from our database
-            asn_abuse_emails = []
-            if asn_clean:
-                asn_emails = self.get_abuse_email_by_asn(asn_clean)
-                if asn_emails:
-                    asn_abuse_emails.extend(asn_emails)
-                    logger.info(f"🏷️  Found ASN abuse email(s) in database for {asn}: {asn_emails}")
-                else:
-                    logger.warning(f"⚠️  No ASN abuse email found in database for {asn}")
+            # EPIC-005: Use AbuseContactResolver to get all abuse emails
+            # This consolidates ASN, provider, and WHOIS lookups with deduplication
+            all_abuse_emails = self.abuse_resolver.resolve(
+                asn=asn_clean if asn_clean else None,
+                provider_name=provider_name if provider_name != "Unknown" else None,
+                whois_data=res,
+                target_domain=None,  # No domain filtering at this stage
+            )
 
-                    # Try provider-based fallback if ASN lookup failed
-                    if provider_name:
-                        provider_fallback_emails = self.get_abuse_email_by_provider(provider_name)
-                        if provider_fallback_emails:
-                            asn_abuse_emails.extend(provider_fallback_emails)
-                            logger.info(
-                                f"✅ Found provider fallback abuse emails for {provider_name}: {provider_fallback_emails}"
-                            )
-
-            # Set asn_abuse_email for backward compatibility (use first email)
-            asn_abuse_email = asn_abuse_emails[0] if asn_abuse_emails else None
-
-            # Look for provider abuse emails in the WHOIS data
-            provider_abuse_emails = []
-
-            # Check abuse contacts in RDAP objects
-            objects = res.get("objects", {})
-            if objects and isinstance(objects, dict):
-                for contact_id, contact_data in objects.items():
-                    if isinstance(contact_data, dict):
-                        contact_info = contact_data.get("contact", {})
-                        if contact_info and isinstance(contact_info, dict):
-                            # Check a role for abuse
-                            role = str(contact_info.get("role", "")).lower()
-                            if "abuse" in role:
-                                email = contact_info.get("email")
-                                if email:
-                                    if isinstance(email, list):
-                                        provider_abuse_emails.extend(email)
-                                    else:
-                                        provider_abuse_emails.append(email)
-                                    logger.info(f"🔍 Found abuse contact in RDAP objects: {email}")
-
-            # Look for abuse emails in remarks or other fields
-            if network_info and isinstance(network_info, dict):
-                remarks = network_info.get("remarks", [])
-                if remarks and isinstance(remarks, list):
-                    for remark in remarks:
-                        if isinstance(remark, dict):
-                            title = remark.get("title") or ""
-                            description = remark.get("description", [])
-                            if title and "abuse" in str(title).lower():
-                                if isinstance(description, list):
-                                    for desc in description:
-                                        if desc:
-                                            emails = re.findall(
-                                                r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}",
-                                                str(desc),
-                                            )
-                                            provider_abuse_emails.extend(emails)
-                                            if emails:
-                                                logger.info(
-                                                    f"🔍 Found abuse email in remarks: {emails}"
-                                                )
-
-            # Look for abuse emails in events or entities
-            entities = res.get("entities", [])
-            if entities and isinstance(entities, list):
-                for entity in entities:
-                    if isinstance(entity, dict):
-                        roles = entity.get("roles", [])
-                        if roles and isinstance(roles, list) and "abuse" in roles:
-                            # This entity has an abuse role
-                            events = entity.get("events", [])
-                            contact = entity.get("contact", {})
-                            if contact and isinstance(contact, dict):
-                                email = contact.get("email")
-                                if email:
-                                    if isinstance(email, list):
-                                        provider_abuse_emails.extend(email)
-                                    else:
-                                        provider_abuse_emails.append(email)
-                                    logger.info(f"🔍 Found abuse entity contact: {email}")
-
-            # Filter and validate provider emails
-            valid_provider_emails = []
-            for email in provider_abuse_emails:
-                if email and self.validate_email(str(email)):
-                    valid_provider_emails.append(str(email))
-
-            provider_abuse_email = valid_provider_emails[0] if valid_provider_emails else None
-
-            if provider_abuse_email:
-                logger.info(f"✅ Final provider abuse email: {provider_abuse_email}")
-            else:
-                logger.warning(f"⚠️  No valid provider abuse email found in WHOIS data")
+            # For backward compatibility, extract first email for legacy fields
+            asn_abuse_email = all_abuse_emails[0] if all_abuse_emails else None
+            provider_abuse_email = all_abuse_emails[0] if all_abuse_emails else None
 
             logger.info(
                 f"📊 IP {ip} analysis complete: Provider={provider_name}, ASN={asn}, "
-                f"Provider abuse={provider_abuse_email}, ASN abuse={asn_abuse_email}"
+                f"Resolved {len(all_abuse_emails)} abuse contact(s): {all_abuse_emails[:3]}{'...' if len(all_abuse_emails) > 3 else ''}"
             )
 
-            # Return all ASN abuse emails, not just the first one
-            return provider_name, provider_abuse_email, asn, asn_abuse_emails
+            # Return: provider_name, provider_abuse_email, asn, all_abuse_emails
+            return provider_name, provider_abuse_email, asn, all_abuse_emails
 
         except Exception as e:
             logger.error(f"❌ Failed to get hosting provider info for IP {ip}: {e}")
             return None, None, None, None
 
-    @staticmethod
-    def get_abuse_email_by_asn(asn: str) -> Optional[List[str]]:
-        """
-        Get abuse email(s) from an ASN database.
-
-        Args:
-            asn (str): ASN number (with or without 'AS' prefix)
-
-        Returns:
-            Optional[List[str]]: List of abuse emails if found, None otherwise
-        """
-        # Normalize ASN (remove AS prefix if present)
-        asn_clean = asn.replace("AS", "").strip()
-
-        # EPIC-005: All entries are now lists
-        abuse_emails = ASN_ABUSE_EMAIL_DB.get(asn_clean)
-        if abuse_emails:
-            logger.info(f"🏷️  Found ASN abuse email(s) for AS{asn_clean}: {abuse_emails}")
-            return abuse_emails
-
-        # Also try with AS prefix in case the database has inconsistent keys
-        abuse_emails = ASN_ABUSE_EMAIL_DB.get(f"AS{asn_clean}")
-        if abuse_emails:
-            logger.info(f"🏷️  Found ASN abuse email(s) for AS{asn_clean}: {abuse_emails}")
-            return abuse_emails
-
-        logger.debug(f"⚠️  No ASN abuse email found for AS{asn_clean}")
-        return None
-
-    @staticmethod
-    def get_abuse_email_by_provider(provider_name: str) -> Optional[List[str]]:
-        """
-        Get abuse email(s) from a provider name database.
-
-        Args:
-            provider_name (str): Provider name (e.g., "HOSTINGER-HOSTING", "DIGITALOCEAN")
-
-        Returns:
-            Optional[List[str]]: List of abuse emails if found, None otherwise
-        """
-        if not provider_name:
-            return None
-
-        # Normalize provider name (uppercase, remove common suffixes)
-        provider_clean = provider_name.upper().strip()
-
-        # EPIC-005: All entries are now lists
-        # Try exact match first
-        abuse_emails = PROVIDER_ABUSE_EMAIL_DB.get(provider_clean)
-        if abuse_emails:
-            # Filter out invalid entries like "abuse@"
-            valid_emails = [
-                email
-                for email in abuse_emails
-                if email and "@" in email and not email.endswith("@")
-            ]
-            if valid_emails:
-                logger.info(
-                    f"🏢 Found provider abuse email(s) for {provider_clean}: {valid_emails}"
-                )
-                return valid_emails
-
-        # Try partial matching for providers with variable suffixes
-        for provider_key, email_list in PROVIDER_ABUSE_EMAIL_DB.items():
-            if provider_key in provider_clean or provider_clean in provider_key:
-                valid_emails = [
-                    email
-                    for email in email_list
-                    if email and "@" in email and not email.endswith("@")
-                ]
-                if valid_emails:
-                    logger.info(
-                        f"🏢 Found provider abuse email(s) via partial match ({provider_clean} -> {provider_key}): {valid_emails}"
-                    )
-                    return valid_emails
-
-        logger.debug(f"⚠️  No provider abuse email found for {provider_clean}")
-        return None
+    # EPIC-005: Removed get_abuse_email_by_asn() and get_abuse_email_by_provider()
+    # These are now handled by AbuseContactResolver class in src/intelligence/
 
     @staticmethod
     def get_enhanced_whois_info(domain: str) -> dict:
@@ -6345,6 +6188,15 @@ class PhishingScanner:
             )
         else:
             logger.debug("ℹ️  Redirect analysis disabled")
+
+        # Initialize Abuse Contact Resolver (EPIC-005)
+        self.abuse_resolver = AbuseContactResolver(
+            asn_db=ASN_ABUSE_EMAIL_DB,
+            provider_db=PROVIDER_ABUSE_EMAIL_DB,
+            validate_domains=True,
+            max_contacts=10,
+        )
+        logger.info("📧 Abuse contact resolver initialized (multi-contact support)")
 
         if args.test_report:
             logger.info("🧪 Test report mode active: Skipping queries file generation.")
