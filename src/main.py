@@ -66,6 +66,7 @@ from src.circuit_breaker import (
 )
 from src.detection.redirect_analyzer import RedirectAnalyzer, RedirectChain
 from src.intelligence.abuse_contact_resolver import AbuseContactResolver
+from src.generators.query_generator import generate_queries_file
 from src.screenshot_service import ScreenshotService
 
 # Global testing mode detection - independent of test_mode (used for screenshots)
@@ -6137,17 +6138,7 @@ class PhishingUtils:
         return new_status, new_takedown
 
 
-def generate_queries_file(keywords: List[str], domains: List[str]) -> None:
-    """Generate a query file with all keyword/domain combinations."""
-    total = 0
-    with open(QUERIES_FILE, "w") as f:
-        for i in range(1, len(keywords) + 1):
-            for p in permutations(keywords, i):
-                for q in ["-".join(p), "".join(p)]:
-                    for d in domains:
-                        f.write(f"{q}{d}\n")
-                        total += 1
-    logger.info(f"📄 Generated full query list with {total} lines.")
+# EPIC-006: generate_queries_file moved to src/generators/query_generator.py
 
 
 class PhishingScanner:
@@ -6205,7 +6196,7 @@ class PhishingScanner:
             if not args.threads_only:
                 if args.regen_queries or not os.path.exists(QUERIES_FILE):
                     logger.info(f"📄 Generating queries file {QUERIES_FILE}...")
-                    generate_queries_file(self.keywords, self.domains)
+                    generate_queries_file(self.keywords, self.domains, QUERIES_FILE)
                 else:
                     logger.info(f"📄 Using existing {QUERIES_FILE} file.")
             else:
