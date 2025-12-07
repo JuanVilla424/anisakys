@@ -43,6 +43,7 @@ from sqlalchemy import create_engine, text
 from flask import Flask, request, jsonify
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from flask_cors import CORS
 import logging as flask_logging
 from functools import wraps
 import signal
@@ -2425,6 +2426,17 @@ class PhishingAPI:
         self.app = Flask(__name__)
         self.app.config["JSON_SORT_KEYS"] = False
         self.app.api_key = api_key  # Store API key in-app config
+
+        # Enable CORS for frontend integration
+        CORS(self.app, resources={
+            r"/api/*": {
+                "origins": ["http://localhost:3000", "http://localhost:5173"],
+                "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                "allow_headers": ["Content-Type", "Authorization"],
+                "expose_headers": ["Content-Type"],
+                "supports_credentials": True
+            }
+        })
 
         # Configure Flask logging to be less verbose
         flask_logging.getLogger("werkzeug").setLevel(flask_logging.WARNING)

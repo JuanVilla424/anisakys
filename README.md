@@ -210,6 +210,48 @@ The system automatically calculates:
 - 📈 **Comprehensive Logging**: Detailed audit trails and monitoring
 - ⚙️ **Flexible Configuration**: Environment-based settings management
 
+### 🌐 Web Interface
+
+Anisakys now includes a modern, professional web interface for monitoring, management, and threat analysis:
+
+<table>
+<tr>
+<td width="50%">
+
+#### 📊 **Dashboard & Monitoring**
+
+- **Real-time Statistics** - Live threat metrics and system health
+- **Activity Timeline** - Visual charts of scans, detections, and reports
+- **Threat Distribution** - Severity level breakdown
+- **Top Keywords & TLDs** - Most targeted patterns
+- **Recent Activity Feed** - Latest system events
+
+</td>
+<td width="50%">
+
+#### 🔍 **Analysis & Management**
+
+- **URL Scanner** - Manual multi-API threat analysis
+- **Report Management** - ICANN compliance tracking
+- **Threat Analytics** - Geographic distribution and trends
+- **Configuration Panel** - API integrations and settings
+- **Responsive Design** - Mobile and desktop support
+
+</td>
+</tr>
+</table>
+
+**Tech Stack**: React 18 + TypeScript, Vite, Tailwind CSS, TanStack Query, Recharts
+
+**Quick Start**:
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+See [frontend/README.md](frontend/README.md) for detailed documentation.
+
 ## 🚀 Getting Started
 
 ### 📋 Prerequisites
