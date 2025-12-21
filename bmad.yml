@@ -1,0 +1,173 @@
+---
+# BMad Configuration
+# Root configuration for BMader project template
+# This file can be copied to other projects to bootstrap them with BMad
+
+project:
+  name: "bmader"
+  version: "1.0.1"
+  description: "BMad template project with integrated protocols and agent configurations"
+  author: "BMad Team"
+
+# Project structure
+structure:
+  root: "/opt/bmader"
+  bmad_core: "src"  # BMAD-METHOD as git submodule
+  scripts: "scripts"  # Utility scripts as git submodule
+  ai_configs: ".ai"  # AI configuration files
+  claude_configs: ".claude"  # Claude Code specific configs
+  documentation: "docs"  # Project documentation
+  protocols: "protocols"  # Shared protocols for all agents
+  temp: "temp"  # Temporary workspace and current context
+
+# Git submodules configuration
+submodules:
+  - name: "src"
+    url: "https://github.com/bmad-code-org/BMAD-METHOD.git"
+    branch: "main"
+    description: "BMad Method core framework"
+
+  - name: "scripts"
+    url: "https://github.com/JuanVilla424/scripts.git"
+    branch: "main"
+    description: "Utility scripts for automation"
+
+# Protocols configuration
+# All agents should load these protocols at runtime
+protocols:
+  versioning:
+    path: "protocols/versioning.md"
+    description: "Semantic versioning and branch flow protocol"
+    required: true
+    scope: "all"  # All agents must load this
+
+  file_management:
+    path: "protocols/file-management.md"
+    description: "STRICT rules on file creation - NO unnecessary files"
+    required: true
+    scope: "all"  # CRITICAL: All agents MUST follow this
+    priority: "critical"
+
+  # Add more protocols here as they are created
+  # Example:
+  # code_style:
+  #   path: "protocols/code-style.md"
+  #   description: "Code formatting and style guidelines"
+  #   required: true
+  #   scope: "development"
+
+# Agent configuration
+agents:
+  # Default settings for all agents
+  defaults:
+    load_protocols: true
+    protocol_loading_strategy: "runtime"  # Load at runtime, never pre-load
+    communication_style: "direct"
+    protocol_scope: "all"  # Load all protocols by default
+
+  # Agent-specific overrides
+  custom:
+    bmad-master:
+      protocols: ["versioning", "file_management"]  # Specific protocols for this agent
+      strict_mode: true  # Enforce all rules strictly
+
+# Runtime variables that agents should use
+runtime:
+  project_root: "{project-root}"
+  project_name: "bmader"
+  output_folder: "output"
+  temp_folder: "temp"  # Temporary workspace
+  current_context: "temp/current-context"  # Current session context
+  temp_cache: "temp/cache"  # Temporary cache
+  temp_logs: "temp/logs"  # Execution logs
+  user_name: "{user_name}"
+  communication_language: "español"  # Default language
+
+# Workflow configuration
+workflows:
+  manifest_path: "src/src/core/_config/workflow-manifest.csv"
+  custom_workflows: "workflows"  # Custom workflows directory (if needed)
+
+# Task configuration
+tasks:
+  manifest_path: "src/src/core/_config/task-manifest.csv"
+
+# Installation instructions
+installation:
+  steps:
+    - "Clone this repository"
+    - "Initialize git submodules: git submodule update --init --recursive"
+    - "Install BMad Method: npx bmad-method@alpha install"
+    - "Copy this bmad.yml to your project root"
+    - "Copy the protocols/ directory to your project"
+    - "Copy .ai/, .claude/, docs/ directories as needed"
+    - "Update bmad.yml with your project-specific settings"
+
+# Version management
+versioning:
+  system: "semantic"  # Semantic versioning (MAJOR.MINOR.PATCH)
+  config_file: ".bumpversion.cfg"
+  workflow_file: ".github/workflows/version-controller.yml"
+  branch_flow: ["dev", "test", "prod", "main"]
+  auto_pr: true
+  auto_tag: true
+
+# CI/CD Configuration
+ci_cd:
+  platform: "github_actions"
+  workflows:
+    - ".github/workflows/version-controller.yml"
+    - ".github/workflows/release-controller.yml"
+    - ".github/workflows/python.yml"
+    - ".github/workflows/ci.yml"
+    - ".github/workflows/node.yml"
+
+# Dependencies
+dependencies:
+  python:
+    - "bump2version"
+    - "toml"
+    - "poetry"
+
+  node:
+    - "bmad-method@alpha"
+
+# Notes for users copying this template
+notes: |
+  This bmad.yml file serves as a template for bootstrapping new projects with BMad.
+
+  When copying to a new project:
+  1. Update the 'project' section with your project details
+  2. Adjust paths in 'structure' if needed
+  3. Remove or update 'submodules' section based on your needs
+  4. Copy the 'protocols/' directory to your project
+  5. Copy the 'temp/' directory structure (it's already in .gitignore)
+  6. Ensure agents are configured to load protocols at runtime
+  7. Update 'runtime.project_name' and other runtime variables
+  8. Configure versioning for your repository
+
+  All agents should follow these principles:
+  - Load resources at runtime, never pre-load
+  - Always present numbered lists for choices
+  - Load all required protocols defined in this file
+  - Respect the communication language setting
+  - Follow the versioning protocol strictly
+  - Use temp/current-context for session state and context
+  - Never version temp/ contents (already in .gitignore)
+
+  FILE CREATION RULES (CRITICAL - protocols/file-management.md):
+  - NEVER create status/confirmation files (SETUP-COMPLETE.md, TASK-DONE.md, etc.)
+  - NEVER create summaries/reports outside of temp/
+  - NEVER create documentation unless explicitly requested
+  - ONLY create: code, config, tests, or files in temp/
+  - When in doubt: respond to user directly, DON'T create a file
+  - ALL temporary/tracking files MUST go in temp/
+  - Read protocols/file-management.md for complete rules
+
+  GIT COMMIT RULES (CRITICAL - protocols/versioning.md):
+  - ALWAYS follow this workflow: git add . && pre-commit run --all-files && git commit && git push && git push
+  - Commit format: "tipo(scope): mensaje en inglés en minúsculas"
+  - Examples: "feat(core): add authentication", "fix(api): resolve null pointer"
+  - ALWAYS git push TWICE (required by scripts/ configuration)
+  - Message MUST be in English and lowercase
+  - MUST have type and scope

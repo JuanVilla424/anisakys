@@ -2428,15 +2428,18 @@ class PhishingAPI:
         self.app.api_key = api_key  # Store API key in-app config
 
         # Enable CORS for frontend integration
-        CORS(self.app, resources={
-            r"/api/*": {
-                "origins": ["http://localhost:3000", "http://localhost:5173"],
-                "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-                "allow_headers": ["Content-Type", "Authorization"],
-                "expose_headers": ["Content-Type"],
-                "supports_credentials": True
-            }
-        })
+        CORS(
+            self.app,
+            resources={
+                r"/api/*": {
+                    "origins": ["http://localhost:3000", "http://localhost:5173"],
+                    "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+                    "allow_headers": ["Content-Type", "Authorization"],
+                    "expose_headers": ["Content-Type"],
+                    "supports_credentials": True,
+                }
+            },
+        )
 
         # Configure Flask logging to be less verbose
         flask_logging.getLogger("werkzeug").setLevel(flask_logging.WARNING)
@@ -2714,6 +2717,220 @@ class PhishingAPI:
                 ),
                 200,
             )
+
+        @self.app.route("/api/v1/analytics/chart", methods=["GET"])
+        @require_api_key
+        def get_chart_data():
+            """Get chart data for analytics."""
+            try:
+                period = request.args.get("period", "week")
+                days = {"day": 1, "week": 7, "month": 30}.get(period, 7)
+
+                with self.db_manager.engine.begin() as conn:
+                    # Generate date range
+                    end_date = datetime.datetime.now()
+                    start_date = end_date - datetime.timedelta(days=days)
+
+                    # Get daily stats
+                    result = conn.execute(
+                        text(
+                            """
+                            SELECT
+                                DATE(first_seen) as date,
+                                COUNT(*) as scans,
+                                SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) as detections,
+                                SUM(CASE WHEN status = 'reported' THEN 1 ELSE 0 END) as reports
+                            FROM phishing_sites
+                            WHERE first_seen >= :start_date
+                            GROUP BY DATE(first_seen)
+                            ORDER BY date
+                        """
+                        ),
+                        {"start_date": start_date.strftime("%Y-%m-%d %H:%M:%S")},
+                    ).fetchall()
+
+                    chart_data = [
+                        {"date": row[0], "scans": row[1], "detections": row[2], "reports": row[3]}
+                        for row in result
+                    ]
+
+                    return jsonify(chart_data), 200
+
+            except Exception as e:
+                logger.error(f"❌ API error in get_chart_data: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        @self.app.route("/api/v1/analytics/threat-map", methods=["GET"])
+        @require_api_key
+        def get_threat_map():
+            """Get threat map data."""
+            try:
+                with self.db_manager.engine.begin() as conn:
+                    result = conn.execute(
+                        text(
+                            """
+                            SELECT
+                                ip_address as ip,
+                                'Unknown' as country,
+                                0 as latitude,
+                                0 as longitude,
+                                COUNT(*) as threat_count,
+                                MAX(last_seen) as last_seen
+                            FROM phishing_sites
+                            WHERE ip_address IS NOT NULL
+                            GROUP BY ip_address
+                            ORDER BY threat_count DESC
+                            LIMIT 50
+                        """
+                        )
+                    ).fetchall()
+
+                    threat_map = [
+                        {
+                            "ip": row[0],
+                            "country": row[1],
+                            "latitude": row[2],
+                            "longitude": row[3],
+                            "threat_count": row[4],
+                            "last_seen": row[5],
+                        }
+                        for row in result
+                    ]
+
+                    return jsonify(threat_map), 200
+
+            except Exception as e:
+                logger.error(f"❌ API error in get_threat_map: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        @self.app.route("/api/v1/sites", methods=["GET"])
+        @require_api_key
+        def get_sites():
+            """Get phishing sites list."""
+            try:
+                limit = request.args.get("limit", 100, type=int)
+                offset = request.args.get("offset", 0, type=int)
+                status_filter = request.args.get("status")
+                threat_level = request.args.get("threat_level")
+
+                with self.db_manager.engine.begin() as conn:
+                    # Build query
+                    where_clauses = []
+                    params = {"limit": limit, "offset": offset}
+
+                    if status_filter:
+                        where_clauses.append("status = :status")
+                        params["status"] = status_filter
+
+                    if threat_level:
+                        where_clauses.append("threat_level = :threat_level")
+                        params["threat_level"] = threat_level
+
+                    where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+
+                    # Get total count
+                    total = conn.execute(
+                        text(f"SELECT COUNT(*) FROM phishing_sites WHERE {where_sql}"), params
+                    ).scalar()
+
+                    # Get sites
+                    result = conn.execute(
+                        text(
+                            f"""
+                            SELECT id, url, status, threat_level, confidence_score,
+                                   abuse_email, first_seen, last_seen, ip_address
+                            FROM phishing_sites
+                            WHERE {where_sql}
+                            ORDER BY last_seen DESC
+                            LIMIT :limit OFFSET :offset
+                        """
+                        ),
+                        params,
+                    ).fetchall()
+
+                    sites = [
+                        {
+                            "id": row[0],
+                            "url": row[1],
+                            "status": row[2],
+                            "threat_level": row[3],
+                            "confidence_score": float(row[4]) if row[4] else 0,
+                            "abuse_email": row[5],
+                            "first_seen": row[6],
+                            "last_seen": row[7],
+                            "ip_address": row[8],
+                        }
+                        for row in result
+                    ]
+
+                    return jsonify({"sites": sites, "total": total}), 200
+
+            except Exception as e:
+                logger.error(f"❌ API error in get_sites: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        @self.app.route("/api/v1/reports", methods=["GET"])
+        @require_api_key
+        def get_reports():
+            """Get reports list."""
+            try:
+                limit = request.args.get("limit", 100, type=int)
+                offset = request.args.get("offset", 0, type=int)
+
+                with self.db_manager.engine.begin() as conn:
+                    # Get total count
+                    total = conn.execute(text("SELECT COUNT(*) FROM report_tracking")).scalar()
+
+                    # Get reports
+                    result = conn.execute(
+                        text(
+                            """
+                            SELECT id, url, abuse_email, status, response_received,
+                                   sent_timestamp, response_timestamp
+                            FROM report_tracking
+                            ORDER BY sent_timestamp DESC
+                            LIMIT :limit OFFSET :offset
+                        """
+                        ),
+                        {"limit": limit, "offset": offset},
+                    ).fetchall()
+
+                    reports = [
+                        {
+                            "id": row[0],
+                            "url": row[1],
+                            "abuse_email": row[2],
+                            "status": row[3],
+                            "response_received": bool(row[4]),
+                            "sent_timestamp": row[5],
+                            "response_timestamp": row[6],
+                        }
+                        for row in result
+                    ]
+
+                    return jsonify({"reports": reports, "total": total}), 200
+
+            except Exception as e:
+                logger.error(f"❌ API error in get_reports: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        @self.app.route("/api/v1/config", methods=["GET"])
+        @require_api_key
+        def get_config():
+            """Get system configuration."""
+            try:
+                config = {
+                    "smtp_host": os.getenv("SMTP_HOST", "localhost"),
+                    "smtp_port": int(os.getenv("SMTP_PORT", 1125)),
+                    "abuse_email_sender": os.getenv("ABUSE_EMAIL_SENDER", "abuse@example.com"),
+                    "grinder_integration_enabled": GRINDER_INTEGRATION_ENABLED,
+                    "api_authentication_enabled": bool(self.api_key),
+                }
+                return jsonify(config), 200
+
+            except Exception as e:
+                logger.error(f"❌ API error in get_config: {e}")
+                return jsonify({"error": "Internal server error"}), 500
 
     @timeout(10)  # 10 second timeout for API database operations
     def process_phishing_report(
@@ -3063,7 +3280,20 @@ class DatabaseManager:
             )
 
             # Migrate old data if exists
-            try:
+            # Check if old table exists first to avoid error logs
+            old_table_check = conn.execute(
+                text(
+                    """
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables
+                        WHERE table_name = 'registrar_abuse_old'
+                    )
+                    """
+                )
+            ).fetchone()
+
+            if old_table_check and old_table_check[0]:
+                # Old table exists, migrate data
                 conn.execute(
                     text(
                         """
@@ -3073,9 +3303,8 @@ class DatabaseManager:
                         """
                     )
                 )
-                conn.execute(text("DROP TABLE IF EXISTS registrar_abuse_old"))
-            except:
-                pass  # Old table doesn't exist or migration not needed
+                conn.execute(text("DROP TABLE registrar_abuse_old"))
+                logger.info("✅ Migrated data from old registrar_abuse table")
 
             conn.commit()
             logger.info("🗄️  Initialized enhanced registrar_abuse table.")

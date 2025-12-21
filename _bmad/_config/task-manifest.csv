@@ -1,0 +1,4 @@
+id,name,description,file_path,category,status
+task-001,Initialize Project,Initialize a new BMad project,/opt/bmader/_bmad/tasks/init-project.md,core,active
+task-002,List Agents,List all available agents,/opt/bmader/_bmad/tasks/list-agents.md,core,active
+task-003,Create Agent,Create a new agent configuration,/opt/bmader/_bmad/tasks/create-agent.md,core,active

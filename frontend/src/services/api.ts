@@ -168,8 +168,13 @@ class ApiClient {
   async getChartData(
     period: 'day' | 'week' | 'month' = 'week'
   ): Promise<Array<{ date: string; scans: number; detections: number; reports: number }>> {
-    const response = await this.client.get('/analytics/chart', { params: { period } });
-    return response.data;
+    try {
+      const response = await this.client.get('/analytics/chart', { params: { period } });
+      return Array.isArray(response.data) ? response.data : [];
+    } catch (error) {
+      console.warn('Failed to fetch chart data:', error);
+      return [];
+    }
   }
 
   async getThreatMap(): Promise<
@@ -179,10 +184,16 @@ class ApiClient {
       latitude: number;
       longitude: number;
       threat_count: number;
+      last_seen: string;
     }>
   > {
-    const response = await this.client.get('/analytics/threat-map');
-    return response.data;
+    try {
+      const response = await this.client.get('/analytics/threat-map');
+      return Array.isArray(response.data) ? response.data : [];
+    } catch (error) {
+      console.warn('Failed to fetch threat map:', error);
+      return [];
+    }
   }
 
   // Configuration

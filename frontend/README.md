@@ -60,6 +60,7 @@ The application will be available at http://localhost:3000
 ### 4. Login
 
 Use your Anisakys API key to log in. The API key is configured in the backend via:
+
 - Environment variable: `ANISAKYS_API_KEY`
 - Command line: `--api-key your_key_here`
 
@@ -111,6 +112,7 @@ frontend/
 ## Features Overview
 
 ### Dashboard
+
 - Real-time statistics (scans, threats, reports)
 - Activity timeline charts
 - Threat distribution visualization
@@ -118,6 +120,7 @@ frontend/
 - Recent activity feed
 
 ### URL Scanner
+
 - Manual URL scanning
 - Multi-API results (VirusTotal, URLVoid, PhishTank)
 - Confidence scoring
@@ -126,6 +129,7 @@ frontend/
 - Actionable recommendations
 
 ### Reports
+
 - ICANN compliance tracking
 - Response deadline monitoring
 - Status management (sent, acknowledged, resolved, escalated)
@@ -133,6 +137,7 @@ frontend/
 - Detailed report views
 
 ### Analytics
+
 - Activity trends (configurable periods)
 - Detection rate analysis
 - Threat map visualization
@@ -140,6 +145,7 @@ frontend/
 - Geographic distribution
 
 ### Settings
+
 - Scan configuration (keywords, domains, intervals)
 - API integrations (VirusTotal, URLVoid, PhishTank, Grinder)
 - SMTP configuration
@@ -151,7 +157,9 @@ frontend/
 The frontend communicates with the Anisakys backend via REST API:
 
 ### Authentication
+
 All API requests require Bearer token authentication:
+
 ```
 Authorization: Bearer YOUR_API_KEY
 ```
@@ -188,6 +196,7 @@ npm run preview
 ### Deploy
 
 The production build is a static site that can be deployed to:
+
 - Nginx/Apache
 - Netlify
 - Vercel
@@ -237,6 +246,7 @@ A Dockerfile for the frontend will be provided in the production build configura
 ### Styling
 
 The project uses Tailwind CSS. Custom utilities are defined in:
+
 - `tailwind.config.js` - Theme configuration
 - `src/index.css` - Global styles and custom classes
 

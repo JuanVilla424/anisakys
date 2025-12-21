@@ -10,10 +10,6 @@
     --color-warning: 245 158 11;
   }
 
-  * {
-    @apply border-border;
-  }
-
   body {
     @apply bg-gray-50 text-gray-900 antialiased;
   }

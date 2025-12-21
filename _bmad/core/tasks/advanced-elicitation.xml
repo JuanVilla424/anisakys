@@ -1,0 +1,97 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<task>
+  <metadata>
+    <id>advanced-elicitation</id>
+    <name>Advanced Elicitation Techniques</name>
+    <description>Challenge the LLM to produce better results through structured questioning</description>
+    <version>1.0</version>
+  </metadata>
+
+  <objective>
+    Use advanced elicitation techniques to extract deeper insights, challenge assumptions, and generate more comprehensive responses from the AI.
+  </objective>
+
+  <techniques>
+    <technique name="Five Whys">
+      <description>Ask "why" five times to get to the root cause of a problem or requirement</description>
+      <example>
+        User states a requirement → Why? → Why? → Why? → Why? → Why? → Root cause revealed
+      </example>
+    </technique>
+
+    <technique name="Inversion Thinking">
+      <description>Instead of asking what to do, ask what NOT to do or what would cause failure</description>
+      <example>
+        Instead of "How do we make this successful?" ask "What would guarantee this fails?"
+      </example>
+    </technique>
+
+    <technique name="Devil's Advocate">
+      <description>Challenge every assumption and proposed solution</description>
+      <prompts>
+        <prompt>What's the weakest point in this approach?</prompt>
+        <prompt>What assumptions are we making that might be wrong?</prompt>
+        <prompt>What could go catastrophically wrong?</prompt>
+      </prompts>
+    </technique>
+
+    <technique name="Constraint Removal">
+      <description>Temporarily remove all constraints to explore ideal solutions</description>
+      <example>
+        "If you had unlimited time, budget, and resources, what would the perfect solution look like?"
+      </example>
+    </technique>
+
+    <technique name="Perspective Shifting">
+      <description>View the problem from multiple stakeholder perspectives</description>
+      <perspectives>
+        <perspective>End user</perspective>
+        <perspective>Developer maintaining this in 2 years</perspective>
+        <perspective>Business stakeholder</perspective>
+        <perspective>Security team</perspective>
+        <perspective>Customer support team</perspective>
+      </perspectives>
+    </technique>
+
+    <technique name="Forced Prioritization">
+      <description>Force ranking when everything seems equally important</description>
+      <prompts>
+        <prompt>If you could only implement ONE feature, which would it be?</prompt>
+        <prompt>What's the absolute minimum viable solution?</prompt>
+        <prompt>Which requirement, if removed, would invalidate the entire project?</prompt>
+      </prompts>
+    </technique>
+
+    <technique name="Analogies and Metaphors">
+      <description>Use comparisons to clarify complex concepts</description>
+      <example>
+        "Describe this system as if it were a restaurant kitchen - who are the chefs, what are the recipes?"
+      </example>
+    </technique>
+
+    <technique name="Pre-mortem Analysis">
+      <description>Imagine the project has failed and work backwards</description>
+      <prompt>
+        "It's 6 months from now. The project failed spectacularly. What went wrong?"
+      </prompt>
+    </technique>
+  </techniques>
+
+  <usage_guidelines>
+    <guideline>Use these techniques when requirements are vague or incomplete</guideline>
+    <guideline>Apply when you sense the AI is giving surface-level responses</guideline>
+    <guideline>Combine multiple techniques for deeper insights</guideline>
+    <guideline>Don't accept the first answer - challenge and probe</guideline>
+    <guideline>Document the insights gained through elicitation</guideline>
+  </usage_guidelines>
+
+  <example_session>
+    <step>User: "We need a user authentication system"</step>
+    <step>Agent: "Why do we need authentication?" (Five Whys)</step>
+    <step>User: "To protect user data"</step>
+    <step>Agent: "What would cause this authentication to fail catastrophically?" (Devil's Advocate)</step>
+    <step>User: "If passwords are compromised"</step>
+    <step>Agent: "If you had unlimited resources, what would perfect authentication look like?" (Constraint Removal)</step>
+    <step>Result: Deeper understanding reveals need for 2FA, password policies, and audit logging</step>
+  </example_session>
+</task>

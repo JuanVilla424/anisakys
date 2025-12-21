@@ -244,6 +244,7 @@ Anisakys now includes a modern, professional web interface for monitoring, manag
 **Tech Stack**: React 18 + TypeScript, Vite, Tailwind CSS, TanStack Query, Recharts
 
 **Quick Start**:
+
 ```bash
 cd frontend
 npm install

@@ -61,7 +61,6 @@ Examples:
 ## 🚀 Release Process
 
 1. Development Phase:
-
    - Developers work on features and bug fixes in the `dev` branch.
    - Commit messages should follow the guidelines above to indicate the type of changes.
 
@@ -74,7 +73,6 @@ Examples:
    Final testing and validation occur here before deployment.
 
 4. Release:
-
    - Changes from `prod` are merged into `main`.
    - A release is tagged, and the `CHANGELOG.md` is updated automatically based on commit messages.
 

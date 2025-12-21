@@ -1,0 +1,3 @@
+id,name,description,file_path,category,status
+workflow-001,Party Mode,Group chat with all agents,/opt/bmader/_bmad/core/workflows/party-mode/workflow.md,collaboration,active
+workflow-002,Development Workflow,Standard development workflow,/opt/bmader/_bmad/core/workflows/development/workflow.md,development,active

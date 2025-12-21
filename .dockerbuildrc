@@ -1,0 +1,15 @@
+# Docker Build Configuration
+# DO NOT MODIFY WITHOUT TESTING
+
+# Frontend Build Configuration
+FRONTEND_BUILD_OUTDIR=build
+FRONTEND_NODE_VERSION=20-alpine
+FRONTEND_NGINX_VERSION=alpine
+
+# Backend Build Configuration
+BACKEND_PYTHON_VERSION=3.12-slim
+BACKEND_SHELL=/bin/sh
+
+# Critical: Frontend vite.config.ts MUST specify outDir: 'build'
+# Critical: Frontend Dockerfile MUST use --outDir build flag
+# Critical: Backend CMD MUST use /bin/sh not sh

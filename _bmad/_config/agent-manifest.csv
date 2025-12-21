@@ -1,0 +1,11 @@
+id,name,title,icon,file_path,module,status
+bmad-master,BMad Master,BMad Master Executor Knowledge Custodian and Workflow Orchestrator,🧙,/opt/bmader/.ai/agents/bmad-master.agent.yaml,core,active
+architect,Winston,Architect,🏗️,/opt/bmader/.ai/agents/architect.agent.yaml,bmm,active
+analyst,Mary,Business Analyst,📊,/opt/bmader/.ai/agents/analyst.agent.yaml,bmm,active
+pm,John,Product Manager,📋,/opt/bmader/.ai/agents/pm.agent.yaml,bmm,active
+dev,Amelia,Developer Agent,💻,/opt/bmader/.ai/agents/dev.agent.yaml,bmm,active
+ux-designer,Sally,UX Designer,🎨,/opt/bmader/.ai/agents/ux-designer.agent.yaml,bmm,active
+sm,Bob,Scrum Master,🏃,/opt/bmader/.ai/agents/sm.agent.yaml,bmm,active
+tech-writer,Paige,Technical Writer,📚,/opt/bmader/.ai/agents/tech-writer.agent.yaml,bmm,active
+quick-flow-solo-dev,Quick Flow,Quick Flow Solo Dev,⚡,/opt/bmader/.ai/agents/quick-flow-solo-dev.agent.yaml,core,active
+tea,Tea,TEA,☕,/opt/bmader/.ai/agents/tea.agent.yaml,core,active

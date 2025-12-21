@@ -24,12 +24,12 @@ import { format } from 'date-fns';
 export function Analytics() {
   const [period, setPeriod] = useState<'day' | 'week' | 'month'>('week');
 
-  const { data: chartData, isLoading: isChartLoading } = useQuery({
+  const { data: chartDataRaw, isLoading: isChartLoading } = useQuery({
     queryKey: ['chartData', period],
     queryFn: () => apiClient.getChartData(period),
   });
 
-  const { data: threatMap, isLoading: isThreatMapLoading } = useQuery({
+  const { data: threatMapRaw, isLoading: isThreatMapLoading } = useQuery({
     queryKey: ['threatMap'],
     queryFn: () => apiClient.getThreatMap(),
   });
@@ -42,6 +42,10 @@ export function Analytics() {
   if (isChartLoading || isThreatMapLoading) {
     return <Loading fullScreen message="Loading analytics..." />;
   }
+
+  // Ensure data is always valid arrays
+  const chartData = Array.isArray(chartDataRaw) ? chartDataRaw : [];
+  const threatMap = Array.isArray(threatMapRaw) ? threatMapRaw : [];
 
   return (
     <div className="space-y-6">

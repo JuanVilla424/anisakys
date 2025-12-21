@@ -1,0 +1,20 @@
+# BMad Core Configuration
+# This file contains the core configuration for the BMad system
+
+project_name: "BMader"
+output_folder: "/opt/bmader/temp/current-context/artifacts"
+user_name: "User"
+communication_language: "Spanish"
+
+# Paths configuration
+paths:
+  project_root: "/opt/bmader"
+  agents_dir: "/opt/bmader/.ai/agents"
+  tasks_manifest: "/opt/bmader/_bmad/_config/task-manifest.csv"
+  workflows_manifest: "/opt/bmader/_bmad/_config/workflow-manifest.csv"
+  workflows_dir: "/opt/bmader/_bmad/core/workflows"
+
+# System configuration
+system:
+  version: "1.0.0"
+  environment: "development"

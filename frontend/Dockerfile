@@ -8,20 +8,20 @@ WORKDIR /app
 # Copy package files
 COPY package*.json ./
 
-# Install dependencies
-RUN npm ci
+# Install dependencies (using install instead of ci to handle updated dependencies)
+RUN npm install --frozen-lockfile || npm install
 
 # Copy source code
 COPY . .
 
-# Build application
+# Build application - use npm script which includes type checking
 RUN npm run build
 
 # Stage 2: Production
 FROM nginx:alpine
 
 # Copy built assets from builder
-COPY --from=builder /app/dist /usr/share/nginx/html
+COPY --from=builder /app/dist/. /usr/share/nginx/html/
 
 # Copy nginx configuration
 COPY nginx.conf /etc/nginx/conf.d/default.conf
