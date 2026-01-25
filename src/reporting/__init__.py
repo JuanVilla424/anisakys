@@ -1,12 +1,13 @@
 """
-Reporting Module
+Reporting module for Anisakys Phishing Detection Engine.
 
-Contains report generation and delivery functionality:
-- Email report formatting
-- Screenshot capture
-- Report tracking
-- Template rendering
-- Multi-recipient handling
-
-EPIC-006: Main.py Modularization
+Provides abuse email detection and report management.
 """
+
+from src.reporting.email_detector import EnhancedAbuseEmailDetector
+from src.reporting.abuse_manager import AbuseReportManager
+
+__all__ = [
+    "EnhancedAbuseEmailDetector",
+    "AbuseReportManager",
+]

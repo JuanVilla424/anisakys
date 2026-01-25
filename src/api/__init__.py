@@ -1,12 +1,14 @@
 """
-API Integration Module
+API module for Anisakys Phishing Detection Engine.
 
-Contains API clients for external threat intelligence services:
-- VirusTotal
-- URLVoid
-- PhishTank
-- Google Safe Browsing
-- Other threat intelligence APIs
-
-EPIC-006: Main.py Modularization
+Provides REST API for external phishing reports.
 """
+
+from src.api.phishing_api import PhishingAPI, TimeoutError, timeout, upgrade_phishing_db
+
+__all__ = [
+    "PhishingAPI",
+    "TimeoutError",
+    "timeout",
+    "upgrade_phishing_db",
+]

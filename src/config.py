@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     SMTP_PASS: Optional[str] = None
     DEFAULT_ATTACHMENT: Optional[str] = None
     LOG_LEVEL: Optional[str] = None
+    ANISAKYS_API_KEY: Optional[str] = None
+    ANISAKYS_API_PORT: Optional[int] = 8080
 
     model_config = {
         "env_file": env_file,

@@ -1,0 +1,16 @@
+[Unit]
+Description=Anisakys - Background Threads (Monitoring, Auto-Analysis, Reporting)
+After=network.target
+
+[Service]
+Type=simple
+User=anisakys
+Group=anisakys
+WorkingDirectory=/opt/anisakys
+EnvironmentFile=/opt/anisakys/.env
+ExecStart=/opt/anisakys/venv/bin/python anisakys.py --threads-only
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
