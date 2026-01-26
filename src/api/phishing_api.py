@@ -36,6 +36,7 @@ from src.intelligence import (
 )
 from src.logger import logger
 from src.screenshot_service import ScreenshotService, PLAYWRIGHT_AVAILABLE, SELENIUM_AVAILABLE
+from src.monitoring.gsb_rescan import get_gsb_rescan_job, start_gsb_rescan_job
 
 # Initialize screenshot service
 SCREENSHOTS_DIR = (
@@ -95,7 +96,7 @@ def timeout(seconds=10):
 class PhishingAPI:
     """REST API for external phishing reports with multi-API integration and Grinder integration."""
 
-    def __init__(self, db_manager, abuse_detector, api_key: str = None):
+    def __init__(self, db_manager, abuse_detector, api_key: str = None, report_manager=None):
         """
         Initialize the Phishing API with authentication support and Grinder integration.
 
@@ -103,9 +104,11 @@ class PhishingAPI:
             db_manager: Database manager instance
             abuse_detector: Abuse email detector instance
             api_key (str, optional): API key for authentication
+            report_manager: AbuseReportManager instance for immediate report sending
         """
         self.db_manager = db_manager
         self.abuse_detector = abuse_detector
+        self.report_manager = report_manager
         self.multi_api_validator = MultiAPIValidator()
         self.grinder_client = GrinderReportClient()
         self.api_key = api_key
@@ -369,6 +372,24 @@ class PhishingAPI:
                                 },
                             )
                     logger.info(f"✅ Scan results saved for {url}")
+
+                    # Get report status info for response
+                    report_info = conn.execute(
+                        text(
+                            """
+                            SELECT last_report_sent, abuse_report_sent, all_abuse_emails
+                            FROM phishing_sites WHERE url = :url
+                            """
+                        ),
+                        {"url": url},
+                    ).fetchone()
+                    if report_info:
+                        scan_result["last_report_sent"] = (
+                            str(report_info[0]) if report_info[0] else None
+                        )
+                        scan_result["abuse_report_sent"] = bool(report_info[1])
+                        scan_result["all_abuse_emails"] = report_info[2]
+
                 except Exception as db_error:
                     logger.error(f"❌ Failed to save scan results: {db_error}")
 
@@ -393,7 +414,8 @@ class PhishingAPI:
                             """
                             SELECT url, manual_flag, first_seen, last_seen,
                                    reported, abuse_report_sent, site_status,
-                                   takedown_date, abuse_email, source, priority
+                                   takedown_date, abuse_email, source, priority,
+                                   last_report_sent, all_abuse_emails
                             FROM phishing_sites
                             WHERE url = :url
                         """
@@ -418,6 +440,8 @@ class PhishingAPI:
                                 "abuse_email": result[8],
                                 "source": result[9] if len(result) > 9 else None,
                                 "priority": result[10] if len(result) > 10 else None,
+                                "last_report_sent": str(result[11]) if result[11] else None,
+                                "all_abuse_emails": result[12] if len(result) > 12 else None,
                             }
                         ),
                         200,
@@ -494,6 +518,187 @@ class PhishingAPI:
                 logger.error(f"❌ API error in get_stats: {e}")
                 return jsonify({"error": "Internal server error"}), 500
 
+        @self.app.route("/api/v1/gsb/rescan", methods=["POST"])
+        @self.limiter.limit("2 per minute")
+        @require_api_key
+        def gsb_rescan():
+            """
+            Trigger Google Safe Browsing re-scan of existing sites.
+
+            This re-checks sites against GSB to catch:
+            - Sites that were later reported to Google
+            - GSB classification changes
+
+            Request body (optional):
+            {
+                "max_age_hours": 24,  // Re-scan sites not checked in X hours
+                "batch_size": 50      // Number of sites to check
+            }
+            """
+            try:
+                data = request.get_json() or {}
+                max_age_hours = data.get("max_age_hours", 24)
+                batch_size = data.get("batch_size", 50)
+
+                # Get or create the rescan job
+                job = get_gsb_rescan_job(
+                    db_manager=self.db_manager,
+                    max_age_hours=max_age_hours,
+                    batch_size=batch_size,
+                )
+
+                # Run a single rescan cycle
+                result = job.run_once()
+
+                return (
+                    jsonify(
+                        {
+                            "status": "completed",
+                            "sites_checked": result.get("sites_checked", 0),
+                            "threats_found": result.get("threats_found", 0),
+                            "status_changes": result.get("status_changes", []),
+                            "errors": len(result.get("errors", [])),
+                            "duration_seconds": result.get("duration_seconds", 0),
+                        }
+                    ),
+                    200,
+                )
+
+            except Exception as e:
+                logger.error(f"❌ API error in gsb_rescan: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        @self.app.route("/api/v1/gsb/status", methods=["GET"])
+        @self.limiter.limit("10 per minute")
+        @require_api_key
+        def gsb_status():
+            """Get GSB rescan job status and statistics."""
+            try:
+                job = get_gsb_rescan_job(db_manager=self.db_manager)
+                stats = job.get_stats()
+
+                # Get recent GSB status changes from DB
+                recent_changes = self.db_manager.get_gsb_status_changes(since_hours=24)
+
+                return (
+                    jsonify(
+                        {
+                            "job_stats": stats,
+                            "recent_threats": recent_changes,
+                            "recent_threats_count": len(recent_changes),
+                        }
+                    ),
+                    200,
+                )
+
+            except Exception as e:
+                logger.error(f"❌ API error in gsb_status: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        @self.app.route("/api/v1/gsb/check", methods=["POST"])
+        @self.limiter.limit("5 per minute")
+        @require_api_key
+        def gsb_check_url():
+            """
+            Check a single URL against Google Safe Browsing.
+
+            Request body:
+            {
+                "url": "https://example.com"
+            }
+            """
+            try:
+                data = request.get_json()
+                if not data or "url" not in data:
+                    return jsonify({"error": "Missing 'url' in request body"}), 400
+
+                url = data["url"]
+                if not validators.url(url):
+                    return jsonify({"error": "Invalid URL format"}), 400
+
+                # Import GSB integration
+                from src.intelligence.google_safe_browsing import GoogleSafeBrowsingIntegration
+
+                gsb = GoogleSafeBrowsingIntegration()
+
+                if not gsb.is_available():
+                    return (
+                        jsonify(
+                            {
+                                "error": "Google Safe Browsing API not configured",
+                                "checked": False,
+                            }
+                        ),
+                        503,
+                    )
+
+                result = gsb.check_url(url)
+
+                return (
+                    jsonify(
+                        {
+                            "url": url,
+                            "checked": result.get("checked", False),
+                            "safe": result.get("safe", True),
+                            "threats_found": result.get("threats_found", []),
+                            "threat_count": result.get("threat_count", 0),
+                            "timestamp": result.get("timestamp"),
+                            "error": result.get("error"),
+                        }
+                    ),
+                    200,
+                )
+
+            except Exception as e:
+                logger.error(f"❌ API error in gsb_check_url: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        @self.app.route("/api/v1/gsb/report", methods=["POST"])
+        @self.limiter.limit("10 per minute")
+        @require_api_key
+        def gsb_report_url():
+            """
+            Report a phishing URL to Google Safe Browsing.
+
+            Request body:
+            {
+                "url": "https://phishing-example.com",
+                "screenshot_base64": "optional base64 encoded screenshot"
+            }
+            """
+            try:
+                data = request.get_json()
+                if not data or "url" not in data:
+                    return jsonify({"error": "Missing 'url' in request body"}), 400
+
+                url = data["url"]
+                if not validators.url(url):
+                    return jsonify({"error": "Invalid URL format"}), 400
+
+                screenshot_base64 = data.get("screenshot_base64")
+
+                # Import GSB reporter
+                from src.intelligence.gsb_reporter import report_phishing_url
+
+                result = report_phishing_url(
+                    url=url,
+                    screenshot_base64=screenshot_base64,
+                )
+
+                return jsonify(
+                    {
+                        "url": url,
+                        "success": result.get("success", False),
+                        "method": result.get("method"),
+                        "message": result.get("message"),
+                        "timestamp": result.get("timestamp"),
+                    }
+                ), (200 if result.get("success") else 500)
+
+            except Exception as e:
+                logger.error(f"❌ API error in gsb_report_url: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
         @self.app.route("/api/v1/health", methods=["GET"])
         def health_check():
             """Health check endpoint (no authentication required)."""
@@ -515,9 +720,13 @@ class PhishingAPI:
     ) -> Dict[str, Any]:
         """Process a phishing report from the API."""
         try:
-            with self.db_manager.engine.begin() as conn:
-                timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            abuse_emails = []
+            all_abuse_emails = None
+            is_new = False
 
+            # TRANSACTION 1: Check and update/insert record
+            with self.db_manager.engine.begin() as conn:
                 # Check if URL already exists
                 existing = conn.execute(
                     text("SELECT id, manual_flag FROM phishing_sites WHERE url = :url"),
@@ -525,6 +734,36 @@ class PhishingAPI:
                 ).fetchone()
 
                 if existing:
+                    # Check if existing record has abuse_email and all_abuse_emails
+                    existing_abuse = conn.execute(
+                        text(
+                            "SELECT abuse_email, all_abuse_emails FROM phishing_sites WHERE url = :url"
+                        ),
+                        {"url": url},
+                    ).fetchone()
+
+                    # Resolve abuse emails if needed
+                    needs_resolution = (
+                        not abuse_email and (not existing_abuse or not existing_abuse[0])
+                    ) or (not existing_abuse or not existing_abuse[1])
+
+                    if needs_resolution:
+                        try:
+                            domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+                            whois_info = self.abuse_detector.get_enhanced_whois_info(domain)
+                            registrar = self.abuse_detector.extract_registrar(whois_info)
+                            abuse_emails = self.abuse_detector.get_enhanced_abuse_email(
+                                domain, whois_info, registrar
+                            )
+                            if abuse_emails:
+                                abuse_email = abuse_emails[0]
+                                all_abuse_emails = ", ".join(abuse_emails)
+                                logger.info(
+                                    f"🔍 Resolved {len(abuse_emails)} abuse emails for {url}: {all_abuse_emails}"
+                                )
+                        except Exception as e:
+                            logger.warning(f"⚠️  Failed to auto-detect abuse email for {url}: {e}")
+
                     # Update existing record
                     conn.execute(
                         text(
@@ -532,6 +771,7 @@ class PhishingAPI:
                             UPDATE phishing_sites
                             SET manual_flag = 1, last_seen = :timestamp,
                                 abuse_email = COALESCE(:abuse_email, abuse_email),
+                                all_abuse_emails = COALESCE(:all_abuse_emails, all_abuse_emails),
                                 source = :source, priority = :priority, description = :description
                             WHERE url = :url
                         """
@@ -539,6 +779,7 @@ class PhishingAPI:
                         {
                             "timestamp": timestamp,
                             "abuse_email": abuse_email,
+                            "all_abuse_emails": all_abuse_emails,
                             "source": source,
                             "priority": priority,
                             "description": description,
@@ -546,23 +787,32 @@ class PhishingAPI:
                         },
                     )
                     logger.info(f"✅ Updated existing phishing report for {url}")
-                    return {
-                        "status": "updated",
-                        "message": f"Updated existing report for {url}",
-                        "url": url,
-                        "timestamp": timestamp,
-                    }
+
+                    # Get abuse_emails from existing record if not resolved
+                    if not abuse_emails and existing_abuse:
+                        if existing_abuse[1]:
+                            abuse_emails = [
+                                e.strip() for e in existing_abuse[1].split(",") if e.strip()
+                            ]
+                        elif existing_abuse[0]:
+                            abuse_emails = [existing_abuse[0]]
                 else:
-                    # If no abuse email provided, try to find one
+                    is_new = True
+                    # Resolve abuse emails for new record
                     if not abuse_email:
                         try:
                             domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
-                            whois_info = basic_whois_lookup(url)
+                            whois_info = self.abuse_detector.get_enhanced_whois_info(domain)
                             registrar = self.abuse_detector.extract_registrar(whois_info)
                             abuse_emails = self.abuse_detector.get_enhanced_abuse_email(
                                 domain, whois_info, registrar
                             )
-                            abuse_email = abuse_emails[0] if abuse_emails else None
+                            if abuse_emails:
+                                abuse_email = abuse_emails[0]
+                                all_abuse_emails = ", ".join(abuse_emails)
+                                logger.info(
+                                    f"🔍 Resolved {len(abuse_emails)} abuse emails for {url}: {all_abuse_emails}"
+                                )
                         except Exception as e:
                             logger.warning(f"⚠️  Failed to auto-detect abuse email for {url}: {e}")
 
@@ -571,9 +821,9 @@ class PhishingAPI:
                         text(
                             """
                             INSERT INTO phishing_sites
-                            (url, manual_flag, first_seen, last_seen, abuse_email,
+                            (url, manual_flag, first_seen, last_seen, abuse_email, all_abuse_emails,
                              reported, abuse_report_sent, source, priority, description)
-                            VALUES (:url, 1, :timestamp, :timestamp, :abuse_email,
+                            VALUES (:url, 1, :timestamp, :timestamp, :abuse_email, :all_abuse_emails,
                                     0, 0, :source, :priority, :description)
                         """
                         ),
@@ -581,19 +831,73 @@ class PhishingAPI:
                             "url": url,
                             "timestamp": timestamp,
                             "abuse_email": abuse_email,
+                            "all_abuse_emails": all_abuse_emails,
                             "source": source,
                             "priority": priority,
                             "description": description,
                         },
                     )
                     logger.info(f"✅ Created new phishing report for {url}")
-                    return {
-                        "status": "created",
-                        "message": f"Created new report for {url}",
-                        "url": url,
-                        "abuse_email": abuse_email,
-                        "timestamp": timestamp,
-                    }
+
+            # TRANSACTION 1 CLOSED - Now send report OUTSIDE transaction
+            report_sent = False
+            report_recipients = []
+            last_report_sent = None
+
+            if self.report_manager and abuse_emails:
+                try:
+                    logger.info(
+                        f"📧 Sending immediate abuse report for {url} to {len(abuse_emails)} recipients"
+                    )
+                    domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+                    whois_info = self.abuse_detector.get_enhanced_whois_info(domain)
+                    whois_str = str(whois_info)
+                    report_sent = self.report_manager.send_abuse_report(
+                        abuse_emails, url, whois_str
+                    )
+                    if report_sent:
+                        report_recipients = abuse_emails
+                        last_report_sent = timestamp
+                        # TRANSACTION 2: Update report status
+                        with self.db_manager.engine.begin() as conn2:
+                            conn2.execute(
+                                text(
+                                    """
+                                    UPDATE phishing_sites
+                                    SET abuse_report_sent = 1, last_report_sent = :timestamp, reported = 1
+                                    WHERE url = :url
+                                    """
+                                ),
+                                {"timestamp": timestamp, "url": url},
+                            )
+                        logger.info(f"✅ Immediate abuse report sent for {url}")
+                except Exception as e:
+                    logger.error(f"❌ Failed to send immediate abuse report: {e}")
+
+            if is_new:
+                return {
+                    "status": "created",
+                    "message": f"Created new report for {url}",
+                    "url": url,
+                    "abuse_email": abuse_email,
+                    "abuse_emails_count": len(abuse_emails) if abuse_emails else 0,
+                    "timestamp": timestamp,
+                    "report_sent": report_sent,
+                    "report_recipients": report_recipients,
+                    "last_report_sent": last_report_sent,
+                }
+            else:
+                return {
+                    "status": "updated",
+                    "message": f"Updated existing report for {url}",
+                    "url": url,
+                    "timestamp": timestamp,
+                    "abuse_email_resolved": abuse_email is not None,
+                    "abuse_emails_count": len(abuse_emails) if abuse_emails else 0,
+                    "report_sent": report_sent,
+                    "report_recipients": report_recipients,
+                    "last_report_sent": last_report_sent,
+                }
 
         except Exception as e:
             logger.error(f"❌ Failed to process phishing report for {url}: {e}")

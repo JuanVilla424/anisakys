@@ -97,7 +97,9 @@ class DatabaseManager:
                         registration_date TIMESTAMP,
                         registrar_name TEXT,
                         registrant_org TEXT,
-                        domain_age_days INTEGER
+                        domain_age_days INTEGER,
+                        status TEXT DEFAULT 'new',
+                        assigned_to TEXT
                     )
                 """
                 )
@@ -127,22 +129,219 @@ class DatabaseManager:
                     pass  # Column already exists
             logger.info("🗄️  Migration complete: Added registration info columns to phishing_sites.")
 
+    def migrate_gsb_columns(self):
+        """Add Google Safe Browsing columns to phishing_sites table (v3 migration)."""
+        gsb_columns = [
+            ("gsb_result", "TEXT"),
+            ("gsb_threat_type", "TEXT"),
+            ("gsb_last_check", "TIMESTAMP"),
+            ("gsb_safe", "INTEGER DEFAULT 1"),  # 1 = safe/unknown, 0 = threat detected
+        ]
+
+        with self.engine.connect() as conn:
+            for col_name, col_type in gsb_columns:
+                try:
+                    conn.execute(
+                        text(
+                            f"ALTER TABLE phishing_sites ADD COLUMN IF NOT EXISTS {col_name} {col_type}"
+                        )
+                    )
+                    conn.commit()
+                except Exception:
+                    pass  # Column already exists
+            logger.info("🗄️  Migration complete: Added GSB columns to phishing_sites.")
+
+    def get_sites_for_gsb_rescan(
+        self, max_age_hours: int = 24, limit: int = 100
+    ) -> List[Dict[str, Any]]:
+        """
+        Get sites that need Google Safe Browsing re-verification.
+
+        Returns sites that are:
+        - Status 'up' (still active)
+        - Never checked by GSB OR last check older than max_age_hours
+
+        Args:
+            max_age_hours (int): Maximum age of GSB check before re-scan
+            limit (int): Maximum number of sites to return
+
+        Returns:
+            List[Dict[str, Any]]: Sites needing GSB re-scan
+        """
+        try:
+            with self.engine.connect() as conn:
+                results = conn.execute(
+                    text(
+                        """
+                        SELECT url, gsb_last_check, gsb_safe, gsb_threat_type,
+                               multi_api_threat_level, api_confidence_score
+                        FROM phishing_sites
+                        WHERE site_status = 'up'
+                        AND (
+                            gsb_last_check IS NULL
+                            OR gsb_last_check < NOW() - INTERVAL '%s hours'
+                        )
+                        ORDER BY
+                            gsb_last_check ASC NULLS FIRST,
+                            api_confidence_score DESC
+                        LIMIT %s
+                        """
+                        % (max_age_hours, limit)
+                    )
+                ).fetchall()
+
+                sites = []
+                for row in results:
+                    sites.append(
+                        {
+                            "url": row[0],
+                            "gsb_last_check": row[1],
+                            "gsb_safe": row[2],
+                            "gsb_threat_type": row[3],
+                            "current_threat_level": row[4],
+                            "current_confidence": row[5],
+                        }
+                    )
+
+                return sites
+
+        except Exception as e:
+            logger.error(f"❌ Failed to get sites for GSB rescan: {e}")
+            return []
+
+    def update_gsb_result(
+        self, url: str, gsb_result: Dict[str, Any], previous_safe: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Update Google Safe Browsing result for a site.
+
+        Args:
+            url (str): Site URL
+            gsb_result (Dict[str, Any]): GSB API response
+            previous_safe (bool): Previous GSB safe status
+
+        Returns:
+            Dict with update status and alert info if status changed
+        """
+        try:
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            is_safe = gsb_result.get("safe", True)
+            threat_type = None
+
+            if not is_safe and gsb_result.get("threats_found"):
+                # Get the most severe threat type
+                threats = gsb_result.get("threats_found", [])
+                if threats:
+                    threat_type = threats[0].get("threat_type", "UNKNOWN")
+
+            with self.engine.begin() as conn:
+                # Update GSB columns
+                conn.execute(
+                    text(
+                        """
+                        UPDATE phishing_sites
+                        SET gsb_result = :gsb_result,
+                            gsb_threat_type = :threat_type,
+                            gsb_last_check = :timestamp,
+                            gsb_safe = :is_safe
+                        WHERE url = :url
+                        """
+                    ),
+                    {
+                        "gsb_result": json.dumps(gsb_result),
+                        "threat_type": threat_type,
+                        "timestamp": timestamp,
+                        "is_safe": 1 if is_safe else 0,
+                        "url": url,
+                    },
+                )
+
+                # If status changed from safe to threat, update threat level
+                status_changed = previous_safe and not is_safe
+                if status_changed:
+                    # Escalate threat level if GSB now shows threat
+                    new_threat_level = "critical" if threat_type == "MALWARE" else "high"
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE phishing_sites
+                            SET multi_api_threat_level = :threat_level,
+                                priority = 'high'
+                            WHERE url = :url
+                            AND (multi_api_threat_level NOT IN ('critical', 'high')
+                                 OR multi_api_threat_level IS NULL)
+                            """
+                        ),
+                        {"threat_level": new_threat_level, "url": url},
+                    )
+
+                    logger.warning(f"🚨 GSB STATUS CHANGE: {url} is now flagged as {threat_type}!")
+
+            result = {
+                "url": url,
+                "updated": True,
+                "is_safe": is_safe,
+                "threat_type": threat_type,
+                "status_changed": status_changed,
+            }
+
+            if status_changed:
+                result["alert"] = {
+                    "type": "GSB_STATUS_CHANGE",
+                    "message": f"URL now flagged by Google Safe Browsing: {threat_type}",
+                    "severity": "critical" if threat_type == "MALWARE" else "high",
+                }
+
+            return result
+
+        except Exception as e:
+            logger.error(f"❌ Failed to update GSB result for {url}: {e}")
+            return {"url": url, "updated": False, "error": str(e)}
+
+    def get_gsb_status_changes(self, since_hours: int = 24) -> List[Dict[str, Any]]:
+        """
+        Get sites where GSB status changed recently (became unsafe).
+
+        Args:
+            since_hours (int): Look back period in hours
+
+        Returns:
+            List of sites with recent GSB status changes
+        """
+        try:
+            with self.engine.connect() as conn:
+                results = conn.execute(
+                    text(
+                        """
+                        SELECT url, gsb_threat_type, gsb_last_check,
+                               multi_api_threat_level, api_confidence_score
+                        FROM phishing_sites
+                        WHERE gsb_safe = 0
+                        AND gsb_last_check > NOW() - INTERVAL '%s hours'
+                        ORDER BY gsb_last_check DESC
+                        """
+                        % since_hours
+                    )
+                ).fetchall()
+
+                return [
+                    {
+                        "url": row[0],
+                        "gsb_threat_type": row[1],
+                        "gsb_last_check": row[2],
+                        "threat_level": row[3],
+                        "confidence_score": row[4],
+                    }
+                    for row in results
+                ]
+
+        except Exception as e:
+            logger.error(f"❌ Failed to get GSB status changes: {e}")
+            return []
+
     def init_registrar_abuse_db(self):
         """Initialize registrar abuse table with enhanced fields."""
         with self.engine.connect() as conn:
-            # First, check if table exists with old schema
-            result = conn.execute(
-                text(
-                    "SELECT column_name FROM information_schema.columns WHERE table_name = 'registrar_abuse'"
-                )
-            ).fetchall()
-
-            if result and len(result) == 2:  # Old schema with only 2 columns
-                # Backup existing data
-                conn.execute(text("ALTER TABLE registrar_abuse RENAME TO registrar_abuse_old"))
-                conn.commit()
-
-            # Create enhanced table
             conn.execute(
                 text(
                     """
@@ -158,24 +357,8 @@ class DatabaseManager:
                 """
                 )
             )
-
-            # Migrate old data if exists
-            try:
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO registrar_abuse (registrar_name, abuse_emails)
-                        SELECT registrar, abuse_email FROM registrar_abuse_old
-                        ON CONFLICT (registrar_name) DO NOTHING
-                        """
-                    )
-                )
-                conn.execute(text("DROP TABLE IF EXISTS registrar_abuse_old"))
-            except:
-                pass  # Old table doesn't exist or migration not needed
-
             conn.commit()
-            logger.info("🗄️  Initialized enhanced registrar_abuse table.")
+            logger.info("🗄️  Initialized registrar_abuse table.")
 
     def init_hosting_abuse_db(self):
         """Initialize hosting provider abuse table."""
@@ -411,6 +594,15 @@ class DatabaseManager:
                 registrar_name = urlvoid_data.get("registrar_name")
                 registrant_org = urlvoid_data.get("registrant_org")
 
+                # Extract GSB results
+                gsb_data = multi_api_results.get("google_safe_browsing", {})
+                gsb_safe = gsb_data.get("safe", True)
+                gsb_threat_type = None
+                if not gsb_safe and gsb_data.get("threats_found"):
+                    threats = gsb_data.get("threats_found", [])
+                    if threats:
+                        gsb_threat_type = threats[0].get("threat_type", "UNKNOWN")
+
                 conn.execute(
                     text(
                         """
@@ -428,7 +620,11 @@ class DatabaseManager:
                             registration_date = COALESCE(:registration_date, registration_date),
                             registrar_name = COALESCE(:registrar_name, registrar_name),
                             registrant_org = COALESCE(:registrant_org, registrant_org),
-                            domain_age_days = COALESCE(:domain_age_days, domain_age_days)
+                            domain_age_days = COALESCE(:domain_age_days, domain_age_days),
+                            gsb_result = :gsb_result,
+                            gsb_safe = :gsb_safe,
+                            gsb_threat_type = :gsb_threat_type,
+                            gsb_last_check = :timestamp
                         WHERE url = :url
                     """
                     ),
@@ -449,6 +645,9 @@ class DatabaseManager:
                         "registrar_name": registrar_name,
                         "registrant_org": registrant_org,
                         "domain_age_days": domain_age_days,
+                        "gsb_result": json.dumps(gsb_data) if gsb_data else None,
+                        "gsb_safe": 1 if gsb_safe else 0,
+                        "gsb_threat_type": gsb_threat_type,
                         "url": url,
                     },
                 )

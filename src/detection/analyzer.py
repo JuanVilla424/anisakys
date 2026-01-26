@@ -357,9 +357,9 @@ class AutoPhishingAnalyzer:
                     )
 
                     # Get WHOIS and abuse emails
-                    whois_info = basic_whois_lookup(url)
-                    whois_str = str(whois_info)
                     domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+                    whois_info = self.abuse_detector.get_enhanced_whois_info(domain)
+                    whois_str = str(whois_info)
                     registrar = self.abuse_detector.extract_registrar(whois_info)
                     abuse_list = self.abuse_detector.get_enhanced_abuse_email(
                         domain, whois_info, registrar

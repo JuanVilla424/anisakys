@@ -20,6 +20,11 @@ from src.intelligence.google_safe_browsing import (
     GoogleSafeBrowsingIntegration,
     google_safe_browsing,
 )
+from src.intelligence.gsb_reporter import (
+    GSBReporter,
+    get_gsb_reporter,
+    report_phishing_url,
+)
 from src.intelligence.multi_api_validator import (
     MultiAPIValidator,
     AUTO_MULTI_API_SCAN,
@@ -50,6 +55,10 @@ __all__ = [
     # Google Safe Browsing
     "GoogleSafeBrowsingIntegration",
     "google_safe_browsing",
+    # GSB Reporter
+    "GSBReporter",
+    "get_gsb_reporter",
+    "report_phishing_url",
     # Multi-API
     "MultiAPIValidator",
     "AUTO_MULTI_API_SCAN",

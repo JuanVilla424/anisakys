@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import dns.exception
 import dns.resolver
 import requests
+import validators
 import whois
 from ipwhois import IPWhois
 
@@ -22,6 +23,7 @@ from src.data import (
     ENHANCED_REGISTRAR_ABUSE_DB,
     TLD_WHOIS_SERVERS,
 )
+from sqlalchemy import text
 from src.logger import logger
 
 # RDAP Bootstrap cache (TLD -> RDAP server URL)
@@ -52,34 +54,47 @@ class EnhancedAbuseEmailDetector:
             return False
 
     def extract_emails_from_whois(self, whois_info: Any) -> List[str]:
-        """Extract email addresses from WHOIS data using enhanced patterns."""
+        """Extract email addresses from WHOIS data."""
         emails = []
-        whois_str = str(whois_info).lower()
 
-        # Use multiple patterns to find emails
-        for pattern in ABUSE_EMAIL_PATTERNS:
-            found_emails = re.findall(pattern, whois_str, re.IGNORECASE)
-            emails.extend(found_emails)
+        # 1. Use emails attribute directly from whois object (python-whois already parses these)
+        if hasattr(whois_info, "emails") and whois_info.emails:
+            whois_emails = (
+                whois_info.emails if isinstance(whois_info.emails, list) else [whois_info.emails]
+            )
+            emails.extend(whois_emails)
+            logger.debug(
+                f"📧 Extracted {len(whois_emails)} emails from WHOIS object: {whois_emails}"
+            )
 
-        # General email pattern as fallback
-        general_pattern = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
-        all_emails = re.findall(general_pattern, whois_str)
+        # 2. Fallback: search in raw text if no emails found
+        if not emails:
+            whois_str = str(whois_info)
+            general_pattern = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
+            all_emails = re.findall(general_pattern, whois_str, re.IGNORECASE)
 
-        # Filter for abuse-related emails
-        abuse_keywords = ["abuse", "security", "admin", "postmaster", "hostmaster", "webmaster"]
-        abuse_emails = [
-            email
-            for email in all_emails
-            if any(keyword in email.lower() for keyword in abuse_keywords)
-        ]
+            # Prioritize abuse-related emails
+            abuse_keywords = [
+                "abuse",
+                "security",
+                "admin",
+                "postmaster",
+                "hostmaster",
+                "webmaster",
+                "noc",
+            ]
+            for email in all_emails:
+                if any(keyword in email.lower() for keyword in abuse_keywords):
+                    emails.append(email)
 
-        emails.extend(abuse_emails)
+            # If no abuse emails found, add all found emails
+            if not emails:
+                emails.extend(all_emails)
 
-        # Remove duplicates and validate
-        unique_emails = list(set(emails))
-        validated_emails = [email for email in unique_emails if self.validate_email(email)]
+        # Remove duplicates and normalize
+        unique_emails = list(dict.fromkeys([e.lower() for e in emails]))
 
-        return validated_emails
+        return unique_emails
 
     def get_abuse_email_from_dns(self, domain: str) -> Optional[str]:
         """Try to get abuse email from DNS TXT records."""

@@ -75,7 +75,7 @@ from src.data import (
 from src.models import DynamicBatchConfig, AttachmentConfig, EngineMode
 from src.database import DatabaseManager, db_engine, DATABASE_URL
 from src.reporting import EnhancedAbuseEmailDetector, AbuseReportManager
-from src.monitoring import TakedownMonitor
+from src.monitoring import TakedownMonitor, start_gsb_rescan_job, stop_gsb_rescan_job
 from src.detection import AutoPhishingAnalyzer, PhishingUtils, PhishingScanner
 from src.api import PhishingAPI, TimeoutError, timeout, upgrade_phishing_db
 from src.intelligence import (
@@ -599,10 +599,21 @@ class Engine:
             takedown_thread.start()
             logger.info("📡 Takedown monitoring thread started")
 
+            # Start GSB rescan background job
+            gsb_job = start_gsb_rescan_job(
+                rescan_interval_hours=12, batch_size=50, max_age_hours=24
+            )
+            logger.info("🔄 GSB rescan job started (12h interval)")
+
             # Store the API key globally for decorator access
             global flask_app
 
-            api = PhishingAPI(self.db_manager, self.abuse_detector, api_key=api_key)
+            api = PhishingAPI(
+                self.db_manager,
+                self.abuse_detector,
+                api_key=api_key,
+                report_manager=self.report_manager,
+            )
             flask_app = api.app
 
             api_port = getattr(self.args, "api_port", None) or getattr(
@@ -643,12 +654,16 @@ class Engine:
                 "ℹ️  Auto-analysis disabled (no API keys configured or disabled in settings)"
             )
 
+        # Start GSB rescan background job (re-verifies existing sites periodically)
+        gsb_job = start_gsb_rescan_job(rescan_interval_hours=12, batch_size=50, max_age_hours=24)
+        logger.info("🔄 GSB rescan job started (12h interval, re-checks existing sites)")
+
         if self.args.threads_only:
             logger.info(
                 "🧵 Running in threads-only mode. Background threads are active; skipping scanning cycle."
             )
             logger.info(
-                "🔄 Active systems: Abuse reporting, Takedown monitoring, ICANN Follow-up"
+                "🔄 Active systems: Abuse reporting, Takedown monitoring, ICANN Follow-up, GSB Re-scan"
                 + (", Auto-analysis" if AUTO_ANALYSIS_ENABLED else "")
             )
             logger.info("ℹ️  To scan for new sites, run without --threads-only flag.")
@@ -673,6 +688,9 @@ class Engine:
             logger.info("  📧 Abuse Report Manager: Processing flagged phishing sites")
             logger.info("  🔍 Takedown Monitor: Monitoring site status changes")
             logger.info("  🔄 ICANN Follow-up Worker: Checking overdue reports every 24 hours")
+            logger.info(
+                "  🔄 GSB Re-scan Job: Re-verifying sites against Google Safe Browsing every 12h"
+            )
             if AUTO_ANALYSIS_ENABLED:
                 logger.info(
                     "  🤖 Auto-Analysis Worker: Analyzing detected sites with multi-API validation"

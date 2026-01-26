@@ -7,6 +7,7 @@ Enhanced abuse report manager with Grinder integration for IP reporting.
 from __future__ import annotations
 
 import datetime
+import json
 import os
 import re
 import smtplib
@@ -22,14 +23,26 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlalchemy import text
 
 from src.config import settings
+from src.dns.network_utils import get_ip_info, is_cloudflare_ip
+from src.detection.utils import PhishingUtils
 from src.data import ASN_ABUSE_EMAIL_DB, PROVIDER_ABUSE_EMAIL_DB
-from src.intelligence import GrinderReportClient, GRINDER_INTEGRATION_ENABLED, MultiAPIValidator
+from src.intelligence import (
+    GrinderReportClient,
+    GRINDER_INTEGRATION_ENABLED,
+    MultiAPIValidator,
+    report_phishing_url,
+    AUTO_ANALYSIS_ENABLED,
+)
 from src.logger import logger
+from src.observability.structured_logger import log_error, log_with_context
 from src.models import AttachmentConfig
 from src.abuse_contact_validator import AbuseContactValidator
 from src.screenshot_service import ScreenshotService
 from src.report_tracker import ReportTracker
 from src.shutdown import shutdown_requested
+
+# Testing mode flag - controls CC email suppression (default: False in production)
+IS_TESTING_MODE = False
 
 
 class AbuseReportManager:
@@ -673,6 +686,23 @@ class AbuseReportManager:
                 f"❌ SUMMARY: Failed to send abuse reports to any recipients for {site_url}"
             )
 
+        # Submit to Google Safe Browsing if abuse report was sent successfully
+        if success_count > 0 and not test_mode:
+            try:
+                logger.info(f"🔄 Submitting {site_url} to Google Safe Browsing...")
+                gsb_result = report_phishing_url(
+                    url=site_url,
+                    screenshot_base64=screenshot_info.get("base64") if screenshot_info else None,
+                )
+                if gsb_result.get("success"):
+                    logger.info(
+                        f"✅ URL submitted to GSB via {gsb_result.get('method')}: {site_url}"
+                    )
+                else:
+                    logger.warning(f"⚠️ GSB submission failed: {gsb_result.get('message')}")
+            except Exception as gsb_err:
+                logger.warning(f"⚠️ GSB submission error (non-blocking): {gsb_err}")
+
         # ICANN Compliance: Track sent reports - RE-ENABLED WITH BETTER ERROR HANDLING
         if success_count > 0 and not test_mode:
             # Manual database update to mark as reported and prevent infinite loop
@@ -688,7 +718,7 @@ class AbuseReportManager:
                     from urllib.parse import urlparse
 
                     # Parse DATABASE_URL
-                    parsed = urlparse(DATABASE_URL)
+                    parsed = urlparse(settings.DATABASE_URL)
 
                     conn_update = psycopg2.connect(
                         host=parsed.hostname,
@@ -696,6 +726,8 @@ class AbuseReportManager:
                         database=parsed.path[1:],  # Remove leading slash
                         user=parsed.username,
                         password=parsed.password,
+                        connect_timeout=5,
+                        options="-c statement_timeout=3000 -c lock_timeout=2000",
                     )
                     conn_update.autocommit = True
 
@@ -1146,7 +1178,7 @@ Phishing Detection Team
                         text(
                             """
                             SELECT url, abuse_email, last_report_sent, site_status, takedown_date, priority,
-                                   manual_flag, auto_detected, auto_report_eligible
+                                   manual_flag, auto_detected, auto_report_eligible, all_abuse_emails
                             FROM phishing_sites
                             WHERE (manual_flag = 1 OR auto_report_eligible = 1)
                             AND site_status = 'up'
@@ -1179,6 +1211,7 @@ Phishing Detection Team
                             manual_flag,
                             auto_detected,
                             auto_eligible,
+                            all_stored_abuse,
                         ) = row
 
                         try:
@@ -1321,10 +1354,10 @@ Phishing Detection Team
                                             f"⚠️  Failed to store fresh API results for {url}: {e}"
                                         )
 
-                            whois_info = basic_whois_lookup(url)
-                            whois_str = str(whois_info)
                             timestamp = current_time.strftime("%Y-%m-%d %H:%M:%S")
                             domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+                            whois_info = self.abuse_detector.get_enhanced_whois_info(domain)
+                            whois_str = str(whois_info)
                             resolved_ip, asn_provider = get_ip_info(domain)
 
                             # Use the refactored function to determine site status
@@ -1411,26 +1444,31 @@ Phishing Detection Team
                                 )
                                 abuse_list = ["abuse@cloudflare.com"]
 
-                            # Fall back to stored abuse emails if no enhanced detection result and different domain
-                            if not abuse_list and stored_abuse:
-                                parsed_abuse_emails = self.abuse_detector.parse_stored_abuse_emails(
-                                    stored_abuse
-                                )
-                                valid_stored_emails = []
-                                for email in parsed_abuse_emails:
-                                    if self.abuse_detector.validate_abuse_email_domain(
-                                        email, domain
-                                    ):
-                                        valid_stored_emails.append(email)
-                                    else:
-                                        logger.warning(
-                                            f"⚠️  Stored abuse email {email} is same domain as reported site {url}, skipping"
+                            # Fall back to stored abuse emails if no enhanced detection result
+                            # Prefer all_stored_abuse (comma-separated list) over single stored_abuse
+                            if not abuse_list:
+                                fallback_source = all_stored_abuse or stored_abuse
+                                if fallback_source:
+                                    parsed_abuse_emails = (
+                                        self.abuse_detector.parse_stored_abuse_emails(
+                                            fallback_source
                                         )
-                                if valid_stored_emails:
-                                    abuse_list = valid_stored_emails
-                                    logger.info(
-                                        f"✅ Using stored abuse emails: {valid_stored_emails}"
                                     )
+                                    valid_stored_emails = []
+                                    for email in parsed_abuse_emails:
+                                        if self.abuse_detector.validate_abuse_email_domain(
+                                            email, domain
+                                        ):
+                                            valid_stored_emails.append(email)
+                                        else:
+                                            logger.warning(
+                                                f"⚠️  Stored abuse email {email} is same domain as reported site {url}, skipping"
+                                            )
+                                    if valid_stored_emails:
+                                        abuse_list = valid_stored_emails
+                                        logger.info(
+                                            f"✅ Using {len(valid_stored_emails)} stored abuse emails: {valid_stored_emails}"
+                                        )
 
                             if abuse_list:
                                 attachment_paths = AttachmentConfig.get_all_attachments()
@@ -1598,7 +1636,7 @@ Phishing Detection Team
                         from urllib.parse import urlparse
 
                         # Parse DATABASE_URL
-                        parsed = urlparse(DATABASE_URL)
+                        parsed = urlparse(settings.DATABASE_URL)
 
                         logger.info(f"🔧 Creating direct psycopg2 connection")
                         conn_api = psycopg2.connect(
@@ -1654,12 +1692,12 @@ Phishing Detection Team
                             logger.info(f"🔒 Direct connection closed for {url}")
 
                 # Main processing with fresh connection per site
-                logger.info(f"🔍 Starting WHOIS lookup for {url}")
-                whois_info = basic_whois_lookup(url)
-                logger.info(f"✅ WHOIS lookup complete for {url}")
-                whois_str = str(whois_info)
                 timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+                logger.info(f"🔍 Starting WHOIS lookup for {domain}")
+                whois_info = self.abuse_detector.get_enhanced_whois_info(domain)
+                logger.info(f"✅ WHOIS lookup complete for {domain}")
+                whois_str = str(whois_info)
                 logger.info(f"🌐 Getting IP info for domain: {domain}")
                 resolved_ip, asn_provider = get_ip_info(domain)
                 cloudflare_detected = resolved_ip and is_cloudflare_ip(resolved_ip)

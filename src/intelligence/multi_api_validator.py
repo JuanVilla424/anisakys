@@ -287,6 +287,7 @@ class MultiAPIValidator:
                     threat_scores.append(5)  # Phishing confirmed by Google
 
         # URL Analysis (typosquatting, homoglyphs, etc.)
+        min_threat_level = None
         if url_analysis:
             url_risk = url_analysis.get("risk_score", 0)
             # Homoglyphs are extremely suspicious - CRITICAL
@@ -298,6 +299,10 @@ class MultiAPIValidator:
             # Combo-squatting (brand + keywords) is also highly suspicious
             if url_analysis.get("combo_squatting", {}).get("detected"):
                 threat_scores.append(5)
+            # Suspicious TLD forces minimum "medium"
+            if url_analysis.get("suspicious_tld", {}).get("detected"):
+                min_threat_level = "medium"
+                threat_scores.append(3)
             # High URL risk score
             if url_risk >= 70:
                 threat_scores.append(5)
@@ -342,20 +347,28 @@ class MultiAPIValidator:
             threat_scores.append(1)
 
         if not threat_scores:
-            return "unknown"
+            return min_threat_level or "unknown"
 
         avg_score = sum(threat_scores) / len(threat_scores)
 
         if avg_score >= 4.5:
-            return "critical"
+            result = "critical"
         elif avg_score >= 3.5:
-            return "high"
+            result = "high"
         elif avg_score >= 2.5:
-            return "medium"
+            result = "medium"
         elif avg_score >= 1.5:
-            return "low"
+            result = "low"
         else:
-            return "clean"
+            result = "clean"
+
+        # Enforce minimum threat level from suspicious indicators
+        if min_threat_level:
+            threat_order = ["clean", "low", "medium", "high", "critical"]
+            if threat_order.index(result) < threat_order.index(min_threat_level):
+                return min_threat_level
+
+        return result
 
     @staticmethod
     def _calculate_confidence_score(
