@@ -6,10 +6,13 @@ import {
   Login,
   Dashboard,
   Scanner,
+  Sites,
   Reports,
+  Research,
   Analytics,
   Settings,
 } from '@/pages';
+import { ThreatIntel } from '@/pages/ThreatIntel';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -56,11 +59,31 @@ function AppRoutes() {
         }
       />
       <Route
+        path="/sites"
+        element={
+          <PrivateRoute>
+            <Layout>
+              <Sites />
+            </Layout>
+          </PrivateRoute>
+        }
+      />
+      <Route
         path="/reports"
         element={
           <PrivateRoute>
             <Layout>
               <Reports />
+            </Layout>
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/research"
+        element={
+          <PrivateRoute>
+            <Layout>
+              <Research />
             </Layout>
           </PrivateRoute>
         }
@@ -81,6 +104,16 @@ function AppRoutes() {
           <PrivateRoute>
             <Layout>
               <Settings />
+            </Layout>
+          </PrivateRoute>
+        }
+      />
+      <Route
+        path="/threat-intel"
+        element={
+          <PrivateRoute>
+            <Layout>
+              <ThreatIntel />
             </Layout>
           </PrivateRoute>
         }

@@ -675,7 +675,7 @@ class GoogleAdsPhishingDetector:
                     ad["search_domain"] = domain
                     ad["timestamp"] = datetime.now().isoformat()
 
-                    ad_id = hashlib.md5(
+                    ad_id = hashlib.sha256(
                         f"{ad.get('url', '')}{ad.get('title', '')}".encode()
                     ).hexdigest()
 

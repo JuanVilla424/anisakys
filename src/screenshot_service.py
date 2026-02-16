@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse
 
+from src.utils.validators import sanitize_filename
+
 try:
     from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
@@ -82,8 +84,13 @@ class ScreenshotService:
 
         if not filename:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            domain = urlparse(url).netloc.replace(".", "_")
-            filename = f"phishing_{domain}_{timestamp}.png"
+            domain = urlparse(url).netloc
+            # Sanitize domain to prevent path traversal
+            safe_domain = sanitize_filename(domain)
+            filename = f"phishing_{safe_domain}_{timestamp}.png"
+        else:
+            # Sanitize user-provided filename
+            filename = sanitize_filename(filename)
 
         screenshot_path = self.screenshots_dir / filename
 
@@ -205,8 +212,13 @@ class ScreenshotService:
 
         if not filename:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            domain = urlparse(url).netloc.replace(".", "_")
-            filename = f"phishing_{domain}_{timestamp}.png"
+            domain = urlparse(url).netloc
+            # Sanitize domain to prevent path traversal
+            safe_domain = sanitize_filename(domain)
+            filename = f"phishing_{safe_domain}_{timestamp}.png"
+        else:
+            # Sanitize user-provided filename
+            filename = sanitize_filename(filename)
 
         screenshot_path = self.screenshots_dir / filename
 

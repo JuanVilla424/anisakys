@@ -34,16 +34,19 @@ export interface MultiAPIScanResult {
     total: number;
     scan_date: string;
     permalink: string;
+    error?: string;
   };
   urlvoid?: {
     detections: number;
     engines_count: number;
     reputation_score: number;
+    error?: string;
   };
   phishtank?: {
     in_database: boolean;
     verified: boolean;
     verification_time?: string;
+    error?: string;
   };
   whois?: {
     domain: string;
@@ -128,20 +131,83 @@ export interface ReportRequest {
 }
 
 export interface Config {
-  keywords: string[];
-  domains: string[];
-  scan_interval: number;
-  auto_report_threshold: number;
-  manual_review_threshold: number;
-  smtp_config: {
+  smtp: {
     host: string;
     port: number;
     sender: string;
+    user: string | null;
+    auth_enabled: boolean;
   };
   api_integrations: {
-    virustotal: { enabled: boolean; api_key: string };
-    urlvoid: { enabled: boolean; api_key: string };
-    phishtank: { enabled: boolean; api_key: string };
-    grinder: { enabled: boolean; url: string; api_key: string };
+    virustotal: {
+      enabled: boolean;
+      configured: boolean;
+    };
+    urlvoid: {
+      enabled: boolean;
+      configured: boolean;
+    };
+    phishtank: {
+      enabled: boolean;
+      configured: boolean;
+    };
+    auto_scan_enabled: boolean;
   };
+  grinder_integration: {
+    enabled: boolean;
+    api_url: string | null;
+    configured: boolean;
+  };
+  auto_reporting: {
+    auto_report_threshold: number;
+    manual_review_threshold: number;
+    auto_analysis_delay: number;
+  };
+  icann_compliance: {
+    screenshots_enabled: boolean;
+    max_attachment_size_mb: number;
+    max_email_size_mb: number;
+  };
+  api_authentication_enabled: boolean;
+}
+
+export interface AdvancedAnalytics {
+  confidence_distribution: Array<{
+    range: string;
+    count: number;
+  }>;
+  api_performance: {
+    virustotal_hits: number;
+    urlvoid_hits: number;
+    phishtank_hits: number;
+    avg_confidence: number;
+    total_analyzed: number;
+  };
+  threat_trends: Array<{
+    date: string;
+    threat_level: string;
+    count: number;
+  }>;
+  top_registrars: Array<{
+    registrar: string;
+    site_count: number;
+    reports_sent: number;
+    avg_takedown_hours: number | null;
+  }>;
+  response_times: {
+    avg_hours: number | null;
+    min_hours: number | null;
+    max_hours: number | null;
+    total_takedowns: number;
+  };
+}
+
+export interface DetectionRateData {
+  date: string;
+  total_scans: number;
+  high_confidence: number;
+  reported: number;
+  taken_down: number;
+  avg_confidence: number;
+  detection_rate: number;
 }

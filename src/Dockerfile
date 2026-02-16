@@ -13,8 +13,14 @@ WORKDIR /build
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
+    gfortran \
     libpq-dev \
     curl \
+    libjpeg-dev \
+    zlib1g-dev \
+    libpng-dev \
+    libblas-dev \
+    liblapack-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy dependency files from project root
@@ -30,7 +36,7 @@ FROM python:3.12-slim
 # Set working directory
 WORKDIR /app
 
-# Install runtime dependencies + Playwright browser dependencies
+# Install runtime dependencies + Playwright browser dependencies + ML/CV dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq5 \
     curl \
@@ -58,6 +64,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     xdg-utils \
     libu2f-udev \
     libvulkan1 \
+    libjpeg62-turbo \
+    libpng16-16 \
+    zlib1g \
+    libgl1 \
+    libglib2.0-0 \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Python packages from builder

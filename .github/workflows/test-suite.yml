@@ -1,0 +1,305 @@
+---
+name: Enterprise Test Suite & Quality Gates
+
+on:
+  push:
+    branches: [main, dev, create-web-interface]
+  pull_request:
+    branches: [main, dev]
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "20"
+  COVERAGE_THRESHOLD: "50"  # Start at 50%, increase to 80% over time
+
+jobs:
+  # ============================================================
+  # JOB 1: Python Tests & Coverage
+  # ============================================================
+  python-tests:
+    name: Python Tests (Coverage ${{ env.COVERAGE_THRESHOLD }}%)
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: anisakys_test
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: anisakys_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        run: |
+          poetry install --with dev
+
+      - name: Run pytest with coverage
+        env:
+          DATABASE_URL: postgresql://anisakys_test:test_password@localhost:5432/anisakys_test
+          ANISAKYS_API_KEY: test_api_key_for_ci
+        run: |
+          poetry run pytest \
+            --cov=src \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term-missing \
+            --cov-report=html:htmlcov \
+            --junitxml=pytest-report.xml \
+            -v
+
+      - name: Coverage threshold check
+        run: |
+          poetry run coverage report --fail-under=${{ env.COVERAGE_THRESHOLD }}
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.xml
+          flags: backend
+          name: backend-coverage
+          fail_ci_if_error: true
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-results
+          path: pytest-report.xml
+
+      - name: Upload coverage HTML
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: htmlcov/
+
+  # ============================================================
+  # JOB 2: Security Scanning (SAST)
+  # ============================================================
+  security-scan:
+    name: Security Scanning (Bandit + Safety + Trivy)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install security tools
+        run: |
+          pip install bandit safety
+
+      - name: Run Bandit (SAST)
+        run: |
+          bandit -r src/ \
+            -f json \
+            -o bandit-report.json \
+            --severity-level medium \
+            --confidence-level medium
+        continue-on-error: true
+
+      - name: Run Safety (dependency vulnerabilities)
+        run: |
+          safety check \
+            --json \
+            --output safety-report.json
+        continue-on-error: true
+
+      - name: Run Trivy (container & filesystem scan)
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: |
+            bandit-report.json
+            safety-report.json
+            trivy-results.sarif
+
+  # ============================================================
+  # JOB 3: Code Quality (Black + Pylint + Complexity)
+  # ============================================================
+  code-quality:
+    name: Code Quality Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        run: |
+          poetry install --with dev
+
+      - name: Black formatting check
+        run: |
+          poetry run black --check src/ tests/
+
+      - name: isort import ordering check
+        run: |
+          poetry run isort --check-only src/ tests/
+
+      - name: Pylint linting
+        run: |
+          poetry run pylint src/ --exit-zero --output-format=text | tee pylint-report.txt
+        continue-on-error: true
+
+      - name: Upload linting reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-quality-reports
+          path: pylint-report.txt
+
+  # ============================================================
+  # JOB 4: Frontend Tests
+  # ============================================================
+  frontend-tests:
+    name: Frontend Build & Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: TypeScript type checking
+        working-directory: frontend
+        run: npm run type-check || npx tsc --noEmit
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Check bundle size
+        working-directory: frontend
+        run: |
+          BUNDLE_SIZE=$(du -sh dist | cut -f1)
+          echo "Bundle size: $BUNDLE_SIZE"
+          echo "bundle_size=$BUNDLE_SIZE" >> $GITHUB_OUTPUT
+
+  # ============================================================
+  # JOB 5: Docker Build Test
+  # ============================================================
+  docker-build:
+    name: Docker Build Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: src/Dockerfile
+          push: false
+          tags: anisakys-backend:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build frontend image
+        uses: docker/build-push-action@v5
+        with:
+          context: frontend
+          file: frontend/Dockerfile
+          push: false
+          tags: anisakys-frontend:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ============================================================
+  # JOB 6: Integration Summary
+  # ============================================================
+  quality-gate:
+    name: Quality Gate Summary
+    runs-on: ubuntu-latest
+    needs: [python-tests, security-scan, code-quality, frontend-tests, docker-build]
+    if: always()
+
+    steps:
+      - name: Check quality gate status
+        run: |
+          echo "==================================="
+          echo "ENTERPRISE QUALITY GATE SUMMARY"
+          echo "==================================="
+          echo "Python Tests: ${{ needs.python-tests.result }}"
+          echo "Security Scan: ${{ needs.security-scan.result }}"
+          echo "Code Quality: ${{ needs.code-quality.result }}"
+          echo "Frontend Tests: ${{ needs.frontend-tests.result }}"
+          echo "Docker Build: ${{ needs.docker-build.result }}"
+          echo "==================================="
+
+          if [[ "${{ needs.python-tests.result }}" != "success" ]]; then
+            echo "❌ Python tests failed or coverage below threshold"
+            exit 1
+          fi
+
+          if [[ "${{ needs.docker-build.result }}" != "success" ]]; then
+            echo "❌ Docker build failed"
+            exit 1
+          fi
+
+          echo "✅ All quality gates passed!"

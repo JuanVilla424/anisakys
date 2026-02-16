@@ -1,273 +1,387 @@
 import { useState } from 'react';
-import { useMutation } from '@tanstack/react-query';
-import {
-  Search,
-  AlertTriangle,
-  CheckCircle,
-  ExternalLink,
-  Shield,
-  Info,
-} from 'lucide-react';
-import { apiClient } from '@/services/api';
-import { Button, Card, Loading, ThreatLevelBadge, Badge } from '@/components';
+import apiClient from '@/services/api';
 import type { MultiAPIScanResult } from '@/types';
-import { format } from 'date-fns';
 
 export function Scanner() {
   const [url, setUrl] = useState('');
-  const [scanResult, setScanResult] = useState<MultiAPIScanResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<MultiAPIScanResult | null>(null);
+  const [saveStatus, setSaveStatus] = useState<string | null>(null);
 
-  const scanMutation = useMutation({
-    mutationFn: (url: string) => apiClient.scanUrl({ url, force_scan: true }),
-    onSuccess: (data) => {
-      setScanResult(data);
-    },
-  });
+  const handleScan = async (e: React.FormEvent) => {
+    e.preventDefault();
 
-  const handleScan = () => {
-    if (url.trim()) {
-      scanMutation.mutate(url.trim());
+    if (!url.trim()) {
+      setError('Please enter a URL');
+      return;
+    }
+
+    // Basic URL validation
+    try {
+      new URL(url);
+    } catch {
+      setError('Invalid URL format. Please include http:// or https://');
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    setSaveStatus(null);
+
+    try {
+      const scanResult = await apiClient.scanUrl({ url: url.trim() });
+      setResult(scanResult);
+    } catch (err: any) {
+      setError(err.response?.data?.error || 'Failed to scan URL. Please try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSaveToSites = async () => {
+    if (!result) return;
+
+    setSaveStatus('saving');
+
+    try {
+      await apiClient.createReport({
+        url: result.url,
+        include_screenshot: true,
+        include_evidence: true,
+      });
+      setSaveStatus('success');
+      setTimeout(() => setSaveStatus(null), 3000);
+    } catch (err: any) {
+      setSaveStatus('error');
+      setError(err.response?.data?.error || 'Failed to save site');
+      setTimeout(() => setSaveStatus(null), 3000);
+    }
+  };
+
+  const getThreatLevelColor = (level: string) => {
+    switch (level) {
+      case 'critical':
+        return 'bg-red-50 text-red-700';
+      case 'high':
+        return 'bg-orange-50 text-orange-700';
+      case 'medium':
+        return 'bg-yellow-50 text-yellow-700';
+      case 'low':
+        return 'bg-blue-50 text-blue-700';
+      case 'safe':
+        return 'bg-green-50 text-green-700';
+      default:
+        return 'bg-gray-100 text-gray-700';
     }
   };
 
   return (
-    <div className="space-y-6">
-      {/* Page header */}
-      <div>
-        <h1 className="text-3xl font-bold text-gray-900">URL Scanner</h1>
-        <p className="mt-2 text-gray-600">
-          Scan URLs using multiple threat intelligence APIs
+    <div className="max-w-[1600px] mx-auto px-8 py-6 space-y-6">
+      {/* Header */}
+      <div className="border-b border-gray-300 pb-4">
+        <h1 className="text-lg font-semibold text-gray-900">URL Scanner</h1>
+        <p className="text-xs text-gray-600 mt-1">
+          Multi-API phishing detection with VirusTotal, URLVoid, and PhishTank validation
         </p>
       </div>
 
-      {/* Scan form */}
-      <Card>
-        <div className="flex gap-4">
-          <div className="flex-1">
-            <label htmlFor="url" className="sr-only">
-              URL to scan
-            </label>
-            <div className="relative">
-              <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-                <Search className="h-5 w-5 text-gray-400" />
-              </div>
+      {/* Scan Form */}
+      <div className="bg-white border border-gray-300">
+        <div className="px-6 py-4 border-b border-gray-300 bg-gray-50">
+          <h2 className="text-xs font-medium text-gray-900">Scan URL</h2>
+        </div>
+        <div className="p-6">
+          <form onSubmit={handleScan} className="space-y-4">
+            <div>
+              <label htmlFor="url" className="block text-xs font-medium text-gray-700 mb-1.5">
+                Target URL
+              </label>
               <input
                 id="url"
-                type="url"
+                type="text"
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleScan()}
-                className="input pl-10"
-                placeholder="Enter URL to scan (e.g., https://suspicious-site.com)"
-                disabled={scanMutation.isPending}
+                placeholder="https://suspicious-domain.com"
+                disabled={loading}
+                className="w-full px-3 py-2 text-xs border border-gray-300 focus:outline-none focus:border-gray-900 disabled:bg-gray-50 disabled:text-gray-500"
               />
-            </div>
-          </div>
-          <Button
-            variant="primary"
-            onClick={handleScan}
-            isLoading={scanMutation.isPending}
-            disabled={!url.trim()}
-          >
-            <Search className="h-4 w-4 mr-2" />
-            Scan URL
-          </Button>
-        </div>
-
-        {scanMutation.isError && (
-          <div className="mt-4 rounded-md bg-danger-50 p-4">
-            <div className="flex">
-              <AlertTriangle className="h-5 w-5 text-danger-400" />
-              <div className="ml-3">
-                <h3 className="text-sm font-medium text-danger-800">Scan failed</h3>
-                <p className="mt-2 text-sm text-danger-700">
-                  {scanMutation.error?.message || 'An error occurred while scanning the URL'}
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
-      </Card>
-
-      {/* Loading state */}
-      {scanMutation.isPending && (
-        <Card>
-          <Loading message="Scanning URL across multiple threat intelligence sources..." />
-        </Card>
-      )}
-
-      {/* Scan results */}
-      {scanResult && (
-        <div className="space-y-6">
-          {/* Overall result */}
-          <Card>
-            <div className="text-center">
-              <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-gray-100">
-                {scanResult.threat_level === 'safe' ? (
-                  <CheckCircle className="h-10 w-10 text-success-600" />
-                ) : (
-                  <AlertTriangle className="h-10 w-10 text-danger-600" />
-                )}
-              </div>
-              <h2 className="mt-4 text-2xl font-bold text-gray-900">
-                Scan Complete
-              </h2>
-              <p className="mt-2 text-gray-600">{scanResult.url}</p>
-              <div className="mt-4 flex items-center justify-center gap-4">
-                <ThreatLevelBadge level={scanResult.threat_level} />
-                <div className="text-3xl font-bold text-gray-900">
-                  {scanResult.confidence_score}%
-                </div>
-                <span className="text-gray-600">Confidence</span>
-              </div>
-              <p className="mt-2 text-sm text-gray-500">
-                Scanned at {format(new Date(scanResult.scan_time), 'MMM dd, yyyy HH:mm:ss')}
+              <p className="text-[10px] text-gray-500 mt-1">
+                Enter the full URL including http:// or https://
               </p>
             </div>
-          </Card>
+
+            {error && (
+              <div className="px-3 py-2 bg-red-50 border border-red-200 text-xs text-red-700">
+                {error}
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="px-4 py-2 text-xs font-medium text-white bg-gray-900 hover:bg-gray-800 disabled:bg-gray-400 disabled:cursor-not-allowed"
+            >
+              {loading ? 'Scanning...' : 'Scan Now'}
+            </button>
+          </form>
+        </div>
+      </div>
+
+      {/* Loading State */}
+      {loading && (
+        <div className="bg-white border border-gray-300 p-8">
+          <div className="flex items-center justify-center space-x-3">
+            <div className="w-4 h-4 border-2 border-gray-300 border-t-gray-900 rounded-full animate-spin"></div>
+            <span className="text-xs text-gray-600">Running multi-API scan...</span>
+          </div>
+        </div>
+      )}
+
+      {/* Scan Results */}
+      {result && !loading && (
+        <div className="space-y-4">
+          {/* Threat Summary */}
+          <div className="bg-white border border-gray-300">
+            <div className="px-6 py-4 border-b border-gray-300 bg-gray-50">
+              <h2 className="text-xs font-medium text-gray-900">Threat Assessment</h2>
+            </div>
+            <div className="p-6 space-y-4">
+              <div className="grid grid-cols-3 gap-4">
+                <div>
+                  <div className="text-[10px] text-gray-500 mb-1">URL Scanned</div>
+                  <div className="text-xs text-gray-900 break-all">{result.url}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-gray-500 mb-1">Confidence Score</div>
+                  <div className="text-lg font-semibold text-gray-900 tabular-nums">
+                    {result.confidence_score}%
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-gray-500 mb-1">Threat Level</div>
+                  <span className={`inline-block px-2 py-0.5 text-[10px] font-medium ${getThreatLevelColor(result.threat_level)}`}>
+                    {result.threat_level.toUpperCase()}
+                  </span>
+                </div>
+              </div>
+
+              {result.recommendations && result.recommendations.length > 0 && (
+                <div className="pt-4 border-t border-gray-300">
+                  <div className="text-[10px] font-medium text-gray-700 mb-2">Recommendations</div>
+                  <ul className="space-y-1">
+                    {result.recommendations.map((rec, idx) => (
+                      <li key={idx} className="text-xs text-gray-600 flex items-start">
+                        <span className="mr-2">•</span>
+                        <span>{rec}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              <div className="pt-4 border-t border-gray-300 flex gap-3">
+                <button
+                  onClick={handleSaveToSites}
+                  disabled={saveStatus === 'saving'}
+                  className="px-4 py-2 text-xs font-medium text-white bg-gray-900 hover:bg-gray-800 disabled:bg-gray-400 disabled:cursor-not-allowed"
+                >
+                  {saveStatus === 'saving' ? 'Saving...' : 'Save to Sites'}
+                </button>
+                {saveStatus === 'success' && (
+                  <div className="px-3 py-2 bg-green-50 border border-green-200 text-xs text-green-700">
+                    ✓ Site saved successfully
+                  </div>
+                )}
+                {result.confidence_score >= 70 && (
+                  <div className="text-xs text-gray-600 flex items-center">
+                    High confidence - recommended for reporting
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
 
           {/* API Results */}
-          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+          <div className="grid grid-cols-2 gap-4">
             {/* VirusTotal */}
-            {scanResult.virustotal && (
-              <Card title="VirusTotal" subtitle="70+ antivirus engines">
-                <div className="space-y-3">
-                  <div className="flex justify-between">
-                    <span className="text-gray-600">Detections:</span>
-                    <span className="font-semibold text-gray-900">
-                      {scanResult.virustotal.positives} / {scanResult.virustotal.total}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-600">Scan Date:</span>
-                    <span className="text-gray-900">
-                      {format(new Date(scanResult.virustotal.scan_date), 'MMM dd, yyyy')}
-                    </span>
-                  </div>
-                  <a
-                    href={scanResult.virustotal.permalink}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex items-center gap-2 text-primary-600 hover:text-primary-700"
-                  >
-                    View full report <ExternalLink className="h-4 w-4" />
-                  </a>
+            {result.virustotal && (
+              <div className="bg-white border border-gray-300">
+                <div className="px-4 py-3 border-b border-gray-300 bg-gray-50">
+                  <h3 className="text-xs font-medium text-gray-900">VirusTotal</h3>
                 </div>
-              </Card>
+                <div className="p-4 space-y-2">
+                  {result.virustotal.error ? (
+                    <div className="text-xs text-red-600">{result.virustotal.error}</div>
+                  ) : (
+                    <>
+                      <div className="flex justify-between items-center">
+                        <span className="text-[10px] text-gray-500">Detections</span>
+                        <span className="text-xs font-medium text-gray-900 tabular-nums">
+                          {result.virustotal.positives} / {result.virustotal.total}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-[10px] text-gray-500">Detection Rate</span>
+                        <span className="text-xs font-medium text-gray-900 tabular-nums">
+                          {((result.virustotal.positives / result.virustotal.total) * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                      {result.virustotal.scan_date && (
+                        <div className="flex justify-between items-center">
+                          <span className="text-[10px] text-gray-500">Scan Date</span>
+                          <span className="text-xs text-gray-600">
+                            {new Date(result.virustotal.scan_date).toLocaleDateString()}
+                          </span>
+                        </div>
+                      )}
+                      {result.virustotal.permalink && (
+                        <div className="pt-2 border-t border-gray-300">
+                          <a
+                            href={result.virustotal.permalink}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs text-blue-600 hover:text-blue-700"
+                          >
+                            View Full Report →
+                          </a>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
             )}
 
             {/* URLVoid */}
-            {scanResult.urlvoid && (
-              <Card title="URLVoid" subtitle="30+ reputation sources">
-                <div className="space-y-3">
-                  <div className="flex justify-between">
-                    <span className="text-gray-600">Detections:</span>
-                    <span className="font-semibold text-gray-900">
-                      {scanResult.urlvoid.detections} / {scanResult.urlvoid.engines_count}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-600">Reputation Score:</span>
-                    <span className="text-gray-900">
-                      {scanResult.urlvoid.reputation_score}/100
-                    </span>
-                  </div>
+            {result.urlvoid && (
+              <div className="bg-white border border-gray-300">
+                <div className="px-4 py-3 border-b border-gray-300 bg-gray-50">
+                  <h3 className="text-xs font-medium text-gray-900">URLVoid</h3>
                 </div>
-              </Card>
+                <div className="p-4 space-y-2">
+                  {result.urlvoid.error ? (
+                    <div className="text-xs text-red-600">{result.urlvoid.error}</div>
+                  ) : (
+                    <>
+                      <div className="flex justify-between items-center">
+                        <span className="text-[10px] text-gray-500">Blacklist Detections</span>
+                        <span className="text-xs font-medium text-gray-900 tabular-nums">
+                          {result.urlvoid.detections} / {result.urlvoid.engines_count}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-[10px] text-gray-500">Detection Rate</span>
+                        <span className="text-xs font-medium text-gray-900 tabular-nums">
+                          {((result.urlvoid.detections / result.urlvoid.engines_count) * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                      {result.urlvoid.reputation_score !== undefined && (
+                        <div className="flex justify-between items-center">
+                          <span className="text-[10px] text-gray-500">Reputation Score</span>
+                          <span className="text-xs font-medium text-gray-900 tabular-nums">
+                            {result.urlvoid.reputation_score}/100
+                          </span>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              </div>
             )}
 
             {/* PhishTank */}
-            {scanResult.phishtank && (
-              <Card title="PhishTank" subtitle="Community phishing database">
-                <div className="space-y-3">
-                  <div className="flex justify-between">
-                    <span className="text-gray-600">In Database:</span>
-                    {scanResult.phishtank.in_database ? (
-                      <Badge variant="danger">Yes</Badge>
-                    ) : (
-                      <Badge variant="success">No</Badge>
-                    )}
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-600">Verified:</span>
-                    {scanResult.phishtank.verified ? (
-                      <Badge variant="danger">Yes</Badge>
-                    ) : (
-                      <Badge variant="info">No</Badge>
-                    )}
-                  </div>
-                  {scanResult.phishtank.verification_time && (
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Verification Time:</span>
-                      <span className="text-gray-900">
-                        {format(
-                          new Date(scanResult.phishtank.verification_time),
-                          'MMM dd, yyyy'
-                        )}
-                      </span>
-                    </div>
+            {result.phishtank && (
+              <div className="bg-white border border-gray-300">
+                <div className="px-4 py-3 border-b border-gray-300 bg-gray-50">
+                  <h3 className="text-xs font-medium text-gray-900">PhishTank</h3>
+                </div>
+                <div className="p-4 space-y-2">
+                  {result.phishtank.error ? (
+                    <div className="text-xs text-red-600">{result.phishtank.error}</div>
+                  ) : (
+                    <>
+                      <div className="flex justify-between items-center">
+                        <span className="text-[10px] text-gray-500">In Database</span>
+                        <span className={`px-2 py-0.5 text-[10px] font-medium ${result.phishtank.in_database ? 'bg-red-50 text-red-700' : 'bg-green-50 text-green-700'}`}>
+                          {result.phishtank.in_database ? 'YES' : 'NO'}
+                        </span>
+                      </div>
+                      {result.phishtank.in_database && (
+                        <div className="flex justify-between items-center">
+                          <span className="text-[10px] text-gray-500">Verified</span>
+                          <span className={`px-2 py-0.5 text-[10px] font-medium ${result.phishtank.verified ? 'bg-red-50 text-red-700' : 'bg-yellow-50 text-yellow-700'}`}>
+                            {result.phishtank.verified ? 'YES' : 'NO'}
+                          </span>
+                        </div>
+                      )}
+                      {result.phishtank.verification_time && (
+                        <div className="flex justify-between items-center">
+                          <span className="text-[10px] text-gray-500">Verification Time</span>
+                          <span className="text-xs text-gray-600">
+                            {new Date(result.phishtank.verification_time).toLocaleDateString()}
+                          </span>
+                        </div>
+                      )}
+                    </>
                   )}
                 </div>
-              </Card>
+              </div>
             )}
 
             {/* WHOIS */}
-            {scanResult.whois && (
-              <Card title="WHOIS Information" subtitle="Domain registration details">
-                <div className="space-y-3">
-                  <div className="flex justify-between">
-                    <span className="text-gray-600">Domain:</span>
-                    <span className="text-gray-900">{scanResult.whois.domain}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-600">Registrar:</span>
-                    <span className="text-gray-900">{scanResult.whois.registrar}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-600">Created:</span>
-                    <span className="text-gray-900">
-                      {format(new Date(scanResult.whois.creation_date), 'MMM dd, yyyy')}
-                    </span>
-                  </div>
-                  {scanResult.whois.abuse_contact && (
-                    <div className="flex justify-between">
-                      <span className="text-gray-600">Abuse Contact:</span>
-                      <span className="text-gray-900">
-                        {scanResult.whois.abuse_contact}
+            {result.whois && (
+              <div className="bg-white border border-gray-300">
+                <div className="px-4 py-3 border-b border-gray-300 bg-gray-50">
+                  <h3 className="text-xs font-medium text-gray-900">WHOIS Information</h3>
+                </div>
+                <div className="p-4 space-y-2">
+                  {result.whois.domain && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-[10px] text-gray-500">Domain</span>
+                      <span className="text-xs text-gray-900">{result.whois.domain}</span>
+                    </div>
+                  )}
+                  {result.whois.registrar && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-[10px] text-gray-500">Registrar</span>
+                      <span className="text-xs text-gray-900">{result.whois.registrar}</span>
+                    </div>
+                  )}
+                  {result.whois.creation_date && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-[10px] text-gray-500">Creation Date</span>
+                      <span className="text-xs text-gray-600">
+                        {new Date(result.whois.creation_date).toLocaleDateString()}
                       </span>
                     </div>
                   )}
+                  {result.whois.abuse_contact && (
+                    <div className="flex justify-between items-center">
+                      <span className="text-[10px] text-gray-500">Abuse Contact</span>
+                      <span className="text-xs text-gray-900">{result.whois.abuse_contact}</span>
+                    </div>
+                  )}
                 </div>
-              </Card>
+              </div>
             )}
           </div>
 
-          {/* Recommendations */}
-          {scanResult.recommendations && scanResult.recommendations.length > 0 && (
-            <Card
-              title="Recommendations"
-              subtitle="Suggested actions based on scan results"
-            >
-              <div className="space-y-3">
-                {scanResult.recommendations.map((recommendation, index) => (
-                  <div key={index} className="flex gap-3">
-                    <Info className="h-5 w-5 text-primary-600 flex-shrink-0 mt-0.5" />
-                    <p className="text-gray-700">{recommendation}</p>
-                  </div>
-                ))}
-              </div>
-            </Card>
-          )}
-
           {/* Screenshot */}
-          {scanResult.screenshot_url && (
-            <Card title="Screenshot" subtitle="Visual evidence">
-              <img
-                src={scanResult.screenshot_url}
-                alt="Site screenshot"
-                className="w-full rounded-lg border border-gray-200"
-              />
-            </Card>
+          {result.screenshot_url && (
+            <div className="bg-white border border-gray-300">
+              <div className="px-6 py-4 border-b border-gray-300 bg-gray-50">
+                <h2 className="text-xs font-medium text-gray-900">Screenshot Evidence</h2>
+              </div>
+              <div className="p-6">
+                <img
+                  src={result.screenshot_url}
+                  alt="Website screenshot"
+                  className="w-full border border-gray-300"
+                />
+              </div>
+            </div>
           )}
         </div>
       )}

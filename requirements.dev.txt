@@ -8,3 +8,16 @@ black>=24.3.0
 pytest>=7.3.1
 pytest-cov>=4.0.0
 coverage>=7.2.5
+pytest-asyncio>=0.21.0
+
+# Sprint 5: Performance Profiling Tools
+py-spy>=0.3.14
+locust>=2.20.0
+pytest-benchmark>=4.0.0
+memory-profiler>=0.61.0
+line-profiler>=4.1.1
+
+# Sprint 5: Security Audit Tools
+bandit>=1.7.7
+safety>=3.0.0
+pip-audit>=2.7.0

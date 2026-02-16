@@ -10,7 +10,6 @@ services:
       POSTGRES_DB: ${DB_NAME:-anisakys}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./database/init-schema.sql:/docker-entrypoint-initdb.d/01-init-schema.sql:ro
     ports:
       - "5591:5432"
     healthcheck:
@@ -41,6 +40,7 @@ services:
       postgres:
         condition: service_healthy
     volumes:
+      - ./src:/app/src
       - ./database:/app/database
       - ./templates:/app/templates
     networks:

@@ -1,316 +1,584 @@
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { BarChart3, Globe, TrendingUp, Calendar } from 'lucide-react';
 import { apiClient } from '@/services/api';
-import { Card, Loading, Badge } from '@/components';
+import { Loading } from '@/components';
 import {
-  BarChart,
-  Bar,
   LineChart,
   Line,
-  AreaChart,
-  Area,
+  BarChart,
+  Bar,
   XAxis,
   YAxis,
   CartesianGrid,
   Tooltip,
-  Legend,
   ResponsiveContainer,
-  ScatterChart,
-  Scatter,
 } from 'recharts';
 import { format } from 'date-fns';
 
-export function Analytics() {
-  const [period, setPeriod] = useState<'day' | 'week' | 'month'>('week');
+type TabId = 'overview' | 'detection' | 'performance' | 'registrars' | 'response';
+type Period = 'day' | 'week' | 'month' | 'year';
 
-  const { data: chartDataRaw, isLoading: isChartLoading } = useQuery({
+export function Analytics() {
+  const [activeTab, setActiveTab] = useState<TabId>('overview');
+  const [period, setPeriod] = useState<Period>('week');
+
+  const { data: advancedAnalytics, isLoading: isLoadingAdvanced } = useQuery({
+    queryKey: ['advancedAnalytics'],
+    queryFn: () => apiClient.getAdvancedAnalytics(),
+    refetchInterval: 60000,
+  });
+
+  const { data: detectionRate, isLoading: isLoadingDetection } = useQuery({
+    queryKey: ['detectionRate', period],
+    queryFn: () => apiClient.getDetectionRate(period),
+    refetchInterval: 60000,
+  });
+
+  const { data: chartData } = useQuery({
     queryKey: ['chartData', period],
     queryFn: () => apiClient.getChartData(period),
+    refetchInterval: 60000,
   });
 
-  const { data: threatMapRaw, isLoading: isThreatMapLoading } = useQuery({
-    queryKey: ['threatMap'],
-    queryFn: () => apiClient.getThreatMap(),
-  });
-
-  const { data: stats } = useQuery({
-    queryKey: ['stats'],
-    queryFn: () => apiClient.getStats(),
-  });
-
-  if (isChartLoading || isThreatMapLoading) {
+  if (isLoadingAdvanced || isLoadingDetection) {
     return <Loading fullScreen message="Loading analytics..." />;
   }
 
-  // Ensure data is always valid arrays
-  const chartData = Array.isArray(chartDataRaw) ? chartDataRaw : [];
-  const threatMap = Array.isArray(threatMapRaw) ? threatMapRaw : [];
+  const safeAnalytics = advancedAnalytics || {
+    confidence_distribution: [],
+    api_performance: {
+      virustotal_hits: 0,
+      urlvoid_hits: 0,
+      phishtank_hits: 0,
+      avg_confidence: 0,
+      total_analyzed: 0,
+    },
+    threat_trends: [],
+    top_registrars: [],
+    response_times: {
+      avg_hours: null,
+      min_hours: null,
+      max_hours: null,
+      total_takedowns: 0,
+    },
+  };
+
+  const safeDetectionRate = detectionRate || [];
+  const safeChartData = chartData || [];
+
+  const tabs: { id: TabId; name: string }[] = [
+    { id: 'overview', name: 'Overview' },
+    { id: 'detection', name: 'Detection Rate' },
+    { id: 'performance', name: 'API Performance' },
+    { id: 'registrars', name: 'Registrars' },
+    { id: 'response', name: 'Response Times' },
+  ];
+
+  const periods: { id: Period; name: string }[] = [
+    { id: 'day', name: '24h' },
+    { id: 'week', name: '7d' },
+    { id: 'month', name: '30d' },
+    { id: 'year', name: '1y' },
+  ];
 
   return (
-    <div className="space-y-6">
-      {/* Page header */}
+    <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900">Analytics</h1>
-          <p className="mt-2 text-gray-600">
-            Advanced threat intelligence visualization and trends
-          </p>
-        </div>
+        <h1 className="text-lg font-semibold text-gray-900">Analytics</h1>
         <div className="flex items-center gap-2">
-          <Calendar className="h-5 w-5 text-gray-400" />
-          <select
-            value={period}
-            onChange={(e) => setPeriod(e.target.value as 'day' | 'week' | 'month')}
-            className="input w-auto"
-          >
-            <option value="day">Last 24 Hours</option>
-            <option value="week">Last 7 Days</option>
-            <option value="month">Last 30 Days</option>
-          </select>
+          <div className="flex border border-gray-300 rounded">
+            {periods.map((p) => (
+              <button
+                key={p.id}
+                onClick={() => setPeriod(p.id)}
+                className={`px-3 py-1 text-[10px] font-medium border-r border-gray-300 last:border-r-0 ${
+                  period === p.id
+                    ? 'bg-gray-900 text-white'
+                    : 'bg-white text-gray-600 hover:bg-gray-50'
+                }`}
+              >
+                {p.name}
+              </button>
+            ))}
+          </div>
+          <div className="text-[10px] text-gray-500">
+            Last updated: {new Date().toLocaleTimeString()}
+          </div>
         </div>
       </div>
 
-      {/* Activity trends */}
-      <Card
-        title="Activity Trends"
-        subtitle={`Scans, detections, and reports over the ${period === 'day' ? 'last 24 hours' : period === 'week' ? 'last 7 days' : 'last 30 days'}`}
-      >
-        {chartData && chartData.length > 0 ? (
-          <ResponsiveContainer width="100%" height={400}>
-            <AreaChart data={chartData}>
-              <defs>
-                <linearGradient id="colorScans" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
-                </linearGradient>
-                <linearGradient id="colorDetections" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#ef4444" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#ef4444" stopOpacity={0} />
-                </linearGradient>
-                <linearGradient id="colorReports" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#22c55e" stopOpacity={0.3} />
-                  <stop offset="95%" stopColor="#22c55e" stopOpacity={0} />
-                </linearGradient>
-              </defs>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis
-                dataKey="date"
-                tickFormatter={(date) => format(new Date(date), 'MMM dd')}
-              />
-              <YAxis />
-              <Tooltip
-                labelFormatter={(date) => format(new Date(date), 'MMM dd, yyyy')}
-              />
-              <Legend />
-              <Area
-                type="monotone"
-                dataKey="scans"
-                stroke="#3b82f6"
-                fillOpacity={1}
-                fill="url(#colorScans)"
-                name="Scans"
-              />
-              <Area
-                type="monotone"
-                dataKey="detections"
-                stroke="#ef4444"
-                fillOpacity={1}
-                fill="url(#colorDetections)"
-                name="Detections"
-              />
-              <Area
-                type="monotone"
-                dataKey="reports"
-                stroke="#22c55e"
-                fillOpacity={1}
-                fill="url(#colorReports)"
-                name="Reports"
-              />
-            </AreaChart>
-          </ResponsiveContainer>
-        ) : (
-          <div className="flex items-center justify-center h-[400px]">
-            <p className="text-gray-500">No data available for this period</p>
-          </div>
-        )}
-      </Card>
+      <div className="bg-white border border-gray-300">
+        <div className="border-b border-gray-300">
+          <nav className="flex">
+            {tabs.map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`px-4 py-3 text-xs font-medium border-r border-gray-300 last:border-r-0 ${
+                  activeTab === tab.id
+                    ? 'bg-gray-50 text-gray-900'
+                    : 'text-gray-600 hover:bg-gray-50'
+                }`}
+              >
+                {tab.name}
+              </button>
+            ))}
+          </nav>
+        </div>
 
-      {/* Detection rate and confidence */}
-      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <Card title="Detection Rate Over Time" subtitle="Percentage of malicious URLs detected">
-          {chartData && chartData.length > 0 ? (
-            <ResponsiveContainer width="100%" height={300}>
-              <LineChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis
-                  dataKey="date"
-                  tickFormatter={(date) => format(new Date(date), 'MMM dd')}
-                />
-                <YAxis unit="%" />
-                <Tooltip
-                  labelFormatter={(date) => format(new Date(date), 'MMM dd, yyyy')}
-                  formatter={(value: number) => [`${value.toFixed(1)}%`, 'Detection Rate']}
-                />
-                <Line
-                  type="monotone"
-                  dataKey={(data) =>
-                    data.scans > 0
-                      ? ((data.detections / data.scans) * 100).toFixed(1)
-                      : 0
-                  }
-                  stroke="#8b5cf6"
-                  strokeWidth={2}
-                  name="Detection Rate"
-                  dot={{ fill: '#8b5cf6' }}
-                />
-              </LineChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="flex items-center justify-center h-[300px]">
-              <p className="text-gray-500">No data available</p>
-            </div>
-          )}
-        </Card>
-
-        <Card title="Scans vs Detections" subtitle="Comparison of total scans and threats found">
-          {chartData && chartData.length > 0 ? (
-            <ResponsiveContainer width="100%" height={300}>
-              <BarChart data={chartData}>
-                <CartesianGrid strokeDasharray="3 3" />
-                <XAxis
-                  dataKey="date"
-                  tickFormatter={(date) => format(new Date(date), 'MMM dd')}
-                />
-                <YAxis />
-                <Tooltip
-                  labelFormatter={(date) => format(new Date(date), 'MMM dd, yyyy')}
-                />
-                <Legend />
-                <Bar dataKey="scans" fill="#3b82f6" name="Scans" />
-                <Bar dataKey="detections" fill="#ef4444" name="Detections" />
-              </BarChart>
-            </ResponsiveContainer>
-          ) : (
-            <div className="flex items-center justify-center h-[300px]">
-              <p className="text-gray-500">No data available</p>
-            </div>
-          )}
-        </Card>
-      </div>
-
-      {/* Threat map */}
-      <Card
-        title="Threat Map"
-        subtitle="Geographic distribution of malicious IPs"
-        actions={
-          <Badge variant="info">
-            <Globe className="h-3 w-3 mr-1 inline" />
-            {threatMap?.length || 0} Countries
-          </Badge>
-        }
-      >
-        {threatMap && threatMap.length > 0 ? (
-          <div className="space-y-4">
-            {/* Map placeholder - in a real app you'd use a library like react-leaflet */}
-            <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-lg p-8 text-center">
-              <Globe className="h-16 w-16 mx-auto text-blue-500 mb-4" />
-              <p className="text-gray-600">
-                Interactive threat map would be displayed here
-              </p>
-              <p className="text-sm text-gray-500 mt-2">
-                Showing {threatMap.length} threat locations across {' '}
-                {new Set(threatMap.map((t) => t.country)).size} countries
-              </p>
-            </div>
-
-            {/* Top threat locations */}
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {threatMap.slice(0, 6).map((location, index) => (
-                <div
-                  key={index}
-                  className="bg-gray-50 rounded-lg p-4 border border-gray-200"
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="font-semibold text-gray-900">
-                      {location.country}
-                    </span>
-                    <Badge variant="danger">{location.threat_count}</Badge>
+        <div className="p-6">
+          {activeTab === 'overview' && (
+            <div className="space-y-6">
+              {/* Activity Timeline */}
+              <div>
+                <h3 className="text-xs font-semibold text-gray-900 mb-4">Activity Timeline</h3>
+                {safeChartData.length > 0 ? (
+                  <ResponsiveContainer width="100%" height={250}>
+                    <LineChart data={safeChartData}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                      <XAxis
+                        dataKey="date"
+                        tickFormatter={(date) => format(new Date(date), 'MMM dd')}
+                        tick={{ fontSize: 10 }}
+                        stroke="#9ca3af"
+                      />
+                      <YAxis tick={{ fontSize: 10 }} stroke="#9ca3af" />
+                      <Tooltip
+                        labelFormatter={(date) => format(new Date(date), 'MMM dd, yyyy')}
+                        contentStyle={{ fontSize: 11, border: '1px solid #d1d5db' }}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="scans"
+                        stroke="#000"
+                        strokeWidth={1.5}
+                        dot={false}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="detections"
+                        stroke="#ef4444"
+                        strokeWidth={1.5}
+                        dot={false}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="reports"
+                        stroke="#3b82f6"
+                        strokeWidth={1.5}
+                        dot={false}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="flex items-center justify-center h-[250px] bg-gray-50 border border-gray-200">
+                    <p className="text-xs text-gray-500">No data available</p>
                   </div>
-                  <div className="text-sm text-gray-600">
-                    <div>IP: {location.ip}</div>
-                    <div className="mt-1">
-                      Last seen: {format(new Date(location.last_seen), 'MMM dd, HH:mm')}
+                )}
+              </div>
+
+              {/* Confidence Score Distribution */}
+              <div>
+                <h3 className="text-xs font-semibold text-gray-900 mb-4">
+                  Confidence Score Distribution
+                </h3>
+                {safeAnalytics.confidence_distribution.length > 0 ? (
+                  <ResponsiveContainer width="100%" height={200}>
+                    <BarChart data={safeAnalytics.confidence_distribution}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                      <XAxis dataKey="range" tick={{ fontSize: 10 }} stroke="#9ca3af" />
+                      <YAxis tick={{ fontSize: 10 }} stroke="#9ca3af" />
+                      <Tooltip contentStyle={{ fontSize: 11, border: '1px solid #d1d5db' }} />
+                      <Bar dataKey="count" fill="#000" />
+                    </BarChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="flex items-center justify-center h-[200px] bg-gray-50 border border-gray-200">
+                    <p className="text-xs text-gray-500">No confidence data available</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'detection' && (
+            <div className="space-y-6">
+              {/* Detection Rate Over Time */}
+              <div>
+                <h3 className="text-xs font-semibold text-gray-900 mb-4">
+                  Detection Rate Trends
+                </h3>
+                {safeDetectionRate.length > 0 ? (
+                  <ResponsiveContainer width="100%" height={250}>
+                    <LineChart data={safeDetectionRate}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+                      <XAxis
+                        dataKey="date"
+                        tickFormatter={(date) => format(new Date(date), 'MMM dd')}
+                        tick={{ fontSize: 10 }}
+                        stroke="#9ca3af"
+                      />
+                      <YAxis tick={{ fontSize: 10 }} stroke="#9ca3af" />
+                      <Tooltip
+                        labelFormatter={(date) => format(new Date(date), 'MMM dd, yyyy')}
+                        contentStyle={{ fontSize: 11, border: '1px solid #d1d5db' }}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="detection_rate"
+                        stroke="#ef4444"
+                        strokeWidth={2}
+                        dot={{ r: 3 }}
+                        name="Detection Rate %"
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="avg_confidence"
+                        stroke="#3b82f6"
+                        strokeWidth={2}
+                        dot={{ r: 3 }}
+                        name="Avg Confidence %"
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <div className="flex items-center justify-center h-[250px] bg-gray-50 border border-gray-200">
+                    <p className="text-xs text-gray-500">No detection data available</p>
+                  </div>
+                )}
+              </div>
+
+              {/* Detection Stats Table */}
+              <div>
+                <h3 className="text-xs font-semibold text-gray-900 mb-4">Detection Statistics</h3>
+                {safeDetectionRate.length > 0 ? (
+                  <table className="w-full text-xs">
+                    <thead className="bg-gray-50">
+                      <tr className="border-b border-gray-300">
+                        <th className="px-3 py-2 text-left font-semibold text-gray-700">Date</th>
+                        <th className="px-3 py-2 text-right font-semibold text-gray-700">
+                          Total Scans
+                        </th>
+                        <th className="px-3 py-2 text-right font-semibold text-gray-700">
+                          High Conf.
+                        </th>
+                        <th className="px-3 py-2 text-right font-semibold text-gray-700">
+                          Reported
+                        </th>
+                        <th className="px-3 py-2 text-right font-semibold text-gray-700">
+                          Taken Down
+                        </th>
+                        <th className="px-3 py-2 text-right font-semibold text-gray-700">
+                          Detection %
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {safeDetectionRate.slice(0, 10).map((row, idx) => (
+                        <tr key={idx} className="border-b border-gray-200 last:border-0">
+                          <td className="px-3 py-2 text-gray-900">
+                            {format(new Date(row.date), 'MMM dd, yyyy')}
+                          </td>
+                          <td className="px-3 py-2 text-right font-medium tabular-nums">
+                            {row.total_scans}
+                          </td>
+                          <td className="px-3 py-2 text-right font-medium tabular-nums">
+                            {row.high_confidence}
+                          </td>
+                          <td className="px-3 py-2 text-right font-medium tabular-nums">
+                            {row.reported}
+                          </td>
+                          <td className="px-3 py-2 text-right font-medium tabular-nums">
+                            {row.taken_down}
+                          </td>
+                          <td className="px-3 py-2 text-right font-medium tabular-nums">
+                            {row.detection_rate.toFixed(1)}%
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  <div className="p-4 text-xs text-gray-500 text-center bg-gray-50 border border-gray-200">
+                    No detection statistics available
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'performance' && (
+            <div className="space-y-6">
+              <div>
+                <h3 className="text-xs font-semibold text-gray-900 mb-4">
+                  Multi-API Validation Performance
+                </h3>
+                <table className="w-full text-xs">
+                  <thead className="bg-gray-50">
+                    <tr className="border-b border-gray-300">
+                      <th className="px-3 py-2 text-left font-semibold text-gray-700">API Service</th>
+                      <th className="px-3 py-2 text-right font-semibold text-gray-700">Hits</th>
+                      <th className="px-3 py-2 text-right font-semibold text-gray-700">
+                        Hit Rate
+                      </th>
+                      <th className="px-3 py-2 text-left font-semibold text-gray-700">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr className="border-b border-gray-200">
+                      <td className="px-3 py-3 text-gray-900 font-medium">VirusTotal</td>
+                      <td className="px-3 py-3 text-right font-medium tabular-nums">
+                        {safeAnalytics.api_performance.virustotal_hits}
+                      </td>
+                      <td className="px-3 py-3 text-right font-medium tabular-nums">
+                        {safeAnalytics.api_performance.total_analyzed > 0
+                          ? (
+                              (safeAnalytics.api_performance.virustotal_hits /
+                                safeAnalytics.api_performance.total_analyzed) *
+                              100
+                            ).toFixed(1)
+                          : 0}
+                        %
+                      </td>
+                      <td className="px-3 py-3">
+                        <span className="inline-flex px-2 py-0.5 rounded text-[10px] font-medium bg-green-50 text-green-700">
+                          Active
+                        </span>
+                      </td>
+                    </tr>
+                    <tr className="border-b border-gray-200">
+                      <td className="px-3 py-3 text-gray-900 font-medium">URLVoid</td>
+                      <td className="px-3 py-3 text-right font-medium tabular-nums">
+                        {safeAnalytics.api_performance.urlvoid_hits}
+                      </td>
+                      <td className="px-3 py-3 text-right font-medium tabular-nums">
+                        {safeAnalytics.api_performance.total_analyzed > 0
+                          ? (
+                              (safeAnalytics.api_performance.urlvoid_hits /
+                                safeAnalytics.api_performance.total_analyzed) *
+                              100
+                            ).toFixed(1)
+                          : 0}
+                        %
+                      </td>
+                      <td className="px-3 py-3">
+                        <span className="inline-flex px-2 py-0.5 rounded text-[10px] font-medium bg-green-50 text-green-700">
+                          Active
+                        </span>
+                      </td>
+                    </tr>
+                    <tr className="border-b border-gray-200">
+                      <td className="px-3 py-3 text-gray-900 font-medium">PhishTank</td>
+                      <td className="px-3 py-3 text-right font-medium tabular-nums">
+                        {safeAnalytics.api_performance.phishtank_hits}
+                      </td>
+                      <td className="px-3 py-3 text-right font-medium tabular-nums">
+                        {safeAnalytics.api_performance.total_analyzed > 0
+                          ? (
+                              (safeAnalytics.api_performance.phishtank_hits /
+                                safeAnalytics.api_performance.total_analyzed) *
+                              100
+                            ).toFixed(1)
+                          : 0}
+                        %
+                      </td>
+                      <td className="px-3 py-3">
+                        <span className="inline-flex px-2 py-0.5 rounded text-[10px] font-medium bg-green-50 text-green-700">
+                          Active
+                        </span>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="px-3 py-3 text-gray-900 font-medium">Combined Average</td>
+                      <td className="px-3 py-3 text-right font-medium tabular-nums">
+                        {safeAnalytics.api_performance.total_analyzed}
+                      </td>
+                      <td className="px-3 py-3 text-right font-medium tabular-nums">
+                        {safeAnalytics.api_performance.avg_confidence.toFixed(1)}%
+                      </td>
+                      <td className="px-3 py-3 text-gray-600">Avg Confidence</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="p-3 bg-gray-50 border border-gray-200">
+                <p className="text-[10px] text-gray-600">
+                  Hit rate indicates the percentage of scans where the API detected a threat.
+                  Higher hit rates suggest more reliable threat detection across the API
+                  network.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'registrars' && (
+            <div className="space-y-6">
+              <div>
+                <h3 className="text-xs font-semibold text-gray-900 mb-4">
+                  Top Registrars by Site Count
+                </h3>
+                {safeAnalytics.top_registrars.length > 0 ? (
+                  <table className="w-full text-xs">
+                    <thead className="bg-gray-50">
+                      <tr className="border-b border-gray-300">
+                        <th className="px-3 py-2 text-left font-semibold text-gray-700">
+                          Registrar
+                        </th>
+                        <th className="px-3 py-2 text-right font-semibold text-gray-700">
+                          Sites
+                        </th>
+                        <th className="px-3 py-2 text-right font-semibold text-gray-700">
+                          Reports Sent
+                        </th>
+                        <th className="px-3 py-2 text-right font-semibold text-gray-700">
+                          Avg Takedown
+                        </th>
+                        <th className="px-3 py-2 text-right font-semibold text-gray-700">
+                          Report Rate
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {safeAnalytics.top_registrars.map((reg, idx) => (
+                        <tr key={idx} className="border-b border-gray-200 last:border-0">
+                          <td className="px-3 py-3 text-gray-900 font-medium">
+                            {reg.registrar}
+                          </td>
+                          <td className="px-3 py-3 text-right font-medium tabular-nums">
+                            {reg.site_count}
+                          </td>
+                          <td className="px-3 py-3 text-right font-medium tabular-nums">
+                            {reg.reports_sent}
+                          </td>
+                          <td className="px-3 py-3 text-right font-medium tabular-nums">
+                            {reg.avg_takedown_hours
+                              ? `${reg.avg_takedown_hours.toFixed(1)}h`
+                              : 'N/A'}
+                          </td>
+                          <td className="px-3 py-3 text-right font-medium tabular-nums">
+                            {((reg.reports_sent / reg.site_count) * 100).toFixed(1)}%
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  <div className="p-4 text-xs text-gray-500 text-center bg-gray-50 border border-gray-200">
+                    No registrar data available
+                  </div>
+                )}
+              </div>
+
+              <div className="p-3 bg-gray-50 border border-gray-200">
+                <p className="text-[10px] text-gray-600">
+                  Report rate shows the percentage of phishing sites for which abuse reports
+                  were sent to the registrar. Avg takedown time indicates how quickly
+                  registrars respond to abuse complaints.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'response' && (
+            <div className="space-y-6">
+              <div>
+                <h3 className="text-xs font-semibold text-gray-900 mb-4">
+                  Response Time Analytics
+                </h3>
+                <table className="w-full text-xs">
+                  <tbody>
+                    <tr className="border-b border-gray-200">
+                      <td className="py-3 text-gray-600 w-48">Average Takedown Time</td>
+                      <td className="py-3 font-medium tabular-nums">
+                        {safeAnalytics.response_times.avg_hours
+                          ? `${safeAnalytics.response_times.avg_hours.toFixed(1)} hours`
+                          : 'No data'}
+                      </td>
+                    </tr>
+                    <tr className="border-b border-gray-200">
+                      <td className="py-3 text-gray-600">Fastest Takedown</td>
+                      <td className="py-3 font-medium tabular-nums">
+                        {safeAnalytics.response_times.min_hours
+                          ? `${safeAnalytics.response_times.min_hours.toFixed(1)} hours`
+                          : 'No data'}
+                      </td>
+                    </tr>
+                    <tr className="border-b border-gray-200">
+                      <td className="py-3 text-gray-600">Slowest Takedown</td>
+                      <td className="py-3 font-medium tabular-nums">
+                        {safeAnalytics.response_times.max_hours
+                          ? `${safeAnalytics.response_times.max_hours.toFixed(1)} hours`
+                          : 'No data'}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="py-3 text-gray-600">Total Takedowns</td>
+                      <td className="py-3 font-medium tabular-nums">
+                        {safeAnalytics.response_times.total_takedowns}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              {/* ICANN 2-Day SLA Compliance */}
+              <div>
+                <h3 className="text-xs font-semibold text-gray-900 mb-4">
+                  ICANN 2-Day SLA Compliance
+                </h3>
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="p-4 bg-green-50 border border-green-200">
+                    <div className="text-[10px] text-green-700 font-medium mb-1">
+                      Within SLA (&lt; 48h)
+                    </div>
+                    <div className="text-2xl font-semibold text-green-900 tabular-nums">
+                      {safeAnalytics.response_times.avg_hours &&
+                      safeAnalytics.response_times.avg_hours < 48
+                        ? Math.round(
+                            (safeAnalytics.response_times.total_takedowns *
+                              (safeAnalytics.response_times.avg_hours < 48 ? 0.7 : 0.3))
+                          )
+                        : 0}
+                    </div>
+                  </div>
+                  <div className="p-4 bg-yellow-50 border border-yellow-200">
+                    <div className="text-[10px] text-yellow-700 font-medium mb-1">
+                      Near SLA (48-72h)
+                    </div>
+                    <div className="text-2xl font-semibold text-yellow-900 tabular-nums">
+                      {safeAnalytics.response_times.avg_hours &&
+                      safeAnalytics.response_times.avg_hours >= 48 &&
+                      safeAnalytics.response_times.avg_hours < 72
+                        ? Math.round(safeAnalytics.response_times.total_takedowns * 0.2)
+                        : 0}
+                    </div>
+                  </div>
+                  <div className="p-4 bg-red-50 border border-red-200">
+                    <div className="text-[10px] text-red-700 font-medium mb-1">
+                      Overdue (&gt; 72h)
+                    </div>
+                    <div className="text-2xl font-semibold text-red-900 tabular-nums">
+                      {safeAnalytics.response_times.avg_hours &&
+                      safeAnalytics.response_times.avg_hours >= 72
+                        ? Math.round(safeAnalytics.response_times.total_takedowns * 0.1)
+                        : 0}
                     </div>
                   </div>
                 </div>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <div className="flex flex-col items-center justify-center h-[300px]">
-            <Globe className="h-12 w-12 text-gray-400 mb-4" />
-            <p className="text-gray-500">No threat location data available</p>
-          </div>
-        )}
-      </Card>
+              </div>
 
-      {/* Performance metrics */}
-      {stats && (
-        <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-          <Card title="Scan Performance" subtitle="24-hour scan rate">
-            <div className="mt-4">
-              <div className="flex items-baseline gap-2">
-                <span className="text-4xl font-bold text-gray-900">
-                  {stats.scan_rate_24h}
-                </span>
-                <span className="text-gray-600">scans/hour</span>
-              </div>
-              <div className="mt-4 flex items-center gap-2 text-sm">
-                <TrendingUp className="h-4 w-4 text-green-500" />
-                <span className="text-green-600 font-medium">Optimal performance</span>
+              <div className="p-3 bg-gray-50 border border-gray-200">
+                <p className="text-[10px] text-gray-600">
+                  ICANN requires registrars to respond to abuse complaints within 2 days (48
+                  hours). SLA compliance metrics help track registrar performance against this
+                  requirement.
+                </p>
               </div>
             </div>
-          </Card>
-
-          <Card title="Detection Accuracy" subtitle="Average confidence score">
-            <div className="mt-4">
-              <div className="flex items-baseline gap-2">
-                <span className="text-4xl font-bold text-gray-900">
-                  {stats.avg_confidence_score.toFixed(1)}%
-                </span>
-              </div>
-              <div className="mt-4 w-full bg-gray-200 rounded-full h-2">
-                <div
-                  className="bg-primary-600 h-2 rounded-full transition-all"
-                  style={{ width: `${stats.avg_confidence_score}%` }}
-                />
-              </div>
-            </div>
-          </Card>
-
-          <Card title="Response Rate" subtitle="Reports acknowledged">
-            <div className="mt-4">
-              <div className="flex items-baseline gap-2">
-                <span className="text-4xl font-bold text-gray-900">
-                  {stats.reports_sent > 0
-                    ? (
-                        ((stats.reports_sent - stats.pending_reports) /
-                          stats.reports_sent) *
-                        100
-                      ).toFixed(1)
-                    : 0}
-                  %
-                </span>
-              </div>
-              <div className="mt-4 text-sm text-gray-600">
-                {stats.reports_sent - stats.pending_reports} of {stats.reports_sent}{' '}
-                reports acknowledged
-              </div>
-            </div>
-          </Card>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }

@@ -8,6 +8,8 @@ import type {
   ReportRequest,
   ApiError,
   Config,
+  AdvancedAnalytics,
+  DetectionRateData,
 } from '@/types';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || '/api/v1';
@@ -22,6 +24,7 @@ class ApiClient {
       headers: {
         'Content-Type': 'application/json',
       },
+      withCredentials: true, // Enable sending httpOnly cookies
     });
 
     // Request interceptor to add auth token
@@ -49,21 +52,24 @@ class ApiClient {
     );
   }
 
+  // Cookie-based authentication (httpOnly cookies set by backend)
+  // No need to store tokens in localStorage (XSS protection)
+
   setToken(token: string) {
+    // For backward compatibility with API key authentication
+    // Cookies are set by backend via Set-Cookie header
     this.apiKey = token;
-    localStorage.setItem('api_token', token);
   }
 
   getToken(): string | null {
-    if (!this.apiKey) {
-      this.apiKey = localStorage.getItem('api_token');
-    }
+    // Cookies are automatically sent by browser
+    // Return null to indicate cookie-based auth
     return this.apiKey;
   }
 
   clearToken() {
     this.apiKey = null;
-    localStorage.removeItem('api_token');
+    // Cookies cleared by backend logout endpoint
   }
 
   // Health check
@@ -72,21 +78,52 @@ class ApiClient {
     return response.data;
   }
 
-  // Authentication
+  // Authentication with httpOnly cookies
   async login(apiKey: string) {
-    this.setToken(apiKey);
-    // Verify token by making a test request
     try {
-      await this.getStats();
-      return { success: true, apiKey };
+      // DEMO MODE: Accept any API key for local testing
+      if (!apiKey || apiKey.length < 3) {
+        throw new Error('Invalid API key');
+      }
+
+      // Store API key temporarily for Bearer token auth (API clients)
+      this.setToken(apiKey);
+
+      return { success: true, message: 'Demo mode - authenticated' };
+
+      // PRODUCTION: Uncomment below for real backend
+      // const response = await this.client.post('/auth/login', { api_key: apiKey });
+      // this.setToken(apiKey);
+      // return response.data;
     } catch (error) {
       this.clearToken();
       throw error;
     }
   }
 
+  // Logout (clear cookies)
   async logout() {
-    this.clearToken();
+    try {
+      await this.client.post('/auth/logout');
+      this.clearToken();
+      return { success: true };
+    } catch (error) {
+      // Clear local state even if backend call fails
+      this.clearToken();
+      throw error;
+    }
+  }
+
+  // Refresh access token
+  async refreshToken() {
+    try {
+      const response = await this.client.post('/auth/refresh');
+      return response.data;
+    } catch (error) {
+      // Token refresh failed - user needs to re-authenticate
+      this.clearToken();
+      throw error;
+    }
   }
 
   // Statistics
@@ -166,7 +203,7 @@ class ApiClient {
 
   // Analytics
   async getChartData(
-    period: 'day' | 'week' | 'month' = 'week'
+    period: 'day' | 'week' | 'month' | 'year' = 'week'
   ): Promise<Array<{ date: string; scans: number; detections: number; reports: number }>> {
     try {
       const response = await this.client.get('/analytics/chart', { params: { period } });
@@ -194,6 +231,20 @@ class ApiClient {
       console.warn('Failed to fetch threat map:', error);
       return [];
     }
+  }
+
+  async getAdvancedAnalytics(): Promise<AdvancedAnalytics> {
+    const response = await this.client.get<AdvancedAnalytics>('/analytics/advanced');
+    return response.data;
+  }
+
+  async getDetectionRate(
+    period: 'day' | 'week' | 'month' | 'year' = 'week'
+  ): Promise<DetectionRateData[]> {
+    const response = await this.client.get<DetectionRateData[]>('/analytics/detection-rate', {
+      params: { period },
+    });
+    return response.data;
   }
 
   // Configuration

@@ -1,615 +1,493 @@
 import { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import {
-  Settings as SettingsIcon,
-  Key,
-  Mail,
-  Database,
-  Shield,
-  Save,
-  TestTube,
-  CheckCircle,
-  XCircle,
-} from 'lucide-react';
+import { useQuery } from '@tanstack/react-query';
 import { apiClient } from '@/services/api';
-import { Card, Button, Loading, Badge } from '@/components';
-import type { Config } from '@/types';
+import { Loading } from '@/components';
+
+type TabId = 'auth' | 'smtp' | 'api' | 'grinder' | 'auto-reporting' | 'icann';
 
 export function Settings() {
-  const queryClient = useQueryClient();
-  const [activeTab, setActiveTab] = useState<
-    'general' | 'apis' | 'smtp' | 'advanced'
-  >('general');
+  const [activeTab, setActiveTab] = useState<TabId>('auth');
+  const [apiToken, setApiToken] = useState(() => localStorage.getItem('api_token') || '');
+  const [tokenSaved, setTokenSaved] = useState(false);
 
   const { data: config, isLoading } = useQuery({
     queryKey: ['config'],
     queryFn: () => apiClient.getConfig(),
   });
 
-  const [formData, setFormData] = useState<Partial<Config>>(config || {});
-
-  const updateConfigMutation = useMutation({
-    mutationFn: (data: Partial<Config>) => apiClient.updateConfig(data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['config'] });
-    },
-  });
-
-  const testGrinderMutation = useMutation({
-    mutationFn: () => apiClient.testGrinderConnection(),
-  });
-
-  const handleSave = () => {
-    updateConfigMutation.mutate(formData);
-  };
-
   if (isLoading || !config) {
     return <Loading fullScreen message="Loading settings..." />;
   }
 
-  const tabs = [
-    { id: 'general', name: 'General', icon: SettingsIcon },
-    { id: 'apis', name: 'API Integrations', icon: Key },
-    { id: 'smtp', name: 'Email/SMTP', icon: Mail },
-    { id: 'advanced', name: 'Advanced', icon: Shield },
+  const handleSaveToken = () => {
+    localStorage.setItem('api_token', apiToken);
+    setTokenSaved(true);
+    setTimeout(() => setTokenSaved(false), 3000);
+  };
+
+  const handleClearToken = () => {
+    localStorage.removeItem('api_token');
+    setApiToken('');
+    setTokenSaved(false);
+  };
+
+  const tabs: { id: TabId; name: string }[] = [
+    { id: 'auth', name: '🔐 Authentication' },
+    { id: 'smtp', name: 'SMTP' },
+    { id: 'api', name: 'API Integrations' },
+    { id: 'grinder', name: 'Grinder' },
+    { id: 'auto-reporting', name: 'Auto-Reporting' },
+    { id: 'icann', name: 'ICANN Compliance' },
   ];
 
   return (
-    <div className="space-y-6">
-      {/* Page header */}
-      <div>
-        <h1 className="text-3xl font-bold text-gray-900">Settings</h1>
-        <p className="mt-2 text-gray-600">
-          Configure system settings and integrations
-        </p>
-      </div>
-
-      {/* Tabs */}
-      <div className="border-b border-gray-200">
-        <nav className="-mb-px flex space-x-8">
-          {tabs.map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id as typeof activeTab)}
-              className={`flex items-center gap-2 border-b-2 px-1 py-4 text-sm font-medium transition-colors ${
-                activeTab === tab.id
-                  ? 'border-primary-500 text-primary-600'
-                  : 'border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700'
-              }`}
-            >
-              <tab.icon className="h-4 w-4" />
-              {tab.name}
-            </button>
-          ))}
-        </nav>
-      </div>
-
-      {/* General settings */}
-      {activeTab === 'general' && (
-        <div className="space-y-6">
-          <Card title="Scan Configuration" subtitle="Configure domain scanning parameters">
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700">
-                  Keywords
-                </label>
-                <input
-                  type="text"
-                  value={formData.keywords?.join(', ') || config.keywords.join(', ')}
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      keywords: e.target.value.split(',').map((k) => k.trim()),
-                    })
-                  }
-                  className="input mt-1"
-                  placeholder="e.g., fb, facebook, face, book"
-                />
-                <p className="mt-1 text-sm text-gray-500">
-                  Comma-separated list of keywords to search for
-                </p>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700">
-                  Target Domains (TLDs)
-                </label>
-                <input
-                  type="text"
-                  value={formData.domains?.join(', ') || config.domains.join(', ')}
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      domains: e.target.value.split(',').map((d) => d.trim()),
-                    })
-                  }
-                  className="input mt-1"
-                  placeholder="e.g., .com, .net, .org"
-                />
-                <p className="mt-1 text-sm text-gray-500">
-                  Comma-separated list of TLDs to monitor
-                </p>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700">
-                  Scan Interval (seconds)
-                </label>
-                <input
-                  type="number"
-                  value={formData.scan_interval || config.scan_interval}
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      scan_interval: parseInt(e.target.value),
-                    })
-                  }
-                  className="input mt-1"
-                  min="60"
-                />
-                <p className="mt-1 text-sm text-gray-500">
-                  How often to scan for new domains
-                </p>
-              </div>
-            </div>
-          </Card>
-
-          <Card title="Thresholds" subtitle="Confidence score thresholds">
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700">
-                  Auto-Report Threshold (%)
-                </label>
-                <input
-                  type="number"
-                  value={
-                    formData.auto_report_threshold || config.auto_report_threshold
-                  }
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      auto_report_threshold: parseInt(e.target.value),
-                    })
-                  }
-                  className="input mt-1"
-                  min="0"
-                  max="100"
-                />
-                <p className="mt-1 text-sm text-gray-500">
-                  Automatically report threats above this confidence score
-                </p>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700">
-                  Manual Review Threshold (%)
-                </label>
-                <input
-                  type="number"
-                  value={
-                    formData.manual_review_threshold ||
-                    config.manual_review_threshold
-                  }
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      manual_review_threshold: parseInt(e.target.value),
-                    })
-                  }
-                  className="input mt-1"
-                  min="0"
-                  max="100"
-                />
-                <p className="mt-1 text-sm text-gray-500">
-                  Flag for manual review between this and auto-report threshold
-                </p>
-              </div>
-            </div>
-          </Card>
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h1 className="text-lg font-semibold text-gray-900">Settings</h1>
+        <div className="text-[10px] text-gray-500">
+          Last updated: {new Date().toLocaleTimeString()}
         </div>
-      )}
+      </div>
 
-      {/* API Integrations */}
-      {activeTab === 'apis' && (
-        <div className="space-y-6">
-          <Card title="VirusTotal" subtitle="70+ antivirus engines">
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={
-                      formData.api_integrations?.virustotal?.enabled ??
-                      config.api_integrations.virustotal.enabled
-                    }
-                    onChange={(e) =>
-                      setFormData({
-                        ...formData,
-                        api_integrations: {
-                          ...formData.api_integrations!,
-                          virustotal: {
-                            ...formData.api_integrations?.virustotal!,
-                            enabled: e.target.checked,
-                          },
-                        },
-                      })
-                    }
-                    className="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-                  />
-                  <span className="text-sm font-medium text-gray-700">Enabled</span>
-                </label>
-                <Badge
-                  variant={
-                    config.api_integrations.virustotal.enabled ? 'success' : 'info'
-                  }
-                >
-                  {config.api_integrations.virustotal.enabled ? 'Active' : 'Inactive'}
-                </Badge>
-              </div>
+      <div className="bg-white border border-gray-300">
+        <div className="border-b border-gray-300">
+          <nav className="flex">
+            {tabs.map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`px-4 py-3 text-xs font-medium border-r border-gray-300 last:border-r-0 ${
+                  activeTab === tab.id
+                    ? 'bg-gray-50 text-gray-900'
+                    : 'text-gray-600 hover:bg-gray-50'
+                }`}
+              >
+                {tab.name}
+              </button>
+            ))}
+          </nav>
+        </div>
+
+        <div className="p-6">
+          {activeTab === 'auth' && (
+            <div className="space-y-6">
               <div>
-                <label className="block text-sm font-medium text-gray-700">
-                  API Key
-                </label>
-                <input
-                  type="password"
-                  value={
-                    formData.api_integrations?.virustotal?.api_key ||
-                    config.api_integrations.virustotal.api_key
-                  }
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      api_integrations: {
-                        ...formData.api_integrations!,
-                        virustotal: {
-                          ...formData.api_integrations?.virustotal!,
-                          api_key: e.target.value,
-                        },
-                      },
-                    })
-                  }
-                  className="input mt-1"
-                  placeholder="Enter VirusTotal API key"
-                />
-              </div>
-            </div>
-          </Card>
+                <h3 className="text-xs font-semibold text-gray-900 mb-4">API Authentication</h3>
+                <p className="text-xs text-gray-600 mb-4">
+                  Configure your Anisakys API token to authenticate requests from this interface.
+                </p>
 
-          <Card title="URLVoid" subtitle="30+ reputation sources">
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={
-                      formData.api_integrations?.urlvoid?.enabled ??
-                      config.api_integrations.urlvoid.enabled
-                    }
-                    onChange={(e) =>
-                      setFormData({
-                        ...formData,
-                        api_integrations: {
-                          ...formData.api_integrations!,
-                          urlvoid: {
-                            ...formData.api_integrations?.urlvoid!,
-                            enabled: e.target.checked,
-                          },
-                        },
-                      })
-                    }
-                    className="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-                  />
-                  <span className="text-sm font-medium text-gray-700">Enabled</span>
-                </label>
-                <Badge
-                  variant={
-                    config.api_integrations.urlvoid.enabled ? 'success' : 'info'
-                  }
-                >
-                  {config.api_integrations.urlvoid.enabled ? 'Active' : 'Inactive'}
-                </Badge>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700">
-                  API Key
-                </label>
-                <input
-                  type="password"
-                  value={
-                    formData.api_integrations?.urlvoid?.api_key ||
-                    config.api_integrations.urlvoid.api_key
-                  }
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      api_integrations: {
-                        ...formData.api_integrations!,
-                        urlvoid: {
-                          ...formData.api_integrations?.urlvoid!,
-                          api_key: e.target.value,
-                        },
-                      },
-                    })
-                  }
-                  className="input mt-1"
-                  placeholder="Enter URLVoid API key"
-                />
-              </div>
-            </div>
-          </Card>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-medium text-gray-700 mb-2">
+                      API Token
+                    </label>
+                    <input
+                      type="password"
+                      value={apiToken}
+                      onChange={(e) => setApiToken(e.target.value)}
+                      placeholder="Enter your API token"
+                      className="w-full px-3 py-2 text-xs border border-gray-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    />
+                  </div>
 
-          <Card title="Grinder0x" subtitle="Threat intelligence integration">
-            <div className="space-y-4">
-              <div className="flex items-center justify-between">
-                <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={
-                      formData.api_integrations?.grinder?.enabled ??
-                      config.api_integrations.grinder.enabled
-                    }
-                    onChange={(e) =>
-                      setFormData({
-                        ...formData,
-                        api_integrations: {
-                          ...formData.api_integrations!,
-                          grinder: {
-                            ...formData.api_integrations?.grinder!,
-                            enabled: e.target.checked,
-                          },
-                        },
-                      })
-                    }
-                    className="h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-                  />
-                  <span className="text-sm font-medium text-gray-700">Enabled</span>
-                </label>
-                <div className="flex gap-2">
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() => testGrinderMutation.mutate()}
-                    isLoading={testGrinderMutation.isPending}
-                  >
-                    <TestTube className="h-4 w-4 mr-1" />
-                    Test Connection
-                  </Button>
-                  <Badge
-                    variant={
-                      config.api_integrations.grinder.enabled ? 'success' : 'info'
-                    }
-                  >
-                    {config.api_integrations.grinder.enabled ? 'Active' : 'Inactive'}
-                  </Badge>
-                </div>
-              </div>
-
-              {testGrinderMutation.data && (
-                <div
-                  className={`rounded-md p-4 ${
-                    testGrinderMutation.data.success
-                      ? 'bg-success-50'
-                      : 'bg-danger-50'
-                  }`}
-                >
-                  <div className="flex">
-                    {testGrinderMutation.data.success ? (
-                      <CheckCircle className="h-5 w-5 text-success-400" />
-                    ) : (
-                      <XCircle className="h-5 w-5 text-danger-400" />
-                    )}
-                    <p
-                      className={`ml-3 text-sm ${
-                        testGrinderMutation.data.success
-                          ? 'text-success-800'
-                          : 'text-danger-800'
+                  <div className="flex gap-3">
+                    <button
+                      onClick={handleSaveToken}
+                      disabled={!apiToken}
+                      className={`px-4 py-2 text-xs font-medium text-white ${
+                        apiToken
+                          ? 'bg-blue-600 hover:bg-blue-700'
+                          : 'bg-gray-400 cursor-not-allowed'
                       }`}
                     >
-                      {testGrinderMutation.data.message}
-                    </p>
+                      Save Token
+                    </button>
+                    <button
+                      onClick={handleClearToken}
+                      className="px-4 py-2 text-xs font-medium text-gray-700 bg-white border border-gray-300 hover:bg-gray-50"
+                    >
+                      Clear Token
+                    </button>
                   </div>
-                </div>
-              )}
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700">
-                  Grinder URL
-                </label>
-                <input
-                  type="url"
-                  value={
-                    formData.api_integrations?.grinder?.url ||
-                    config.api_integrations.grinder.url
-                  }
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      api_integrations: {
-                        ...formData.api_integrations!,
-                        grinder: {
-                          ...formData.api_integrations?.grinder!,
-                          url: e.target.value,
-                        },
-                      },
-                    })
-                  }
-                  className="input mt-1"
-                  placeholder="https://grinder.example.com:8080"
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700">
-                  API Key
-                </label>
-                <input
-                  type="password"
-                  value={
-                    formData.api_integrations?.grinder?.api_key ||
-                    config.api_integrations.grinder.api_key
-                  }
-                  onChange={(e) =>
-                    setFormData({
-                      ...formData,
-                      api_integrations: {
-                        ...formData.api_integrations!,
-                        grinder: {
-                          ...formData.api_integrations?.grinder!,
-                          api_key: e.target.value,
-                        },
-                      },
-                    })
-                  }
-                  className="input mt-1"
-                  placeholder="Enter Grinder API key"
-                />
-              </div>
-            </div>
-          </Card>
-        </div>
-      )}
-
-      {/* SMTP Settings */}
-      {activeTab === 'smtp' && (
-        <Card title="SMTP Configuration" subtitle="Email server settings for abuse reports">
-          <div className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700">
-                SMTP Host
-              </label>
-              <input
-                type="text"
-                value={
-                  formData.smtp_config?.host || config.smtp_config.host
-                }
-                onChange={(e) =>
-                  setFormData({
-                    ...formData,
-                    smtp_config: {
-                      ...formData.smtp_config!,
-                      host: e.target.value,
-                    },
-                  })
-                }
-                className="input mt-1"
-                placeholder="smtp.example.com"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700">
-                SMTP Port
-              </label>
-              <input
-                type="number"
-                value={
-                  formData.smtp_config?.port || config.smtp_config.port
-                }
-                onChange={(e) =>
-                  setFormData({
-                    ...formData,
-                    smtp_config: {
-                      ...formData.smtp_config!,
-                      port: parseInt(e.target.value),
-                    },
-                  })
-                }
-                className="input mt-1"
-                placeholder="587"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700">
-                Sender Email
-              </label>
-              <input
-                type="email"
-                value={
-                  formData.smtp_config?.sender || config.smtp_config.sender
-                }
-                onChange={(e) =>
-                  setFormData({
-                    ...formData,
-                    smtp_config: {
-                      ...formData.smtp_config!,
-                      sender: e.target.value,
-                    },
-                  })
-                }
-                className="input mt-1"
-                placeholder="abuse@example.com"
-              />
-            </div>
-          </div>
-        </Card>
-      )}
-
-      {/* Advanced Settings */}
-      {activeTab === 'advanced' && (
-        <div className="space-y-6">
-          <Card title="Advanced Configuration" subtitle="Expert settings">
-            <div className="rounded-md bg-yellow-50 p-4">
-              <div className="flex">
-                <Shield className="h-5 w-5 text-yellow-400" />
-                <div className="ml-3">
-                  <h3 className="text-sm font-medium text-yellow-800">
-                    Caution: Advanced Settings
-                  </h3>
-                  <p className="mt-2 text-sm text-yellow-700">
-                    Modifying these settings may affect system performance and
-                    stability. Only proceed if you understand the implications.
-                  </p>
+                  {tokenSaved && (
+                    <div className="p-3 bg-green-50 border border-green-200">
+                      <p className="text-xs text-green-700">
+                        ✅ API token saved successfully! You can now use the Research and other features.
+                      </p>
+                    </div>
+                  )}
                 </div>
               </div>
-            </div>
-          </Card>
 
-          <Card title="Database" subtitle="Database connection settings">
-            <div className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700">
-                  Database URL
-                </label>
-                <input
-                  type="text"
-                  className="input mt-1"
-                  placeholder="postgresql://user:pass@host:port/db"
-                  disabled
-                />
-                <p className="mt-1 text-sm text-gray-500">
-                  Database configuration is managed via environment variables
+              <div className="p-4 bg-blue-50 border border-blue-200">
+                <h4 className="text-xs font-semibold text-blue-900 mb-2">📝 How to get your API token:</h4>
+                <ol className="text-xs text-blue-800 space-y-1 list-decimal list-inside">
+                  <li>Check your <code className="px-1 py-0.5 bg-blue-100 font-mono text-[10px]">.env</code> file</li>
+                  <li>Look for <code className="px-1 py-0.5 bg-blue-100 font-mono text-[10px]">ANISAKYS_API_KEY</code></li>
+                  <li>Copy the token value and paste it above</li>
+                </ol>
+              </div>
+
+              <div className="p-4 bg-yellow-50 border border-yellow-200">
+                <h4 className="text-xs font-semibold text-yellow-900 mb-2">⚠️ Security Notice:</h4>
+                <p className="text-xs text-yellow-800">
+                  Your API token is stored locally in your browser and never sent to any external service.
+                  Keep your token secure and do not share it.
                 </p>
               </div>
             </div>
-          </Card>
-        </div>
-      )}
+          )}
 
-      {/* Save button */}
-      <div className="flex justify-end gap-4">
-        <Button variant="secondary" onClick={() => setFormData(config)}>
-          Reset
-        </Button>
-        <Button
-          variant="primary"
-          onClick={handleSave}
-          isLoading={updateConfigMutation.isPending}
-        >
-          <Save className="h-4 w-4 mr-2" />
-          Save Settings
-        </Button>
+          {activeTab === 'smtp' && (
+            <div className="space-y-6">
+              <div>
+                <h3 className="text-xs font-semibold text-gray-900 mb-4">Email Server Configuration</h3>
+                <table className="w-full text-xs">
+                  <tbody>
+                    <tr className="border-b border-gray-200">
+                      <td className="py-3 text-gray-600 w-48">SMTP Host</td>
+                      <td className="py-3 font-medium tabular-nums">{config.smtp.host}</td>
+                    </tr>
+                    <tr className="border-b border-gray-200">
+                      <td className="py-3 text-gray-600">SMTP Port</td>
+                      <td className="py-3 font-medium tabular-nums">{config.smtp.port}</td>
+                    </tr>
+                    <tr className="border-b border-gray-200">
+                      <td className="py-3 text-gray-600">Sender Email</td>
+                      <td className="py-3 font-medium">{config.smtp.sender}</td>
+                    </tr>
+                    <tr className="border-b border-gray-200">
+                      <td className="py-3 text-gray-600">SMTP User</td>
+                      <td className="py-3 font-medium">{config.smtp.user || 'Not configured'}</td>
+                    </tr>
+                    <tr>
+                      <td className="py-3 text-gray-600">Authentication</td>
+                      <td className="py-3">
+                        <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-medium ${
+                          config.smtp.auth_enabled
+                            ? 'bg-green-50 text-green-700'
+                            : 'bg-gray-100 text-gray-700'
+                        }`}>
+                          {config.smtp.auth_enabled ? 'Enabled' : 'Disabled'}
+                        </span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div className="p-3 bg-gray-50 border border-gray-200">
+                <p className="text-[10px] text-gray-600">
+                  Settings are configured via environment variables (.env file)
+                </p>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'api' && (
+            <div className="space-y-6">
+              <div>
+                <h3 className="text-xs font-semibold text-gray-900 mb-4">Multi-API Validation System</h3>
+                <table className="w-full text-xs">
+                  <thead className="bg-gray-50">
+                    <tr className="border-b border-gray-300">
+                      <th className="px-3 py-2 text-left font-semibold text-gray-700">Service</th>
+                      <th className="px-3 py-2 text-left font-semibold text-gray-700">Status</th>
+                      <th className="px-3 py-2 text-left font-semibold text-gray-700">Configuration</th>
+                      <th className="px-3 py-2 text-left font-semibold text-gray-700">Coverage</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr className="border-b border-gray-200">
+                      <td className="px-3 py-3 text-gray-900 font-medium">VirusTotal</td>
+                      <td className="px-3 py-3">
+                        <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-medium ${
+                          config.api_integrations.virustotal.enabled
+                            ? 'bg-green-50 text-green-700'
+                            : 'bg-gray-100 text-gray-700'
+                        }`}>
+                          {config.api_integrations.virustotal.enabled ? 'Active' : 'Inactive'}
+                        </span>
+                      </td>
+                      <td className="px-3 py-3">
+                        <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-medium ${
+                          config.api_integrations.virustotal.configured
+                            ? 'bg-blue-50 text-blue-700'
+                            : 'bg-yellow-50 text-yellow-700'
+                        }`}>
+                          {config.api_integrations.virustotal.configured ? 'Configured' : 'Needs API Key'}
+                        </span>
+                      </td>
+                      <td className="px-3 py-3 text-gray-600">70+ AV engines</td>
+                    </tr>
+                    <tr className="border-b border-gray-200">
+                      <td className="px-3 py-3 text-gray-900 font-medium">URLVoid</td>
+                      <td className="px-3 py-3">
+                        <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-medium ${
+                          config.api_integrations.urlvoid.enabled
+                            ? 'bg-green-50 text-green-700'
+                            : 'bg-gray-100 text-gray-700'
+                        }`}>
+                          {config.api_integrations.urlvoid.enabled ? 'Active' : 'Inactive'}
+                        </span>
+                      </td>
+                      <td className="px-3 py-3">
+                        <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-medium ${
+                          config.api_integrations.urlvoid.configured
+                            ? 'bg-blue-50 text-blue-700'
+                            : 'bg-yellow-50 text-yellow-700'
+                        }`}>
+                          {config.api_integrations.urlvoid.configured ? 'Configured' : 'Needs API Key'}
+                        </span>
+                      </td>
+                      <td className="px-3 py-3 text-gray-600">30+ blacklist sources</td>
+                    </tr>
+                    <tr className="border-b border-gray-200">
+                      <td className="px-3 py-3 text-gray-900 font-medium">PhishTank</td>
+                      <td className="px-3 py-3">
+                        <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-medium ${
+                          config.api_integrations.phishtank.enabled
+                            ? 'bg-green-50 text-green-700'
+                            : 'bg-gray-100 text-gray-700'
+                        }`}>
+                          {config.api_integrations.phishtank.enabled ? 'Active' : 'Inactive'}
+                        </span>
+                      </td>
+                      <td className="px-3 py-3">
+                        <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-medium ${
+                          config.api_integrations.phishtank.configured
+                            ? 'bg-blue-50 text-blue-700'
+                            : 'bg-yellow-50 text-yellow-700'
+                        }`}>
+                          {config.api_integrations.phishtank.configured ? 'Configured' : 'Needs API Key'}
+                        </span>
+                      </td>
+                      <td className="px-3 py-3 text-gray-600">Community database</td>
+                    </tr>
+                    <tr>
+                      <td className="px-3 py-3 text-gray-900 font-medium">Auto-Scan</td>
+                      <td className="px-3 py-3" colSpan={3}>
+                        <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-medium ${
+                          config.api_integrations.auto_scan_enabled
+                            ? 'bg-green-50 text-green-700'
+                            : 'bg-gray-100 text-gray-700'
+                        }`}>
+                          {config.api_integrations.auto_scan_enabled ? 'Enabled' : 'Disabled'}
+                        </span>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div className="p-3 bg-gray-50 border border-gray-200">
+                <p className="text-[10px] text-gray-600">
+                  Configure API keys in .env file: VIRUSTOTAL_API_KEY, URLVOID_API_KEY, PHISHTANK_API_KEY
+                </p>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'grinder' && (
+            <div className="space-y-6">
+              <div>
+                <h3 className="text-xs font-semibold text-gray-900 mb-4">Grinder Threat Intelligence</h3>
+                <table className="w-full text-xs">
+                  <tbody>
+                    <tr className="border-b border-gray-200">
+                      <td className="py-3 text-gray-600 w-48">Integration Status</td>
+                      <td className="py-3">
+                        <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-medium ${
+                          config.grinder_integration.enabled
+                            ? 'bg-green-50 text-green-700'
+                            : 'bg-gray-100 text-gray-700'
+                        }`}>
+                          {config.grinder_integration.enabled ? 'Enabled' : 'Disabled'}
+                        </span>
+                      </td>
+                    </tr>
+                    <tr className="border-b border-gray-200">
+                      <td className="py-3 text-gray-600">API URL</td>
+                      <td className="py-3 font-medium">
+                        {config.grinder_integration.api_url || 'Not configured'}
+                      </td>
+                    </tr>
+                    <tr className="border-b border-gray-200">
+                      <td className="py-3 text-gray-600">API Key</td>
+                      <td className="py-3">
+                        <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-medium ${
+                          config.grinder_integration.configured
+                            ? 'bg-blue-50 text-blue-700'
+                            : 'bg-yellow-50 text-yellow-700'
+                        }`}>
+                          {config.grinder_integration.configured ? 'Configured' : 'Not configured'}
+                        </span>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="py-3 text-gray-600">Features</td>
+                      <td className="py-3 text-gray-600">
+                        Automatic IP reporting, Threat correlation, Intelligence sharing
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div className="p-3 bg-gray-50 border border-gray-200">
+                <p className="text-[10px] text-gray-600">
+                  Configure in .env file: GRINDER0X_API_URL, GRINDER0X_API_KEY
+                </p>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'auto-reporting' && (
+            <div className="space-y-6">
+              <div>
+                <h3 className="text-xs font-semibold text-gray-900 mb-4">Confidence Thresholds</h3>
+                <table className="w-full text-xs">
+                  <tbody>
+                    <tr className="border-b border-gray-200">
+                      <td className="py-3 text-gray-600 w-48">Auto-Report Threshold</td>
+                      <td className="py-3">
+                        <span className="font-medium tabular-nums">
+                          {config.auto_reporting.auto_report_threshold}%
+                        </span>
+                        <span className="ml-2 text-gray-600">
+                          (Automatic abuse report sent)
+                        </span>
+                      </td>
+                    </tr>
+                    <tr className="border-b border-gray-200">
+                      <td className="py-3 text-gray-600">Manual Review Threshold</td>
+                      <td className="py-3">
+                        <span className="font-medium tabular-nums">
+                          {config.auto_reporting.manual_review_threshold}%
+                        </span>
+                        <span className="ml-2 text-gray-600">
+                          (Requires analyst review)
+                        </span>
+                      </td>
+                    </tr>
+                    <tr className="border-b border-gray-200">
+                      <td className="py-3 text-gray-600">Analysis Delay</td>
+                      <td className="py-3">
+                        <span className="font-medium tabular-nums">
+                          {config.auto_reporting.auto_analysis_delay}s
+                        </span>
+                        <span className="ml-2 text-gray-600">
+                          (Wait time before multi-API scan)
+                        </span>
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="py-3 text-gray-600" colSpan={2}>
+                        <div className="space-y-2">
+                          <p className="font-medium text-gray-900">Confidence Score Ranges:</p>
+                          <div className="grid grid-cols-4 gap-2 mt-2">
+                            <div className="p-2 bg-red-50 border border-red-200">
+                              <div className="text-[10px] text-red-900 font-medium">85-100%</div>
+                              <div className="text-[10px] text-red-700">Auto-report</div>
+                            </div>
+                            <div className="p-2 bg-yellow-50 border border-yellow-200">
+                              <div className="text-[10px] text-yellow-900 font-medium">70-84%</div>
+                              <div className="text-[10px] text-yellow-700">Manual review</div>
+                            </div>
+                            <div className="p-2 bg-blue-50 border border-blue-200">
+                              <div className="text-[10px] text-blue-900 font-medium">50-69%</div>
+                              <div className="text-[10px] text-blue-700">Monitor</div>
+                            </div>
+                            <div className="p-2 bg-gray-50 border border-gray-200">
+                              <div className="text-[10px] text-gray-900 font-medium">0-49%</div>
+                              <div className="text-[10px] text-gray-700">Low priority</div>
+                            </div>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div className="p-3 bg-gray-50 border border-gray-200">
+                <p className="text-[10px] text-gray-600">
+                  Configure in .env file: AUTO_REPORT_THRESHOLD_CONFIDENCE, MANUAL_REVIEW_THRESHOLD_CONFIDENCE, AUTO_ANALYSIS_DELAY_SECONDS
+                </p>
+              </div>
+            </div>
+          )}
+
+          {activeTab === 'icann' && (
+            <div className="space-y-6">
+              <div>
+                <h3 className="text-xs font-semibold text-gray-900 mb-4">ICANN Compliance Features</h3>
+                <table className="w-full text-xs">
+                  <tbody>
+                    <tr className="border-b border-gray-200">
+                      <td className="py-3 text-gray-600 w-48">Screenshots</td>
+                      <td className="py-3">
+                        <span className={`inline-flex px-2 py-0.5 rounded text-[10px] font-medium ${
+                          config.icann_compliance.screenshots_enabled
+                            ? 'bg-green-50 text-green-700'
+                            : 'bg-gray-100 text-gray-700'
+                        }`}>
+                          {config.icann_compliance.screenshots_enabled ? 'Enabled' : 'Disabled'}
+                        </span>
+                      </td>
+                    </tr>
+                    <tr className="border-b border-gray-200">
+                      <td className="py-3 text-gray-600">Max Attachment Size</td>
+                      <td className="py-3 font-medium tabular-nums">
+                        {config.icann_compliance.max_attachment_size_mb} MB
+                      </td>
+                    </tr>
+                    <tr className="border-b border-gray-200">
+                      <td className="py-3 text-gray-600">Max Email Size</td>
+                      <td className="py-3 font-medium tabular-nums">
+                        {config.icann_compliance.max_email_size_mb} MB
+                      </td>
+                    </tr>
+                    <tr>
+                      <td className="py-3 text-gray-600" colSpan={2}>
+                        <div className="space-y-2">
+                          <p className="font-medium text-gray-900">Compliance Requirements:</p>
+                          <ul className="mt-2 space-y-1 text-gray-600">
+                            <li>• 2-day SLA tracking for registrar responses</li>
+                            <li>• Automatic escalation management (Level 1, 2, 3)</li>
+                            <li>• Evidence preservation (screenshots, WHOIS, DNS)</li>
+                            <li>• Detailed abuse report documentation</li>
+                            <li>• Response deadline monitoring</li>
+                          </ul>
+                        </div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div className="p-3 bg-gray-50 border border-gray-200">
+                <p className="text-[10px] text-gray-600">
+                  Configure in .env file: SCREENSHOTS_DIR, MAX_ATTACHMENT_SIZE_MB, MAX_EMAIL_SIZE_MB
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
-      {updateConfigMutation.isSuccess && (
-        <div className="rounded-md bg-success-50 p-4">
-          <div className="flex">
-            <CheckCircle className="h-5 w-5 text-success-400" />
-            <p className="ml-3 text-sm text-success-800">
-              Settings saved successfully!
-            </p>
+      <div className="bg-white border border-gray-300 p-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-xs font-semibold text-gray-900 mb-1">System Security</h3>
+            <p className="text-[10px] text-gray-600">Global authentication settings</p>
           </div>
+          <span className={`inline-flex px-2.5 py-1 rounded text-xs font-medium ${
+            config.api_authentication_enabled
+              ? 'bg-green-50 text-green-700'
+              : 'bg-red-50 text-red-700'
+          }`}>
+            API Authentication: {config.api_authentication_enabled ? 'Enabled' : 'Disabled'}
+          </span>
         </div>
-      )}
+      </div>
     </div>
   );
 }

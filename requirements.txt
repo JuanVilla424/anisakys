@@ -1,6 +1,8 @@
+# Core Dependencies
 requests~=2.32.3
 pydantic>=2.9.1
 pydantic-settings>=2.0.0
+email-validator>=2.0.0
 python-whois>=0.9.4
 jinja2>=3.1.6
 ipwhois>=1.2.0
@@ -10,8 +12,55 @@ psycopg2-binary~=2.9.10
 validators~=0.35.0
 flask~=3.1.1
 flask-limiter~=3.12
-flask-cors~=5.0.0
+flask-cors>=6.0.0
 dnspython~=2.7.0
 cryptography~=45.0.5
+
+# FastAPI & Async Web Framework (Sprint 1)
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+httpx>=0.27.0
+python-multipart>=0.0.9
+
+# Authentication & Security (Sprint 1)
+python-jose[cryptography]>=3.3.0
+passlib[bcrypt]>=1.7.4
+bcrypt>=4.1.0
+
+# Database Migrations (Sprint 1)
+alembic>=1.13.0
+
+# Background Tasks (Sprint 1)
+celery>=5.3.0
+redis>=5.0.0
+
+# Async PostgreSQL Driver (Sprint 1)
+asyncpg>=0.29.0
+
+# Rate Limiting (Sprint 1)
+slowapi>=0.1.9
+
+# Retry Logic (Sprint 1)
+tenacity>=8.2.0
+
+# Screenshot & Visual Analysis
 selenium>=4.15.0
 playwright>=1.40.0
+Pillow>=10.0.0
+opencv-python-headless>=4.8.0
+
+# HTML Parsing
+beautifulsoup4>=4.12.0
+lxml>=4.9.0
+
+# Machine Learning & NLP
+numpy>=1.24.0
+scikit-learn>=1.3.0
+scipy>=1.11.0
+
+# OSINT & Threat Intelligence
+shodan>=1.31.0
+
+# Social Media & Web Scraping
+tweepy>=4.14.0
+telethon>=1.32.0

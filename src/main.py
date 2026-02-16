@@ -40,7 +40,7 @@ from ipwhois import IPWhois
 import validators
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from sqlalchemy import create_engine, text
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from flask_cors import CORS
@@ -48,10 +48,12 @@ import logging as flask_logging
 from functools import wraps
 import signal
 import sys
+import secrets
 
 from src.config import settings, CLOUDFLARE_IP_RANGES
 from src.logger import logger
 from src.screenshot_service import ScreenshotService
+from src.utils.validators import validate_domain, validate_whois_server, safe_join, sanitize_filename
 
 # Global testing mode detection - independent of test_mode (used for screenshots)
 IS_TESTING_MODE = False
@@ -538,10 +540,19 @@ ABUSEIPDB_CATEGORIES = {
     "fraud": 18,
 }
 
-# Global engine for database operations with NullPool to avoid connection issues
-from sqlalchemy.pool import NullPool
+# Global engine for database operations with QueuePool for enterprise scalability
+from sqlalchemy.pool import QueuePool
 
-db_engine = create_engine(DATABASE_URL, poolclass=NullPool, echo=False)
+# Enterprise-grade connection pooling configuration
+db_engine = create_engine(
+    DATABASE_URL,
+    poolclass=QueuePool,
+    pool_size=20,  # Number of connections to maintain in pool
+    max_overflow=40,  # Maximum number of connections above pool_size
+    pool_pre_ping=True,  # Verify connections before using (detect stale connections)
+    pool_recycle=3600,  # Recycle connections after 1 hour
+    echo=False
+)
 
 
 class GrinderReportClient:
@@ -848,7 +859,7 @@ def require_api_key(f):
             logger.error("🔐 API key not configured for validation")
             return jsonify({"error": "API authentication not properly configured"}), 500
 
-        if provided_key != expected_key:
+        if not secrets.compare_digest(provided_key, expected_key):
             logger.warning(f"🔐 Invalid API key provided from {request.remote_addr}")
             return jsonify({"error": "Invalid API key"}), 401
 
@@ -1523,7 +1534,9 @@ class AttachmentConfig:
 
             # Get all files from the folder
             for filename in os.listdir(attachments_folder):
-                file_path = os.path.join(attachments_folder, filename)
+                # Sanitize filename to prevent path traversal
+                clean_filename = sanitize_filename(filename)
+                file_path = str(safe_join(attachments_folder, clean_filename))
                 if os.path.isfile(file_path):
                     # Filter by allowed extensions (optional)
                     allowed_extensions = getattr(
@@ -1674,6 +1687,10 @@ class EnhancedAbuseEmailDetector:
 
         for server in whois_servers:
             try:
+                # Validate inputs before subprocess call
+                validate_domain(domain)
+                validate_whois_server(server)
+
                 result = subprocess.run(
                     ["whois", "-h", server, domain], capture_output=True, text=True, timeout=10
                 )
@@ -1682,6 +1699,9 @@ class EnhancedAbuseEmailDetector:
                     if emails:
                         logger.info(f"🔍 Found abuse email from WHOIS server {server}: {emails[0]}")
                         return emails[0]
+            except ValueError as e:
+                logger.error(f"Invalid domain/server for WHOIS: {e}")
+                continue
             except (subprocess.TimeoutExpired, FileNotFoundError):
                 continue
         return None
@@ -2313,6 +2333,10 @@ class EnhancedAbuseEmailDetector:
 
             if whois_server:
                 logger.debug(f"🔍 Trying WHOIS server {whois_server} for {domain}")
+                # Validate inputs before subprocess call
+                validate_domain(domain)
+                validate_whois_server(whois_server)
+
                 result = subprocess.run(
                     ["whois", "-h", whois_server, domain],
                     capture_output=True,
@@ -2342,6 +2366,9 @@ class EnhancedAbuseEmailDetector:
         # Final fallback - try generic whois command
         try:
             logger.debug(f"📋 Trying generic whois command for {domain}")
+            # Validate domain before subprocess call
+            validate_domain(domain)
+
             result = subprocess.run(["whois", domain], capture_output=True, text=True, timeout=15)
 
             if result.returncode == 0 and result.stdout:
@@ -2450,6 +2477,11 @@ class PhishingAPI:
             key_func=get_remote_address,
             default_limits=["200 per day", "50 per hour", "10 per minute"],
         )
+
+        # Initialize Threat Intelligence API
+        from src.threat_intel_api import create_threat_intel_api
+        self.threat_intel_api = create_threat_intel_api(self.app, require_api_key)
+        logger.info("✅ Professional Threat Intelligence API initialized")
 
         self.setup_routes()
 
@@ -2718,6 +2750,12 @@ class PhishingAPI:
                 200,
             )
 
+        @self.app.route("/screenshots/<path:filename>", methods=["GET"])
+        def serve_screenshot(filename):
+            """Serve screenshot files (no authentication required for viewing)."""
+            screenshots_dir = os.getenv("SCREENSHOTS_DIR", "/app/screenshots")
+            return send_from_directory(screenshots_dir, filename)
+
         @self.app.route("/api/v1/analytics/chart", methods=["GET"])
         @require_api_key
         def get_chart_data():
@@ -2801,6 +2839,173 @@ class PhishingAPI:
 
             except Exception as e:
                 logger.error(f"❌ API error in get_threat_map: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        @self.app.route("/api/v1/analytics/advanced", methods=["GET"])
+        @require_api_key
+        def get_advanced_analytics():
+            """Get advanced analytics metrics."""
+            try:
+                with self.db_manager.engine.begin() as conn:
+                    # Confidence score distribution
+                    confidence_dist = conn.execute(
+                        text("""
+                            SELECT
+                                CASE
+                                    WHEN confidence_score >= 85 THEN '85-100'
+                                    WHEN confidence_score >= 70 THEN '70-84'
+                                    WHEN confidence_score >= 50 THEN '50-69'
+                                    ELSE '0-49'
+                                END as range,
+                                COUNT(*) as count
+                            FROM phishing_sites
+                            WHERE confidence_score IS NOT NULL
+                            GROUP BY range
+                            ORDER BY range DESC
+                        """)
+                    ).fetchall()
+
+                    # API performance metrics
+                    api_metrics = conn.execute(
+                        text("""
+                            SELECT
+                                COUNT(*) FILTER (WHERE virustotal_result IS NOT NULL AND virustotal_result != '') as virustotal_hits,
+                                COUNT(*) FILTER (WHERE urlvoid_result IS NOT NULL AND urlvoid_result != '') as urlvoid_hits,
+                                COUNT(*) FILTER (WHERE phishtank_result IS NOT NULL AND phishtank_result != '') as phishtank_hits,
+                                AVG(confidence_score) as avg_confidence,
+                                COUNT(*) as total_analyzed
+                            FROM phishing_sites
+                            WHERE confidence_score IS NOT NULL
+                        """)
+                    ).fetchone()
+
+                    # Threat level trends (last 30 days)
+                    threat_trends = conn.execute(
+                        text("""
+                            SELECT
+                                DATE(first_seen) as date,
+                                threat_level,
+                                COUNT(*) as count
+                            FROM phishing_sites
+                            WHERE first_seen >= NOW() - INTERVAL '30 days'
+                            GROUP BY DATE(first_seen), threat_level
+                            ORDER BY date DESC
+                        """)
+                    ).fetchall()
+
+                    # Top registrars
+                    top_registrars = conn.execute(
+                        text("""
+                            SELECT
+                                registrar,
+                                COUNT(*) as site_count,
+                                SUM(CASE WHEN abuse_report_sent = 1 THEN 1 ELSE 0 END) as reports_sent,
+                                AVG(CASE WHEN takedown_date IS NOT NULL
+                                    THEN EXTRACT(EPOCH FROM (takedown_date - first_seen))/3600
+                                    END) as avg_takedown_hours
+                            FROM phishing_sites
+                            WHERE registrar IS NOT NULL
+                            GROUP BY registrar
+                            ORDER BY site_count DESC
+                            LIMIT 10
+                        """)
+                    ).fetchall()
+
+                    # Response time analytics
+                    response_times = conn.execute(
+                        text("""
+                            SELECT
+                                AVG(EXTRACT(EPOCH FROM (takedown_date - first_seen))/3600) as avg_hours,
+                                MIN(EXTRACT(EPOCH FROM (takedown_date - first_seen))/3600) as min_hours,
+                                MAX(EXTRACT(EPOCH FROM (takedown_date - first_seen))/3600) as max_hours,
+                                COUNT(*) as total_takedowns
+                            FROM phishing_sites
+                            WHERE takedown_date IS NOT NULL
+                        """)
+                    ).fetchone()
+
+                    analytics = {
+                        "confidence_distribution": [
+                            {"range": row[0], "count": row[1]}
+                            for row in confidence_dist
+                        ],
+                        "api_performance": {
+                            "virustotal_hits": api_metrics[0] or 0,
+                            "urlvoid_hits": api_metrics[1] or 0,
+                            "phishtank_hits": api_metrics[2] or 0,
+                            "avg_confidence": float(api_metrics[3]) if api_metrics[3] else 0,
+                            "total_analyzed": api_metrics[4] or 0,
+                        },
+                        "threat_trends": [
+                            {"date": str(row[0]), "threat_level": row[1], "count": row[2]}
+                            for row in threat_trends
+                        ],
+                        "top_registrars": [
+                            {
+                                "registrar": row[0],
+                                "site_count": row[1],
+                                "reports_sent": row[2],
+                                "avg_takedown_hours": float(row[3]) if row[3] else None,
+                            }
+                            for row in top_registrars
+                        ],
+                        "response_times": {
+                            "avg_hours": float(response_times[0]) if response_times[0] else None,
+                            "min_hours": float(response_times[1]) if response_times[1] else None,
+                            "max_hours": float(response_times[2]) if response_times[2] else None,
+                            "total_takedowns": response_times[3] or 0,
+                        }
+                    }
+
+                    return jsonify(analytics), 200
+
+            except Exception as e:
+                logger.error(f"❌ API error in get_advanced_analytics: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        @self.app.route("/api/v1/analytics/detection-rate", methods=["GET"])
+        @require_api_key
+        def get_detection_rate():
+            """Get detection rate over time."""
+            try:
+                period = request.args.get("period", "week")
+                days = {"day": 1, "week": 7, "month": 30, "year": 365}.get(period, 7)
+
+                with self.db_manager.engine.begin() as conn:
+                    result = conn.execute(
+                        text("""
+                            SELECT
+                                DATE(first_seen) as date,
+                                COUNT(*) as total_scans,
+                                COUNT(*) FILTER (WHERE confidence_score >= 70) as high_confidence,
+                                COUNT(*) FILTER (WHERE abuse_report_sent = 1) as reported,
+                                COUNT(*) FILTER (WHERE takedown_time IS NOT NULL) as taken_down,
+                                AVG(confidence_score) as avg_confidence
+                            FROM phishing_sites
+                            WHERE first_seen >= NOW() - INTERVAL :days DAY
+                            GROUP BY DATE(first_seen)
+                            ORDER BY date
+                        """),
+                        {"days": days}
+                    ).fetchall()
+
+                    detection_data = [
+                        {
+                            "date": str(row[0]),
+                            "total_scans": row[1],
+                            "high_confidence": row[2],
+                            "reported": row[3],
+                            "taken_down": row[4],
+                            "avg_confidence": float(row[5]) if row[5] else 0,
+                            "detection_rate": (row[2] / row[1] * 100) if row[1] > 0 else 0,
+                        }
+                        for row in result
+                    ]
+
+                    return jsonify(detection_data), 200
+
+            except Exception as e:
+                logger.error(f"❌ API error in get_detection_rate: {e}")
                 return jsonify({"error": "Internal server error"}), 500
 
         @self.app.route("/api/v1/sites", methods=["GET"])
@@ -2920,10 +3125,43 @@ class PhishingAPI:
             """Get system configuration."""
             try:
                 config = {
-                    "smtp_host": os.getenv("SMTP_HOST", "localhost"),
-                    "smtp_port": int(os.getenv("SMTP_PORT", 1125)),
-                    "abuse_email_sender": os.getenv("ABUSE_EMAIL_SENDER", "abuse@example.com"),
-                    "grinder_integration_enabled": GRINDER_INTEGRATION_ENABLED,
+                    "smtp": {
+                        "host": os.getenv("SMTP_HOST", "localhost"),
+                        "port": int(os.getenv("SMTP_PORT", 1125)),
+                        "sender": os.getenv("ABUSE_EMAIL_SENDER", "abuse@example.com"),
+                        "user": os.getenv("SMTP_USER", None),
+                        "auth_enabled": bool(os.getenv("SMTP_USER")),
+                    },
+                    "api_integrations": {
+                        "virustotal": {
+                            "enabled": bool(VIRUSTOTAL_API_KEY),
+                            "configured": bool(VIRUSTOTAL_API_KEY and VIRUSTOTAL_API_KEY != "your_virustotal_api_key"),
+                        },
+                        "urlvoid": {
+                            "enabled": bool(URLVOID_API_KEY),
+                            "configured": bool(URLVOID_API_KEY and URLVOID_API_KEY != "your_urlvoid_api_key"),
+                        },
+                        "phishtank": {
+                            "enabled": bool(PHISHTANK_API_KEY),
+                            "configured": bool(PHISHTANK_API_KEY and PHISHTANK_API_KEY != "your_phishtank_api_key"),
+                        },
+                        "auto_scan_enabled": AUTO_MULTI_API_SCAN,
+                    },
+                    "grinder_integration": {
+                        "enabled": GRINDER_INTEGRATION_ENABLED,
+                        "api_url": GRINDER0X_API_URL if GRINDER_INTEGRATION_ENABLED else None,
+                        "configured": bool(GRINDER0X_API_KEY and GRINDER0X_API_KEY != "your_grinder_api_key"),
+                    },
+                    "auto_reporting": {
+                        "auto_report_threshold": int(os.getenv("AUTO_REPORT_THRESHOLD_CONFIDENCE", 85)),
+                        "manual_review_threshold": int(os.getenv("MANUAL_REVIEW_THRESHOLD_CONFIDENCE", 70)),
+                        "auto_analysis_delay": int(os.getenv("AUTO_ANALYSIS_DELAY_SECONDS", 30)),
+                    },
+                    "icann_compliance": {
+                        "screenshots_enabled": bool(os.getenv("SCREENSHOTS_DIR")),
+                        "max_attachment_size_mb": int(os.getenv("MAX_ATTACHMENT_SIZE_MB", 25)),
+                        "max_email_size_mb": int(os.getenv("MAX_EMAIL_SIZE_MB", 25)),
+                    },
                     "api_authentication_enabled": bool(self.api_key),
                 }
                 return jsonify(config), 200
@@ -2931,6 +3169,231 @@ class PhishingAPI:
             except Exception as e:
                 logger.error(f"❌ API error in get_config: {e}")
                 return jsonify({"error": "Internal server error"}), 500
+
+        @self.app.route("/api/v1/research/dorks", methods=["POST"])
+        @require_api_key
+        def generate_google_dorks():
+            """Generate Google Dorks for phishing research."""
+            try:
+                from src.research_dorks import generate_dorks
+
+                data = request.get_json()
+                if not data:
+                    return jsonify({"error": "No JSON data provided"}), 400
+
+                target_domain = data.get("domain")
+                target_brand = data.get("brand")
+
+                if not target_domain and not target_brand:
+                    return jsonify({"error": "domain or brand is required"}), 400
+
+                result = generate_dorks(target_domain or target_brand, target_brand)
+                return jsonify(result), 200
+
+            except Exception as e:
+                logger.error(f"❌ API error in generate_google_dorks: {e}")
+                return jsonify({"error": str(e)}), 500
+
+        @self.app.route("/api/v1/research/comprehensive", methods=["POST"])
+        @require_api_key
+        def comprehensive_research_endpoint():
+            """PROFESSIONAL phishing research - automated scanning across all sources."""
+            try:
+                import asyncio
+                from src.research_professional import professional_research
+
+                data = request.get_json()
+                if not data:
+                    return jsonify({"error": "No JSON data provided"}), 400
+
+                target_domain = data.get("domain")
+                if not target_domain:
+                    return jsonify({"error": "domain is required"}), 400
+
+                target_brand = data.get("brand")
+                max_variants = data.get("max_variants", 50)
+                scan_search_engines = data.get("scan_search_engines", True)
+
+                logger.info(f"🚀 PROFESSIONAL research for {target_domain}")
+
+                # Run async research
+                result = asyncio.run(professional_research(
+                    domain=target_domain,
+                    brand=target_brand,
+                    max_typo_variants=max_variants,
+                    scan_search_engines=scan_search_engines,
+                    multi_api_validator=self.multi_api_validator
+                ))
+
+                return jsonify(result), 200
+
+            except Exception as e:
+                logger.error(f"❌ API error in professional_research: {e}")
+                import traceback
+                traceback.print_exc()
+                return jsonify({"error": str(e)}), 500
+
+        @self.app.route("/api/v1/research/analyze", methods=["POST"])
+        @require_api_key
+        def analyze_typosquatting_phishing():
+            """Advanced typosquatting analysis with visual comparison and WHOIS data."""
+            try:
+                import asyncio
+                from src.research_typosquatting import analyze_typosquatting
+                from src.screenshot_service import ScreenshotService
+                from src.screenshot_comparison import ScreenshotComparator
+                import os
+
+                data = request.get_json()
+                if not data:
+                    return jsonify({"error": "No JSON data provided"}), 400
+
+                target_domain = data.get("domain")
+                if not target_domain:
+                    return jsonify({"error": "domain is required"}), 400
+
+                # Get options
+                max_variants = data.get("max_variants", 100)
+                scan_active = data.get("scan_active", True)
+                take_screenshots = data.get("take_screenshots", True)
+
+                logger.info(f"🔍 Starting ADVANCED typosquatting analysis for {target_domain}")
+
+                # Generate and check ALL variants
+                analysis = analyze_typosquatting(target_domain, max_variants_check=max_variants)
+
+                # Initialize services
+                screenshots_dir = os.getenv("SCREENSHOTS_DIR", "/app/screenshots")
+                screenshot_service = ScreenshotService(screenshots_dir=screenshots_dir, timeout=10)
+                comparator = ScreenshotComparator()
+
+                # Capture screenshot of ORIGINAL domain first
+                original_screenshot_path = None
+                original_screenshot_url = None
+                if take_screenshots:
+                    try:
+                        logger.info(f"📸 Capturing screenshot of ORIGINAL domain: {target_domain}")
+                        original_url = f"http://{target_domain}"
+                        orig_result = asyncio.run(
+                            screenshot_service.capture_screenshot_async(original_url)
+                        )
+                        if orig_result and orig_result.get('path'):
+                            original_screenshot_path = orig_result['path']
+                            original_screenshot_url = f"/screenshots/{os.path.basename(original_screenshot_path)}"
+                            logger.info(f"✅ Original screenshot captured: {original_screenshot_path}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Failed to capture original screenshot: {e}")
+
+                # Process ALL domains
+                all_results = []
+
+                for domain_info in analysis['all_domains']:
+                    domain = domain_info['domain']
+                    url = f"http://{domain}"
+
+                    result = {
+                        'domain': domain,
+                        'url': url,
+                        'is_active': domain_info['is_active'],
+                        'ip': domain_info.get('ip'),
+                        'similarity_score': domain_info['similarity_score'],
+                        'phishing_score': domain_info['phishing_score'],
+                        'screenshot_url': None,
+                        'visual_similarity': None,
+                        'whois': domain_info.get('whois'),
+                        'scan': None
+                    }
+
+                    # Only process active domains
+                    if domain_info['is_active'] and scan_active:
+                        try:
+                            # Scan with multi-API validator
+                            scan_result = self.multi_api_validator.comprehensive_scan(url)
+                            result['scan'] = scan_result
+
+                            # Take screenshot
+                            screenshot_path = None
+                            if take_screenshots:
+                                try:
+                                    screenshot_result = asyncio.run(
+                                        screenshot_service.capture_screenshot_async(url)
+                                    )
+                                    if screenshot_result and screenshot_result.get('path'):
+                                        screenshot_path = screenshot_result['path']
+                                        result['screenshot_url'] = f"/screenshots/{os.path.basename(screenshot_path)}"
+                                        logger.info(f"📸 Screenshot captured for {domain}")
+                                except Exception as e:
+                                    logger.warning(f"⚠️ Screenshot failed for {domain}: {e}")
+
+                            # Compare screenshots if both available
+                            visual_sim_score = 0
+                            if original_screenshot_path and screenshot_path:
+                                try:
+                                    comparison = comparator.compare_screenshots(
+                                        original_screenshot_path,
+                                        screenshot_path
+                                    )
+                                    if comparison and not comparison.get('error'):
+                                        visual_sim_score = comparison['similarity_score']
+                                        result['visual_similarity'] = comparison
+                                        if comparison['is_similar']:
+                                            logger.warning(
+                                                f"🚨 VISUAL CLONE DETECTED: {domain} "
+                                                f"(similarity: {visual_sim_score}%)"
+                                            )
+                                except Exception as e:
+                                    logger.warning(f"⚠️ Visual comparison failed for {domain}: {e}")
+
+                            # Calculate COMPREHENSIVE phishing score
+                            # Factors: DNS similarity (20%) + Age (20%) + API results (30%) + Visual similarity (30%)
+
+                            dns_similarity = domain_info['similarity_score']
+                            api_score = scan_result.get('confidence_score', 0)
+
+                            # Age factor
+                            age_score = 0
+                            if domain_info.get('whois') and domain_info['whois'].get('is_new'):
+                                age_score = 100  # New domain = very suspicious
+
+                            # Calculate final score
+                            final_score = int(
+                                (dns_similarity * 0.2) +  # 20% from domain similarity
+                                (age_score * 0.2) +        # 20% from domain age
+                                (api_score * 0.3) +        # 30% from security APIs
+                                (visual_sim_score * 0.3)   # 30% from visual similarity
+                            )
+
+                            result['phishing_score'] = min(100, final_score)
+
+                            logger.info(
+                                f"✓ {domain}: DNS={dns_similarity:.0f}%, Age={'NEW' if age_score > 0 else 'OLD'}, "
+                                f"API={api_score}, Visual={visual_sim_score}% → SCORE={final_score}"
+                            )
+
+                        except Exception as e:
+                            logger.warning(f"⚠️ Failed to process {domain}: {e}")
+                            result['scan'] = {'error': str(e)}
+
+                    all_results.append(result)
+
+                # Sort by phishing score (highest risk first)
+                all_results.sort(key=lambda x: x['phishing_score'], reverse=True)
+
+                analysis['results'] = all_results
+                analysis['total_results'] = len(all_results)
+                analysis['original_screenshot_url'] = original_screenshot_url
+
+                logger.info(
+                    f"✅ ADVANCED Analysis complete: {analysis['active_domains_found']} active, "
+                    f"{analysis['inactive_domains_found']} inactive"
+                )
+                return jsonify(analysis), 200
+
+            except Exception as e:
+                logger.error(f"❌ API error in analyze_typosquatting_phishing: {e}")
+                import traceback
+                traceback.print_exc()
+                return jsonify({"error": str(e)}), 500
 
     @timeout(10)  # 10 second timeout for API database operations
     def process_phishing_report(
@@ -5116,9 +5579,16 @@ Phishing Detection Team
 
         # Create a new engine for this operation
         from sqlalchemy import create_engine
-        from sqlalchemy.pool import NullPool
+        from sqlalchemy.pool import QueuePool
 
-        self.db_manager.engine = create_engine(self.db_manager.engine.url, poolclass=NullPool)
+        self.db_manager.engine = create_engine(
+            self.db_manager.engine.url,
+            poolclass=QueuePool,
+            pool_size=20,
+            max_overflow=40,
+            pool_pre_ping=True,
+            pool_recycle=3600
+        )
 
         # If no specific attachments provided, get all configured attachments
         if attachment_paths is None:
@@ -7370,7 +7840,8 @@ def show_auto_status():
                 print(
                     f"   👀 Manual Review Confidence Threshold: {MANUAL_REVIEW_THRESHOLD_CONFIDENCE}%"
                 )
-                print(f"   🎯 Auto-Report Threat Levels: {["critical", "high"]}")
+                threat_levels = ["critical", "high"]
+                print(f"   🎯 Auto-Report Threat Levels: {threat_levels}")
                 print(f"   ⏱️  Analysis Delay: {AUTO_ANALYSIS_DELAY_SECONDS} seconds")
             else:
                 print(f"   ❌ Reason: No API keys configured or AUTO_MULTI_API_SCAN disabled")
@@ -7608,7 +8079,8 @@ def main():
     if AUTO_ANALYSIS_ENABLED:
         logger.info(f"   Auto-Report Threshold: {AUTO_REPORT_THRESHOLD_CONFIDENCE}% confidence")
         logger.info(f"   Manual Review Threshold: {MANUAL_REVIEW_THRESHOLD_CONFIDENCE}% confidence")
-        logger.info(f"   Auto-Report Threat Levels: {["critical", "high"]}")
+        auto_report_levels = ["critical", "high"]
+        logger.info(f"   Auto-Report Threat Levels: {auto_report_levels}")
     else:
         logger.info("   Reason: No API keys configured or AUTO_MULTI_API_SCAN=False")
 
