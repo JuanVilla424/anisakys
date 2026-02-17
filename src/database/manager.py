@@ -715,3 +715,105 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"❌ Failed to get auto-report eligible sites: {e}")
             return []
+
+    def init_threads_db(self):
+        """Initialize analysis_threads and thread_results tables."""
+        with self.engine.connect() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS analysis_threads (
+                        id SERIAL PRIMARY KEY,
+                        thread_type VARCHAR(50) NOT NULL,
+                        label VARCHAR(255),
+                        account_id VARCHAR(20),
+                        status VARCHAR(20) NOT NULL,
+                        started_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                        completed_at TIMESTAMP,
+                        results_count INTEGER NOT NULL DEFAULT 0,
+                        details JSONB,
+                        error_message TEXT,
+                        image_s3_key VARCHAR(500),
+                        original_filename VARCHAR(255),
+                        content_type VARCHAR(100),
+                        file_size_bytes INTEGER,
+                        search_interval_hours INTEGER,
+                        last_searched_at TIMESTAMP
+                    )
+                """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS thread_results (
+                        id SERIAL PRIMARY KEY,
+                        thread_id INTEGER NOT NULL REFERENCES analysis_threads(id),
+                        result_type VARCHAR(50) NOT NULL,
+                        found_url VARCHAR(2000),
+                        title VARCHAR(500),
+                        confidence REAL,
+                        thumbnail_url VARCHAR(2000),
+                        source VARCHAR(100),
+                        first_detected_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                        last_detected_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                        status VARCHAR(20) NOT NULL DEFAULT 'new',
+                        assigned_to VARCHAR(100),
+                        details JSONB
+                    )
+                """
+                )
+            )
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS idx_threads_type ON analysis_threads(thread_type)")
+            )
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS idx_threads_status ON analysis_threads(status)")
+            )
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS idx_results_thread ON thread_results(thread_id)")
+            )
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS idx_results_status ON thread_results(status)")
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS thread_executions (
+                        id SERIAL PRIMARY KEY,
+                        thread_id INTEGER NOT NULL REFERENCES analysis_threads(id),
+                        execution_type VARCHAR(50) NOT NULL,
+                        started_at TIMESTAMP DEFAULT NOW(),
+                        completed_at TIMESTAMP,
+                        status VARCHAR(20) NOT NULL DEFAULT 'running',
+                        results_count INTEGER NOT NULL DEFAULT 0,
+                        error_message TEXT,
+                        details JSONB
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_executions_thread ON thread_executions(thread_id)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_executions_status ON thread_executions(status)"
+                )
+            )
+            conn.execute(
+                text(
+                    "ALTER TABLE thread_results ADD COLUMN IF NOT EXISTS execution_id INTEGER REFERENCES thread_executions(id)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_results_execution ON thread_results(execution_id)"
+                )
+            )
+            conn.commit()
+            logger.info(
+                "🗄️  Initialized analysis_threads, thread_results, and thread_executions tables."
+            )
