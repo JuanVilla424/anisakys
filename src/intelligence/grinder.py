@@ -6,6 +6,7 @@ bidirectional threat intelligence integration.
 """
 
 import datetime
+import hmac
 import ipaddress
 import logging
 import time
@@ -428,7 +429,7 @@ def require_api_key(f):
             logger.error("🔐 API key not configured for validation")
             return jsonify({"error": "API authentication not properly configured"}), 500
 
-        if provided_key != expected_key:
+        if not hmac.compare_digest(provided_key.encode(), expected_key.encode()):
             logger.warning(f"🔐 Invalid API key provided from {request.remote_addr}")
             return jsonify({"error": "Invalid API key"}), 401
 

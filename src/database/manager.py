@@ -179,15 +179,15 @@ class DatabaseManager:
                         WHERE site_status = 'up'
                         AND (
                             gsb_last_check IS NULL
-                            OR gsb_last_check < NOW() - INTERVAL '%s hours'
+                            OR gsb_last_check < NOW() - INTERVAL '1 hour' * :max_age_hours
                         )
                         ORDER BY
                             gsb_last_check ASC NULLS FIRST,
                             api_confidence_score DESC
-                        LIMIT %s
+                        LIMIT :limit
                         """
-                        % (max_age_hours, limit)
-                    )
+                    ),
+                    {"max_age_hours": max_age_hours, "limit": limit},
                 ).fetchall()
 
                 sites = []
@@ -317,11 +317,11 @@ class DatabaseManager:
                                multi_api_threat_level, api_confidence_score
                         FROM phishing_sites
                         WHERE gsb_safe = 0
-                        AND gsb_last_check > NOW() - INTERVAL '%s hours'
+                        AND gsb_last_check > NOW() - INTERVAL '1 hour' * :since_hours
                         ORDER BY gsb_last_check DESC
                         """
-                        % since_hours
-                    )
+                    ),
+                    {"since_hours": since_hours},
                 ).fetchall()
 
                 return [
