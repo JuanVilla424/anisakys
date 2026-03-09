@@ -51,7 +51,6 @@
 **Key Components**:
 
 1. **RedirectAnalyzer Class** (`src/detection/redirect_analyzer.py`)
-
    - Follows redirects with `allow_redirects=False` (manual control)
    - Timeout per hop: 10 seconds
    - Max hops: 5 (configurable via `MAX_REDIRECT_HOPS` env var)
@@ -59,13 +58,11 @@
    - Identifies cross-domain redirects
 
 2. **RedirectChain Data Model**
-
    - Captures: initial_url, final_url, all hops, timestamps, flags
    - Risk scoring algorithm (0-100)
    - Suspicious pattern detection (TLDs, URL shorteners, domain length)
 
 3. **Database Schema**
-
    - New table: `redirect_chains`
    - Foreign key to `phishing_sites`
    - Stores hops as JSONB for flexibility

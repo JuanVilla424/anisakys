@@ -52,19 +52,16 @@
 **Key Components**:
 
 1. **StructuredFormatter Class** (`src/observability/structured_logger.py`)
-
    - Custom logging.Formatter for JSON output
    - Fields: timestamp (ISO8601), level, logger, message, correlation_id, context, exception
    - Source location for ERROR+ levels (file, line, function)
 
 2. **Correlation ID Management**
-
    - ContextVar for thread-safe correlation ID storage
    - Auto-generated UUID per scan cycle
    - Propagated through all log calls within same context
 
 3. **Log Configuration**
-
    - Console handler (JSON) for production
    - File handler with RotatingFileHandler (50MB max, 30 backups)
    - Configurable via environment variables (LOG_LEVEL, LOG_FILE)
