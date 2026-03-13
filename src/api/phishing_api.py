@@ -260,6 +260,20 @@ class PhishingAPI:
                 # Perform comprehensive scan with ALL APIs (URL analysis, VirusTotal, URLVoid, PhishTank, Google Safe Browsing)
                 scan_result = self.multi_api_validator.comprehensive_scan(url)
 
+                # Resolve abuse emails for this domain
+                try:
+                    _domain = scan_result.get("domain", "")
+                    _registrar = scan_result.get("registrar_name")
+                    abuse_emails = self.abuse_detector.get_enhanced_abuse_email(
+                        _domain, registrar=_registrar
+                    )
+                    scan_result["all_abuse_emails"] = (
+                        ", ".join(abuse_emails) if abuse_emails else None
+                    )
+                except Exception as ae_err:
+                    logger.warning(f"⚠️ Abuse email resolution failed: {ae_err}")
+                    scan_result["all_abuse_emails"] = None
+
                 # Capture screenshot if requested and service available
                 screenshot_data = None
                 if include_screenshot and screenshot_service:
@@ -321,7 +335,8 @@ class PhishingAPI:
                                         registration_date = COALESCE(:reg_date, registration_date),
                                         registrar_name = COALESCE(:registrar, registrar_name),
                                         registrant_org = COALESCE(:registrant_org, registrant_org),
-                                        domain_age_days = COALESCE(:domain_age, domain_age_days)
+                                        domain_age_days = COALESCE(:domain_age, domain_age_days),
+                                        all_abuse_emails = COALESCE(:all_abuse_emails, all_abuse_emails)
                                     WHERE url = :url
                                 """
                                 ),
@@ -336,6 +351,7 @@ class PhishingAPI:
                                     "registrar": scan_result.get("registrar_name"),
                                     "registrant_org": scan_result.get("registrant_org"),
                                     "domain_age": scan_result.get("domain_age_days"),
+                                    "all_abuse_emails": scan_result.get("all_abuse_emails"),
                                     "url": url,
                                 },
                             )
@@ -348,12 +364,14 @@ class PhishingAPI:
                                         url, first_seen, last_seen, source,
                                         virustotal_result, urlvoid_result, phishtank_result,
                                         multi_api_threat_level, api_confidence_score,
-                                        auto_analysis_status, registration_date, registrar_name, registrant_org, domain_age_days
+                                        auto_analysis_status, registration_date, registrar_name, registrant_org, domain_age_days,
+                                        all_abuse_emails
                                     ) VALUES (
                                         :url, :timestamp, :timestamp, 'api_scan',
                                         :vt_result, :uv_result, :pt_result,
                                         :threat_level, :confidence,
-                                        'completed', :reg_date, :registrar, :registrant_org, :domain_age
+                                        'completed', :reg_date, :registrar, :registrant_org, :domain_age,
+                                        :all_abuse_emails
                                     )
                                 """
                                 ),
@@ -369,6 +387,7 @@ class PhishingAPI:
                                     "registrar": scan_result.get("registrar_name"),
                                     "registrant_org": scan_result.get("registrant_org"),
                                     "domain_age": scan_result.get("domain_age_days"),
+                                    "all_abuse_emails": scan_result.get("all_abuse_emails"),
                                 },
                             )
                     logger.info(f"✅ Scan results saved for {url}")

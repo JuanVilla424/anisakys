@@ -6,6 +6,7 @@ Provides enhanced abuse email detection with multiple sources and validation.
 
 import datetime
 import re
+import socket
 import subprocess
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -24,6 +25,8 @@ from src.data import (
     TLD_WHOIS_SERVERS,
 )
 from sqlalchemy import text
+from src.dns.network_utils import is_cloudflare_ip
+from src.intelligence.abuse_contact_resolver import AbuseContactResolver
 from src.logger import logger
 
 # RDAP Bootstrap cache (TLD -> RDAP server URL)
@@ -36,6 +39,10 @@ class EnhancedAbuseEmailDetector:
     def __init__(self, db_manager):
         self.db_manager = db_manager
         self.dns_resolver = dns.resolver.Resolver()
+        self.abuse_resolver = AbuseContactResolver(
+            asn_db=ASN_ABUSE_EMAIL_DB,
+            provider_db=PROVIDER_ABUSE_EMAIL_DB,
+        )
         self.dns_resolver.timeout = 5
         self.dns_resolver.lifetime = 10
 

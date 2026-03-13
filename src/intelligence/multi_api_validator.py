@@ -230,6 +230,13 @@ class MultiAPIValidator:
         results["domain_age_days"] = whois_info.get("domain_age_days")
         results["registrant_org"] = whois_info.get("registrant_org")
 
+        # Lookup registrar abuse form URL (for providers that require web forms)
+        from src.data.registrar_form_db import lookup_registrar_form
+
+        form_info = lookup_registrar_form(results.get("registrar_name"))
+        results["registrar_abuse_form_url"] = form_info["form_url"] if form_info else None
+        results["registrar_abuse_method"] = form_info["method"] if form_info else "email"
+
         log_with_context(
             logger,
             logging.INFO,

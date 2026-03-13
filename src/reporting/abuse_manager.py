@@ -939,7 +939,7 @@ class AbuseReportManager:
                         escalation_cc.append(sender_email)
 
                     # Add escalation based on how overdue
-                    if overdue_hours > 48:  # 2+ days overdue - Level 2 escalation
+                    if overdue_hours > 72:  # 3+ days overdue - Level 2 escalation
                         escalation_level2 = (
                             getattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL2")
                             if hasattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL2")
@@ -951,7 +951,7 @@ class AbuseReportManager:
                                 if email and email not in escalation_cc:
                                     escalation_cc.append(email)
 
-                    if overdue_hours > 72:  # 3+ days overdue - Level 3 escalation
+                    if overdue_hours > 96:  # 4+ days overdue - Level 3 escalation
                         escalation_level3 = (
                             getattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL3")
                             if hasattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL3")
@@ -1071,20 +1071,20 @@ Phishing Detection Team
             return False
 
     def followup_worker(self):
-        """Background worker that checks for overdue reports every 24 hours"""
-        logger.info("🚀 Starting follow-up worker for ICANN compliance (checks every 24 hours)...")
+        """Background worker that checks for overdue reports every 48 hours"""
+        logger.info("🚀 Starting follow-up worker for ICANN compliance (checks every 48 hours)...")
 
         # Check last follow-up time from database
         last_followup_time = self._get_last_followup_time()
 
         if last_followup_time:
             hours_since_last = (datetime.datetime.now() - last_followup_time).total_seconds() / 3600
-            if hours_since_last < 24:
-                wait_hours = 24 - hours_since_last
+            if hours_since_last < 48:
+                wait_hours = 48 - hours_since_last
                 logger.info(
                     f"⏰ Last follow-up was {hours_since_last:.1f} hours ago. Waiting {wait_hours:.1f} hours before first check."
                 )
-                # Wait until 24 hours have passed since last follow-up
+                # Wait until 48 hours have passed since last follow-up
                 for _ in range(int(wait_hours * 60)):  # Convert hours to minutes
                     if not self.running:
                         return
@@ -1097,8 +1097,8 @@ Phishing Detection Team
                 # Save the time of this follow-up run
                 self._save_followup_time()
 
-                # Wait 24 hours before next check
-                for _ in range(1440):  # 1440 minutes = 24 hours
+                # Wait 48 hours before next check
+                for _ in range(2880):  # 2880 minutes = 48 hours
                     if not self.running:
                         break
                     time.sleep(60)  # Sleep 1 minute at a time for responsive shutdown
