@@ -8,11 +8,19 @@ Aggregates results from multiple threat intelligence APIs
 import datetime
 import logging
 import re
+import time
 from typing import Any, Dict, List, Optional
 
 from src.config import settings
 from src.logger import logger
 from src.observability.structured_logger import log_with_context
+from src.observability.metrics import (
+    increment_counter,
+    observe_histogram,
+    METRIC_SCANS_TOTAL,
+    METRIC_SCAN_DURATION_SECONDS,
+    METRIC_DETECTIONS_TOTAL,
+)
 
 # Import integrations
 from src.intelligence.virustotal import VirusTotalIntegration, VIRUSTOTAL_API_KEY
@@ -59,6 +67,8 @@ class MultiAPIValidator:
             Dict[str, Any]: Comprehensive validation report with aggregated results
         """
         logger.info(f"🔍 Starting comprehensive multi-API scan for {url}")
+        increment_counter(METRIC_SCANS_TOTAL)
+        _scan_start = time.time()
 
         # Extract domain for domain-specific checks
         domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
@@ -250,6 +260,10 @@ class MultiAPIValidator:
             phishtank_verified=pt_result.get("verified", False),
             event_type="multi_api_scan_complete",
         )
+
+        observe_histogram(METRIC_SCAN_DURATION_SECONDS, time.time() - _scan_start)
+        if results["aggregated_threat_level"] in ("critical", "high"):
+            increment_counter(METRIC_DETECTIONS_TOTAL)
 
         return results
 

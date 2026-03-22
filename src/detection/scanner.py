@@ -17,6 +17,7 @@ import requests
 from src.config import settings, CLOUDFLARE_IP_RANGES
 from src.dns.network_utils import get_ip_info, is_cloudflare_ip
 from src.logger import logger
+from src.observability.metrics import increment_counter, METRIC_REDIRECT_CHAINS_TOTAL
 from src.shutdown import shutdown_requested
 
 # Default User-Agent for HTTP requests
@@ -311,6 +312,7 @@ class PhishingScanner:
 
                                 # EPIC-001: Store redirect chain if analyzed
                                 if redirect_chain and redirect_chain.hop_count > 0:
+                                    increment_counter(METRIC_REDIRECT_CHAINS_TOTAL)
                                     try:
                                         # Get site_id from the stored detection
                                         with self.db_manager.engine.begin() as conn:

@@ -23,6 +23,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from src.observability.structured_logger import log_with_context, log_error
+from src.observability.metrics import (
+    increment_counter,
+    set_gauge,
+    observe_histogram,
+    METRIC_API_CALLS_TOTAL,
+    METRIC_API_LATENCY_SECONDS,
+    METRIC_CIRCUIT_BREAKER_STATE,
+)
 
 
 class CircuitState(Enum):
@@ -139,6 +147,9 @@ class CircuitBreaker:
             event_type="circuit_breaker_state_change",
         )
 
+        _state_val = {"closed": 0.0, "half_open": 0.5, "open": 1.0}
+        set_gauge(METRIC_CIRCUIT_BREAKER_STATE, _state_val[new_state.value], api_name=self.name)
+
         # Reset counters on state change
         if new_state == CircuitState.HALF_OPEN:
             self._success_count = 0
@@ -236,11 +247,16 @@ class CircuitBreaker:
             )
 
         # Attempt the call with retries
+        _call_start = time.time()
         last_exception = None
         for attempt in range(self.config.max_retries):
             try:
                 result = func(*args, **kwargs)
                 self._record_success()
+                observe_histogram(
+                    METRIC_API_LATENCY_SECONDS, time.time() - _call_start, api_name=self.name
+                )
+                increment_counter(METRIC_API_CALLS_TOTAL, api_name=self.name)
                 return result
 
             except Exception as e:

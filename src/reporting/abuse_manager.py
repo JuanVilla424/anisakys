@@ -35,6 +35,7 @@ from src.intelligence import (
 )
 from src.logger import logger
 from src.observability.structured_logger import log_error, log_with_context
+from src.observability.metrics import increment_counter, METRIC_REPORTS_SENT_TOTAL
 from src.models import AttachmentConfig
 from src.reporting.abuse_contact_validator import AbuseContactValidator
 from src.screenshot_service import ScreenshotService
@@ -681,6 +682,7 @@ class AbuseReportManager:
             logger.info(
                 f"📊 SUMMARY: Successfully sent enhanced abuse reports to {success_count}/{len(abuse_emails)} recipients for {site_url}"
             )
+            increment_counter(METRIC_REPORTS_SENT_TOTAL, success_count)
         else:
             logger.error(
                 f"❌ SUMMARY: Failed to send abuse reports to any recipients for {site_url}"
