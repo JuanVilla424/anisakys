@@ -156,8 +156,5 @@ test_main_logging.py
 # BMAD specific files
 .bmadrc.yaml
 .mcp.json
-docs/system/
-docs/auto-continue-system.md
-docs/ENFORCEMENT.md
-docs/temp-structure.md
+docs/
 CONTEXT.md
