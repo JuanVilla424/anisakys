@@ -2,8 +2,9 @@
 Centralized metrics registry for Anisakys.
 
 Thread-safe registry for counters, gauges, and histograms.
-No external dependencies (stdlib only). Designed to be wrapped by a
-Prometheus exporter in a future step (D5).
+No external dependencies (stdlib only). Prometheus endpoint live at
+/metrics via prometheus_client (D5). Application-level instrumentation
+via increment_counter() et al. can be added incrementally.
 
 Predefined metric names follow the Prometheus naming convention:
     anisakys_<component>_<measure>_<unit>

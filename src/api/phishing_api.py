@@ -733,6 +733,16 @@ class PhishingAPI:
                 200,
             )
 
+        @self.app.route("/metrics", methods=["GET"])
+        def prometheus_metrics():
+            """Prometheus metrics endpoint (no authentication required)."""
+            from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
+
+            return self.app.response_class(
+                generate_latest(),
+                mimetype=CONTENT_TYPE_LATEST,
+            )
+
     @timeout(10)  # 10 second timeout for API database operations
     def process_phishing_report(
         self, url: str, abuse_email: Optional[str], source: str, priority: str, description: str
