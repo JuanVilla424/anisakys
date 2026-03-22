@@ -8,9 +8,9 @@ import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.abuse_contact_validator import AbuseContactValidator, validate_abuse_email
+from src.reporting.abuse_contact_validator import AbuseContactValidator, validate_abuse_email
 from src.screenshot_service import ScreenshotService, capture_phishing_screenshot
-from src.report_tracker import ReportTracker, create_report_record
+from src.reporting.report_tracker import ReportTracker, create_report_record
 import tempfile
 from pathlib import Path
 

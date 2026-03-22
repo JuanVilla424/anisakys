@@ -78,7 +78,7 @@ This tool is being positioned as a **professional security arm** for the organiz
 
 **Resolution**:
 
-- Upsert logic implemented in `src/report_tracker.py`
+- Upsert logic implemented in `src/reporting/report_tracker.py`
 - Database constraints added
 - Enhanced `src/database/manager.py` module
 
@@ -221,6 +221,7 @@ src/
 │   ├── redirect_analyzer.py   # 5-hop redirect chain analysis (330 LOC)
 │   ├── scanner.py             # Core scanning logic (536 LOC)
 │   ├── analyzer.py            # Content analysis (469 LOC)
+│   ├── google_ads_detector.py # Phishing detection in Google Ads (1,177 LOC)
 │   └── utils.py               # Detection utilities (185 LOC)
 │
 ├── intelligence/              # 🆕 Modularized API integrations
@@ -235,9 +236,11 @@ src/
 ├── observability/             # 🆕 Production monitoring
 │   └── structured_logger.py   # JSON logs + correlation IDs (313 LOC)
 │
-├── reporting/                 # 🆕 Modularized reporting
-│   ├── abuse_manager.py       # Abuse report management (1,870 LOC)
-│   └── email_detector.py      # Email discovery (840 LOC)
+├── reporting/                 # 🆕 Modularized reporting + ICANN compliance
+│   ├── abuse_manager.py           # Abuse report management (1,870 LOC)
+│   ├── email_detector.py          # Email discovery (840 LOC)
+│   ├── report_tracker.py          # ICANN compliance tracking (936 LOC)
+│   └── abuse_contact_validator.py # Email validation for abuse contacts (430 LOC)
 │
 ├── api/                       # REST API
 │   └── phishing_api.py        # Flask API server (747 LOC)
@@ -260,11 +263,8 @@ src/
 ├── models/                    # Data models
 │   └── config.py              # Configuration models (131 LOC)
 │
-├── report_tracker.py          # ICANN compliance tracking (936 LOC)
-├── abuse_contact_validator.py # Email validation (430 LOC)
 ├── screenshot_service.py      # Visual evidence capture (417 LOC)
-├── google_ads_detector.py     # Ad-based detection (1,177 LOC)
-└── repopulate.py              # Database utilities (92 LOC)
+└── shutdown.py                # Graceful shutdown handler
 ```
 
 **Total Source LOC**: ~14,434 lines (modularized)
@@ -334,13 +334,13 @@ src/
 
 2. **[DB-DUPLICATES]** Report duplication in abuse_reports table
    - **Impact**: Data integrity, inaccurate metrics
-   - **Affected**: `src/report_tracker.py`
+   - **Affected**: `src/reporting/report_tracker.py`
    - **Status**: Partially fixed with upsert logic (pending testing)
-   - **File**: src/report_tracker.py:339-463
+   - **File**: src/reporting/report_tracker.py:339-463
 
 3. **[ABUSE-CONTACT-MULTI]** Multiple abuse contacts not handled properly
    - **Impact**: Incomplete reporting
-   - **Affected**: `src/abuse_contact_validator.py`
+   - **Affected**: `src/reporting/abuse_contact_validator.py`
    - **Workaround**: Manual intervention
 
 4. **[LOGGING-PROD]** Production logging insufficient for troubleshooting
@@ -356,7 +356,7 @@ src/
 
 6. **[WHOIS-PARSING]** Non-standard WHOIS responses fail to parse
    - **Impact**: Missing abuse contacts
-   - **Affected**: `src/abuse_contact_validator.py`
+   - **Affected**: `src/reporting/abuse_contact_validator.py`
 
 ---
 

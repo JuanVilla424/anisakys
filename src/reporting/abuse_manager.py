@@ -36,9 +36,9 @@ from src.intelligence import (
 from src.logger import logger
 from src.observability.structured_logger import log_error, log_with_context
 from src.models import AttachmentConfig
-from src.abuse_contact_validator import AbuseContactValidator
+from src.reporting.abuse_contact_validator import AbuseContactValidator
 from src.screenshot_service import ScreenshotService
-from src.report_tracker import ReportTracker
+from src.reporting.report_tracker import ReportTracker
 from src.shutdown import shutdown_requested
 
 # Testing mode flag - controls CC email suppression (default: False in production)

@@ -9,6 +9,7 @@ from src.detection.analyzer import AutoPhishingAnalyzer
 from src.detection.utils import PhishingUtils
 from src.detection.scanner import PhishingScanner
 from src.detection.url_analyzer import URLAnalyzer, url_analyzer
+from src.detection.google_ads_detector import GoogleAdsPhishingDetector
 
 __all__ = [
     "RedirectAnalyzer",
@@ -18,4 +19,5 @@ __all__ = [
     "PhishingScanner",
     "URLAnalyzer",
     "url_analyzer",
+    "GoogleAdsPhishingDetector",
 ]

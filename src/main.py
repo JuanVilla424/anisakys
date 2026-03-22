@@ -113,8 +113,8 @@ def set_testing_mode(enabled=True):
         logger.warning("🧪 TESTING MODE ACTIVE - CCs disabled for security")
 
 
-from src.abuse_contact_validator import AbuseContactValidator
-from src.report_tracker import ReportTracker, create_report_record
+from src.reporting.abuse_contact_validator import AbuseContactValidator
+from src.reporting.report_tracker import ReportTracker, create_report_record
 
 # File configuration (DATABASE_URL imported from src.database)
 QUERIES_FILE = getattr(settings, "QUERIES_FILE")

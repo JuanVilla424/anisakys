@@ -14,3 +14,4 @@ dnspython~=2.7.0
 cryptography~=46.0.5
 selenium>=4.15.0
 playwright>=1.40.0
+beautifulsoup4>=4.12.0

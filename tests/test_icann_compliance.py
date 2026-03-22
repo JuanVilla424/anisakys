@@ -18,8 +18,8 @@ spec.loader.exec_module(main)
 
 # Import services
 from src.screenshot_service import ScreenshotService, capture_phishing_screenshot
-from src.abuse_contact_validator import AbuseContactValidator, validate_abuse_email
-from src.report_tracker import ReportTracker, create_report_record, ReportStatus
+from src.reporting.abuse_contact_validator import AbuseContactValidator, validate_abuse_email
+from src.reporting.report_tracker import ReportTracker, create_report_record, ReportStatus
 
 # User's test email
 TEST_USER_EMAIL = "r6ty5r296it6tl4eg5m.constant214@passinbox.com"
