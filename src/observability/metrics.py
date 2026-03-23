@@ -404,6 +404,7 @@ METRIC_REDIRECT_CHAINS_TOTAL = "anisakys_redirect_chains_detected_total"
 METRIC_API_CALLS_TOTAL = "anisakys_api_calls_total"
 METRIC_REPORTS_SENT_TOTAL = "anisakys_reports_sent_total"
 METRIC_AUTH_TOTAL = "anisakys_auth_total"
+METRIC_SMTP_RATE_LIMITED = "anisakys_smtp_rate_limited_total"
 
 # Gauges
 METRIC_CIRCUIT_BREAKER_STATE = "anisakys_circuit_breaker_state"
@@ -424,6 +425,7 @@ if _PROM_AVAILABLE:
     _prom_counter(METRIC_DETECTIONS_TOTAL, ())
     _prom_counter(METRIC_REDIRECT_CHAINS_TOTAL, ())
     _prom_counter(METRIC_REPORTS_SENT_TOTAL, ())
+    _prom_counter(METRIC_SMTP_RATE_LIMITED, ())
     _prom_histogram(METRIC_SCAN_DURATION_SECONDS, ())
 
     # Pre-register per-API label combinations so they appear at startup

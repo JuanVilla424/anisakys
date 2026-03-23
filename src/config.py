@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     SCREENSHOTS_DIR: Optional[str] = None
     SMTP_USER: Optional[str] = None
     SMTP_PASS: Optional[str] = None
+    SMTP_RATE_LIMIT_PER_HOUR: int = 100
     DEFAULT_ATTACHMENT: Optional[str] = None
     LOG_LEVEL: Optional[str] = None
     ANISAKYS_API_KEY: Optional[str] = None

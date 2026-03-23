@@ -37,7 +37,12 @@ from src.intelligence import (
 )
 from src.logger import logger
 from src.observability.structured_logger import log_error, log_with_context
-from src.observability.metrics import increment_counter, METRIC_REPORTS_SENT_TOTAL
+from src.observability.metrics import (
+    increment_counter,
+    METRIC_REPORTS_SENT_TOTAL,
+    METRIC_SMTP_RATE_LIMITED,
+)
+from src.reporting.smtp_rate_limiter import SmtpRateLimiter
 from src.models import AttachmentConfig
 from src.reporting.abuse_contact_validator import AbuseContactValidator
 from src.screenshot_service import ScreenshotService
@@ -70,6 +75,7 @@ class AbuseReportManager:
             screenshots_dir=getattr(settings, "SCREENSHOTS_DIR", None), timeout=timeout
         )
         self.report_tracker = ReportTracker(db_manager.engine)
+        self._smtp_rate_limiter = SmtpRateLimiter(settings.SMTP_RATE_LIMIT_PER_HOUR)
 
         if cc_emails is None:
             default_cc = (
@@ -650,6 +656,14 @@ class AbuseReportManager:
                 if grinder_report_result and grinder_report_result.get("status") == "success":
                     grinder_info = " [IP reported to threat intelligence]"
 
+                if not self._smtp_rate_limiter.acquire():
+                    logger.warning(
+                        f"⏰ SMTP rate limit reached "
+                        f"({settings.SMTP_RATE_LIMIT_PER_HOUR}/hr), skipping {primary}"
+                    )
+                    increment_counter(METRIC_SMTP_RATE_LIMITED)
+                    continue
+
                 logger.info(f"🌐 CONNECTING TO SMTP {smtp_host}:{smtp_port}")
                 with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
                     if smtp_user and smtp_pass:
@@ -1057,6 +1071,14 @@ Phishing Detection Team
                     msg.attach(MIMEText(body, "plain"))
 
                     # Send email
+                    if not self._smtp_rate_limiter.acquire():
+                        logger.warning(
+                            f"⏰ SMTP rate limit reached "
+                            f"({settings.SMTP_RATE_LIMIT_PER_HOUR}/hr), skipping follow-up to {recipient}"
+                        )
+                        increment_counter(METRIC_SMTP_RATE_LIMITED)
+                        continue
+
                     with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
                         all_recipients = [recipient] + escalation_cc
                         server.send_message(msg, to_addrs=all_recipients)
