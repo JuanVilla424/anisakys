@@ -2,9 +2,9 @@
 Centralized metrics registry for Anisakys.
 
 Thread-safe registry for counters, gauges, and histograms.
-No external dependencies (stdlib only). Prometheus endpoint live at
-/metrics via prometheus_client (D5). Application-level instrumentation
-via increment_counter() et al. can be added incrementally.
+Application metrics are dual-registered: the custom MetricsRegistry (for
+get_metrics() JSON export) and prometheus_client (for /metrics Prometheus
+scrape). Both registries stay in sync on every increment/set/observe call.
 
 Predefined metric names follow the Prometheus naming convention:
     anisakys_<component>_<measure>_<unit>
@@ -19,11 +19,18 @@ Usage:
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+try:
+    import prometheus_client as prom
+
+    _PROM_AVAILABLE = True
+except ImportError:
+    _PROM_AVAILABLE = False
 
 
 # ---------------------------------------------------------------------------
-# Internal data structures
+# Internal data structures (kept for get_metrics() JSON export)
 # ---------------------------------------------------------------------------
 
 
@@ -96,6 +103,78 @@ class Histogram:
 
 
 # ---------------------------------------------------------------------------
+# Prometheus client bridge — lazy registry of prom objects keyed by name
+# ---------------------------------------------------------------------------
+
+_PROM_LOCK = threading.Lock()
+_prom_counters: Dict[str, Any] = {}
+_prom_gauges: Dict[str, Any] = {}
+_prom_histograms: Dict[str, Any] = {}
+
+# Descriptions for each predefined metric
+_METRIC_HELP: Dict[str, str] = {
+    "anisakys_scans_total": "Total comprehensive scans started",
+    "anisakys_detections_total": "Detections with threat level critical or high",
+    "anisakys_redirect_chains_detected_total": "Redirect chains detected with hop_count > 0",
+    "anisakys_api_calls_total": "Successful external API calls",
+    "anisakys_reports_sent_total": "Abuse report emails successfully sent",
+    "anisakys_circuit_breaker_state": "Circuit breaker state: 0=closed 0.5=half_open 1=open",
+    "anisakys_api_latency_seconds": "External API response time in seconds",
+    "anisakys_scan_duration_seconds": "Full scan wall-clock time in seconds",
+}
+
+
+def _label_names(labels: Optional[Dict[str, str]]) -> Tuple[str, ...]:
+    return tuple(sorted(labels.keys())) if labels else ()
+
+
+def _prom_counter(name: str, label_names: Tuple[str, ...]) -> Any:
+    if not _PROM_AVAILABLE:
+        return None
+    key = (name, label_names)
+    if key not in _prom_counters:
+        with _PROM_LOCK:
+            if key not in _prom_counters:
+                help_text = _METRIC_HELP.get(name, name)
+                try:
+                    _prom_counters[key] = prom.Counter(name, help_text, list(label_names))
+                except ValueError:
+                    # Already registered (e.g. test re-runs)
+                    _prom_counters[key] = prom.REGISTRY._names_to_collectors.get(name)
+    return _prom_counters.get((name, label_names))
+
+
+def _prom_gauge(name: str, label_names: Tuple[str, ...]) -> Any:
+    if not _PROM_AVAILABLE:
+        return None
+    key = (name, label_names)
+    if key not in _prom_gauges:
+        with _PROM_LOCK:
+            if key not in _prom_gauges:
+                help_text = _METRIC_HELP.get(name, name)
+                try:
+                    _prom_gauges[key] = prom.Gauge(name, help_text, list(label_names))
+                except ValueError:
+                    _prom_gauges[key] = prom.REGISTRY._names_to_collectors.get(name)
+    return _prom_gauges.get((name, label_names))
+
+
+def _prom_histogram(name: str, label_names: Tuple[str, ...]) -> Any:
+    if not _PROM_AVAILABLE:
+        return None
+    key = (name, label_names)
+    if key not in _prom_histograms:
+        with _PROM_LOCK:
+            if key not in _prom_histograms:
+                help_text = _METRIC_HELP.get(name, name)
+                try:
+                    _prom_histograms[key] = prom.Histogram(name, help_text, list(label_names))
+                except ValueError:
+                    _prom_histograms[key] = prom.REGISTRY._names_to_collectors.get(name)
+    return _prom_histograms.get((name, label_names))
+
+
+# ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
 
@@ -113,6 +192,8 @@ class MetricsRegistry:
     Thread-safe singleton registry for all application metrics.
 
     Stores counters, gauges, and histograms keyed by name + labels.
+    All operations are dual-registered with prometheus_client so that
+    the /metrics endpoint exposes real application metrics.
     """
 
     _instance: Optional["MetricsRegistry"] = None
@@ -145,6 +226,15 @@ class MetricsRegistry:
                 self._counters[key] = Counter(name=name, labels=labels or {})
             self._counters[key].increment(value)
 
+        # Bridge to prometheus_client
+        pc = _prom_counter(name, _label_names(labels))
+        if pc is not None:
+            try:
+                obj = pc.labels(**labels) if labels else pc
+                obj.inc(value)
+            except Exception:
+                pass
+
     def get_counter(self, name: str, labels: Optional[Dict[str, str]] = None) -> int:
         """Return current counter value (0 if not set)."""
         key = _make_key(name, labels)
@@ -164,6 +254,15 @@ class MetricsRegistry:
                 self._gauges[key] = Gauge(name=name, labels=labels or {})
             self._gauges[key].set(value)
 
+        # Bridge to prometheus_client
+        pg = _prom_gauge(name, _label_names(labels))
+        if pg is not None:
+            try:
+                obj = pg.labels(**labels) if labels else pg
+                obj.set(value)
+            except Exception:
+                pass
+
     def get_gauge(self, name: str, labels: Optional[Dict[str, str]] = None) -> Optional[float]:
         """Return current gauge value (None if not set)."""
         key = _make_key(name, labels)
@@ -182,6 +281,15 @@ class MetricsRegistry:
             if key not in self._histograms:
                 self._histograms[key] = Histogram(name=name, labels=labels or {})
             self._histograms[key].observe(value)
+
+        # Bridge to prometheus_client
+        ph = _prom_histogram(name, _label_names(labels))
+        if ph is not None:
+            try:
+                obj = ph.labels(**labels) if labels else ph
+                obj.observe(value)
+            except Exception:
+                pass
 
     def get_histogram(
         self, name: str, labels: Optional[Dict[str, str]] = None
@@ -302,3 +410,29 @@ METRIC_CIRCUIT_BREAKER_STATE = "anisakys_circuit_breaker_state"
 # Histograms
 METRIC_API_LATENCY_SECONDS = "anisakys_api_latency_seconds"
 METRIC_SCAN_DURATION_SECONDS = "anisakys_scan_duration_seconds"
+
+# ---------------------------------------------------------------------------
+# Pre-register all metrics at import time so they appear in /metrics from
+# startup (with 0 values), not only after the first event.
+# ---------------------------------------------------------------------------
+
+_KNOWN_API_NAMES: Tuple[str, ...] = ("VirusTotal", "URLVoid", "PhishTank", "Grinder")
+
+if _PROM_AVAILABLE:
+    _prom_counter(METRIC_SCANS_TOTAL, ())
+    _prom_counter(METRIC_DETECTIONS_TOTAL, ())
+    _prom_counter(METRIC_REDIRECT_CHAINS_TOTAL, ())
+    _prom_counter(METRIC_REPORTS_SENT_TOTAL, ())
+    _prom_histogram(METRIC_SCAN_DURATION_SECONDS, ())
+
+    # Pre-register per-API label combinations so they appear at startup
+    _pc_api = _prom_counter(METRIC_API_CALLS_TOTAL, ("api_name",))
+    _pg_cb = _prom_gauge(METRIC_CIRCUIT_BREAKER_STATE, ("api_name",))
+    _ph_lat = _prom_histogram(METRIC_API_LATENCY_SECONDS, ("api_name",))
+    for _api in _KNOWN_API_NAMES:
+        if _pc_api:
+            _pc_api.labels(api_name=_api)
+        if _pg_cb:
+            _pg_cb.labels(api_name=_api).set(0)  # 0 = CLOSED (healthy)
+        if _ph_lat:
+            _ph_lat.labels(api_name=_api)
