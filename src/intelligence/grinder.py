@@ -403,37 +403,3 @@ class GrinderReportClient:
                 "message": f"Connection failed: {str(e)}",
                 "api_url": self.api_url,
             }
-
-
-def require_api_key(f):
-    """
-    Decorator to require API key authentication for API endpoints.
-
-    Expects API key in Authorization header: Bearer <key>
-    """
-
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        auth_header = request.headers.get("Authorization", "")
-
-        if not auth_header.startswith("Bearer "):
-            logger.warning(f"🔐 Unauthorized API access attempt from {request.remote_addr}")
-            return jsonify({"error": "Authorization header required with Bearer token"}), 401
-
-        provided_key = auth_header[7:]  # Remove 'Bearer ' prefix
-
-        # Get the expected API key from Flask current_app
-        expected_key = getattr(current_app, "api_key", None)
-
-        if not expected_key:
-            logger.error("🔐 API key not configured for validation")
-            return jsonify({"error": "API authentication not properly configured"}), 500
-
-        if not hmac.compare_digest(provided_key.encode(), expected_key.encode()):
-            logger.warning(f"🔐 Invalid API key provided from {request.remote_addr}")
-            return jsonify({"error": "Invalid API key"}), 401
-
-        logger.debug(f"🔐 Valid API key provided from {request.remote_addr}")
-        return f(*args, **kwargs)
-
-    return decorated_function

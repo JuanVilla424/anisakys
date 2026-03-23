@@ -403,6 +403,7 @@ METRIC_DETECTIONS_TOTAL = "anisakys_detections_total"
 METRIC_REDIRECT_CHAINS_TOTAL = "anisakys_redirect_chains_detected_total"
 METRIC_API_CALLS_TOTAL = "anisakys_api_calls_total"
 METRIC_REPORTS_SENT_TOTAL = "anisakys_reports_sent_total"
+METRIC_AUTH_TOTAL = "anisakys_auth_total"
 
 # Gauges
 METRIC_CIRCUIT_BREAKER_STATE = "anisakys_circuit_breaker_state"
@@ -436,3 +437,10 @@ if _PROM_AVAILABLE:
             _pg_cb.labels(api_name=_api).set(0)  # 0 = CLOSED (healthy)
         if _ph_lat:
             _ph_lat.labels(api_name=_api)
+
+    # Auth counter — pre-register known label combos
+    _pc_auth = _prom_counter(METRIC_AUTH_TOTAL, ("method", "status"))
+    if _pc_auth:
+        for _method in ("master", "api_key", "none"):
+            for _status in ("success", "failed"):
+                _pc_auth.labels(method=_method, status=_status)

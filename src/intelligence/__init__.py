@@ -5,9 +5,9 @@ Provides threat intelligence integrations with multiple APIs.
 """
 
 from src.intelligence.abuse_contact_resolver import AbuseContactResolver
+from src.auth import require_api_key
 from src.intelligence.grinder import (
     GrinderReportClient,
-    require_api_key,
     GRINDER0X_API_URL,
     GRINDER0X_API_KEY,
     GRINDER_INTEGRATION_ENABLED,

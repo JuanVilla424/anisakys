@@ -25,8 +25,8 @@ import logging as flask_logging
 from src.config import settings
 from sqlalchemy import text
 from src.database import db_engine, DATABASE_URL
+from src.auth import require_api_key
 from src.intelligence import (
-    require_api_key,
     MultiAPIValidator,
     VIRUSTOTAL_API_KEY,
     URLVOID_API_KEY,
@@ -143,7 +143,7 @@ class PhishingAPI:
 
         @self.app.route("/api/v1/report", methods=["POST"])
         @self.limiter.limit("5 per minute")
-        @require_api_key
+        @require_api_key(scope="report")
         def report_phishing():
             """Report a phishing site via API with authentication."""
             try:
@@ -238,7 +238,7 @@ class PhishingAPI:
 
         @self.app.route("/api/v1/multi-scan", methods=["POST"])
         @self.limiter.limit("3 per minute")
-        @require_api_key
+        @require_api_key(scope="scan")
         def multi_api_scan():
             """Perform multi-API validation scan with authentication."""
             try:
@@ -420,7 +420,7 @@ class PhishingAPI:
 
         @self.app.route("/api/v1/status/<path:url>", methods=["GET"])
         @self.limiter.limit("10 per minute")
-        @require_api_key
+        @require_api_key(scope="read")
         def get_report_status(url):
             """Get the status of a reported URL with authentication."""
             try:
@@ -472,7 +472,7 @@ class PhishingAPI:
 
         @self.app.route("/api/v1/grinder/test", methods=["POST"])
         @self.limiter.limit("5 per minute")
-        @require_api_key
+        @require_api_key(scope="admin")
         def test_grinder_integration():
             """Test Grinder integration with authentication."""
             try:
@@ -495,7 +495,7 @@ class PhishingAPI:
 
         @self.app.route("/api/v1/stats", methods=["GET"])
         @self.limiter.limit("20 per minute")
-        @require_api_key
+        @require_api_key(scope="read")
         def get_stats():
             """Get statistics about phishing reports with authentication."""
             try:
@@ -539,7 +539,7 @@ class PhishingAPI:
 
         @self.app.route("/api/v1/gsb/rescan", methods=["POST"])
         @self.limiter.limit("2 per minute")
-        @require_api_key
+        @require_api_key(scope="admin")
         def gsb_rescan():
             """
             Trigger Google Safe Browsing re-scan of existing sites.
@@ -589,7 +589,7 @@ class PhishingAPI:
 
         @self.app.route("/api/v1/gsb/status", methods=["GET"])
         @self.limiter.limit("10 per minute")
-        @require_api_key
+        @require_api_key(scope="read")
         def gsb_status():
             """Get GSB rescan job status and statistics."""
             try:
@@ -616,7 +616,7 @@ class PhishingAPI:
 
         @self.app.route("/api/v1/gsb/check", methods=["POST"])
         @self.limiter.limit("5 per minute")
-        @require_api_key
+        @require_api_key(scope="scan")
         def gsb_check_url():
             """
             Check a single URL against Google Safe Browsing.
@@ -674,7 +674,7 @@ class PhishingAPI:
 
         @self.app.route("/api/v1/gsb/report", methods=["POST"])
         @self.limiter.limit("10 per minute")
-        @require_api_key
+        @require_api_key(scope="report")
         def gsb_report_url():
             """
             Report a phishing URL to Google Safe Browsing.
