@@ -40,6 +40,7 @@ class Settings(BaseSettings):
     VIRUSTOTAL_API_KEY: Optional[str] = None
     URLVOID_API_KEY: Optional[str] = None
     PHISHTANK_API_KEY: Optional[str] = None
+    GOOGLE_SAFE_BROWSING_API_KEY: Optional[str] = None
     GRINDER0X_API_URL: Optional[str] = None
     GRINDER0X_API_KEY: Optional[str] = None
     MAX_ATTACHMENT_SIZE_MB: Optional[int] = None
@@ -51,6 +52,7 @@ class Settings(BaseSettings):
     LOG_LEVEL: Optional[str] = None
     ANISAKYS_API_KEY: Optional[str] = None
     ANISAKYS_API_PORT: Optional[int] = 8080
+    TEST_EMAIL: Optional[str] = None
 
     model_config = {
         "env_file": env_file,

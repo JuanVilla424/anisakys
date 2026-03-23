@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import datetime
 import json
+import logging
 import os
 import re
 import smtplib
+import socket
 import threading
 import time
 import traceback
@@ -257,7 +259,7 @@ class AbuseReportManager:
 
         # DEVELOPMENT/TEST PROTECTION: Only send to test email in development
         logger.info("🔍 Checking development/test mode...")
-        TEST_EMAIL = "r6ty5r296it6tl4eg5m.constant214@passinbox.com"
+        TEST_EMAIL = settings.TEST_EMAIL
         logger.info(f"🧪 Test mode: {test_mode}")
 
         if not test_mode:
@@ -564,7 +566,7 @@ class AbuseReportManager:
                     continue
 
                 logger.info(f"📝 CREATING EMAIL MESSAGE for {primary}")
-                msg = MIMEMultipart("alternative")
+                msg = MIMEMultipart("mixed")
                 msg["Subject"] = subject
                 msg["From"] = sender_email
                 msg["To"] = primary

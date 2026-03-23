@@ -3,8 +3,10 @@ Screenshot service for ICANN compliance - captures visual evidence of phishing s
 """
 
 import asyncio
+import concurrent.futures
 import logging
 import os
+import shutil
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -87,16 +89,16 @@ class ScreenshotService:
 
         screenshot_path = self.screenshots_dir / filename
 
+        tmp_profile = tempfile.mkdtemp(prefix="anisakys_pw_")
         try:
             async with async_playwright() as p:
-                # Use Chromium for better compatibility
+                sandbox_args = ["--no-sandbox"] if os.getuid() == 0 else []
                 browser = await p.chromium.launch(
                     headless=True,
-                    args=[
-                        "--no-sandbox",
+                    args=sandbox_args
+                    + [
                         "--disable-dev-shm-usage",
                         "--disable-gpu",
-                        "--disable-web-security",
                         "--disable-features=VizDisplayCompositor",
                         "--disable-blink-features=AutomationControlled",
                         "--disable-extensions",
@@ -113,6 +115,15 @@ class ScreenshotService:
                         "--force-color-profile=srgb",
                         "--metrics-recording-only",
                         "--use-mock-keychain",
+                        "--disable-file-system",
+                        "--disable-permissions-api",
+                        "--disable-notifications",
+                        "--disable-translate",
+                        "--disable-sync",
+                        "--disable-reading-from-canvas",
+                        "--disable-remote-fonts",
+                        "--no-pings",
+                        "--js-flags=--max-old-space-size=256",
                     ],
                 )
 
@@ -187,6 +198,8 @@ class ScreenshotService:
         except Exception as e:
             logger.error(f"Error capturing screenshot with Playwright: {e}")
             return {"success": False, "error": str(e), "engine": "playwright"}
+        finally:
+            shutil.rmtree(tmp_profile, ignore_errors=True)
 
     def capture_screenshot_sync(self, url: str, filename: str = None) -> Optional[Dict[str, Any]]:
         """
@@ -210,10 +223,10 @@ class ScreenshotService:
 
         screenshot_path = self.screenshots_dir / filename
 
+        tmp_profile = tempfile.mkdtemp(prefix="anisakys_sel_")
         # Configure Chrome options for headless operation with anti-detection measures
         chrome_options = ChromeOptions()
         chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--disable-gpu")
         chrome_options.add_argument("--window-size=1920,1080")
@@ -232,6 +245,18 @@ class ScreenshotService:
         chrome_options.add_argument("--force-color-profile=srgb")
         chrome_options.add_argument("--metrics-recording-only")
         chrome_options.add_argument("--use-mock-keychain")
+        chrome_options.add_argument("--disable-file-system")
+        chrome_options.add_argument("--disable-permissions-api")
+        chrome_options.add_argument("--disable-notifications")
+        chrome_options.add_argument("--disable-translate")
+        chrome_options.add_argument("--disable-sync")
+        chrome_options.add_argument("--disable-reading-from-canvas")
+        chrome_options.add_argument("--disable-remote-fonts")
+        chrome_options.add_argument("--no-pings")
+        chrome_options.add_argument("--js-flags=--max-old-space-size=256")
+        chrome_options.add_argument(f"--user-data-dir={tmp_profile}")
+        if os.getuid() == 0:
+            chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument(
             "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
         )
@@ -314,6 +339,7 @@ class ScreenshotService:
         finally:
             if driver:
                 driver.quit()
+            shutil.rmtree(tmp_profile, ignore_errors=True)
 
     def capture_screenshot(
         self, url: str, filename: str = None, use_async: bool = True
@@ -338,13 +364,11 @@ class ScreenshotService:
         # Use async Playwright if available and requested
         if use_async and PLAYWRIGHT_AVAILABLE:
             try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    # If we're in an async context, create a new task
-                    future = asyncio.create_task(self.capture_screenshot_async(url, filename))
-                    return None  # Will need to be awaited by caller
-                else:
-                    return loop.run_until_complete(self.capture_screenshot_async(url, filename))
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(
+                        asyncio.run, self.capture_screenshot_async(url, filename)
+                    )
+                    return future.result(timeout=self.timeout + 15)
             except Exception as e:
                 logger.error(f"Error with async screenshot: {e}, falling back to sync")
                 return self.capture_screenshot_sync(url, filename)

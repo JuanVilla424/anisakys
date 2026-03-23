@@ -4,16 +4,16 @@ Checks URLs against Google's threat database
 """
 
 import logging
-import os
 import requests
 from typing import Dict, List, Optional
 from datetime import datetime
+from src.config import settings
 
 logger = logging.getLogger(__name__)
 
 # API Configuration
 GOOGLE_SAFE_BROWSING_API_URL = "https://safebrowsing.googleapis.com/v4/threatMatches:find"
-GOOGLE_API_KEY = os.getenv("GOOGLE_SAFE_BROWSING_API_KEY", "")
+GOOGLE_API_KEY = settings.GOOGLE_SAFE_BROWSING_API_KEY or ""
 
 # Threat types to check
 THREAT_TYPES = [

@@ -6,6 +6,7 @@ Main scanner class for detecting phishing sites through keyword analysis.
 
 from __future__ import annotations
 
+import os
 import re
 import socket
 import time
@@ -15,10 +16,24 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 from src.config import settings, CLOUDFLARE_IP_RANGES
+from src.data import ASN_ABUSE_EMAIL_DB, PROVIDER_ABUSE_EMAIL_DB
+from src.database import DatabaseManager, DATABASE_URL
+from src.detection.redirect_analyzer import RedirectAnalyzer
+from src.detection.utils import PhishingUtils
 from src.dns.network_utils import get_ip_info, is_cloudflare_ip
+from src.generators.query_generator import generate_queries_file
+from src.intelligence import MultiAPIValidator, AUTO_ANALYSIS_ENABLED, AbuseContactResolver
 from src.logger import logger
+from src.models import DynamicBatchConfig
+from src.monitoring.takedown import get_offset, save_offset
 from src.observability.metrics import increment_counter, METRIC_REDIRECT_CHAINS_TOTAL
+from src.observability.structured_logger import log_error
 from src.shutdown import shutdown_requested
+
+QUERIES_FILE = getattr(settings, "QUERIES_FILE", None)
+ENABLE_REDIRECT_ANALYSIS = getattr(settings, "ENABLE_REDIRECT_ANALYSIS", True)
+MAX_REDIRECT_HOPS = getattr(settings, "MAX_REDIRECT_HOPS", 5)
+REDIRECT_TIMEOUT_PER_HOP = getattr(settings, "REDIRECT_TIMEOUT_PER_HOP", 10)
 
 # Default User-Agent for HTTP requests
 DEFAULT_USER_AGENT = (
