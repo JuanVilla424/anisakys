@@ -719,6 +719,7 @@ class PhishingAPI:
                 return jsonify({"error": "Internal server error"}), 500
 
         @self.app.route("/api/v1/health", methods=["GET"])
+        @self.limiter.exempt
         def health_check():
             """Health check endpoint (no authentication required)."""
             return (
@@ -734,6 +735,7 @@ class PhishingAPI:
             )
 
         @self.app.route("/metrics", methods=["GET"])
+        @self.limiter.exempt
         def prometheus_metrics():
             """Prometheus metrics endpoint (no authentication required)."""
             from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
