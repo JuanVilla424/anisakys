@@ -54,6 +54,16 @@ class Settings(BaseSettings):
     ANISAKYS_API_KEY: Optional[str] = None
     ANISAKYS_API_PORT: Optional[int] = 8080
     TEST_EMAIL: Optional[str] = None
+    SERPAPI_KEY: Optional[str] = None
+    S3_DATA_BUCKET: Optional[str] = None
+    AWS_REGION: Optional[str] = None
+    GOOGLE_SERVICE_ACCOUNT_FILE: Optional[str] = None
+    GOOGLE_WORKSPACE_DOMAIN: Optional[str] = None
+    GOOGLE_ADMIN_EMAIL: Optional[str] = None
+    EMAIL_ABUSE_MAILBOX: Optional[str] = None
+    EMAIL_MONITORED_MAILBOXES: Optional[str] = None
+    EMAIL_BLOCK_THRESHOLD: Optional[int] = 5
+    EMAIL_POLL_INTERVAL_MINUTES: Optional[int] = 15
 
     model_config = {
         "env_file": env_file,

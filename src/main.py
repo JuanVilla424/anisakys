@@ -606,6 +606,37 @@ class Engine:
             )
             logger.info("🔄 GSB rescan job started (12h interval)")
 
+            # Start image tracking / ads scheduler if SERPAPI_KEY is configured
+            scheduler = None
+            if getattr(settings, "SERPAPI_KEY", None):
+                from src.monitoring.scheduler import ImageTrackingScheduler
+
+                scheduler = ImageTrackingScheduler(
+                    serpapi_key=settings.SERPAPI_KEY,
+                    s3_bucket=getattr(settings, "S3_DATA_BUCKET", None),
+                    aws_region=getattr(settings, "AWS_REGION", None),
+                )
+                scheduler.start()
+                logger.info("📡 Image tracking scheduler started")
+
+            # Start email threat monitoring scheduler if Google config is set
+            email_scheduler = None
+            if getattr(settings, "GOOGLE_SERVICE_ACCOUNT_FILE", None) and getattr(
+                settings, "GOOGLE_WORKSPACE_DOMAIN", None
+            ):
+                from src.monitoring.email_scheduler import EmailMonitorScheduler
+
+                email_scheduler = EmailMonitorScheduler(
+                    service_account_file=settings.GOOGLE_SERVICE_ACCOUNT_FILE,
+                    domain=settings.GOOGLE_WORKSPACE_DOMAIN,
+                    block_threshold=getattr(settings, "EMAIL_BLOCK_THRESHOLD", 5),
+                    vt_api_key=getattr(settings, "VIRUSTOTAL_API_KEY", None),
+                    poll_interval_minutes=getattr(settings, "EMAIL_POLL_INTERVAL_MINUTES", 15),
+                    admin_email=getattr(settings, "GOOGLE_ADMIN_EMAIL", None),
+                )
+                email_scheduler.start()
+                logger.info("📧 Email threat monitoring scheduler started")
+
             # Store the API key globally for decorator access
             global flask_app
 
@@ -614,6 +645,8 @@ class Engine:
                 self.abuse_detector,
                 api_key=api_key,
                 report_manager=self.report_manager,
+                scheduler=scheduler,
+                email_scheduler=email_scheduler,
             )
             flask_app = api.app
 

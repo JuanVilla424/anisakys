@@ -87,6 +87,23 @@ class TakedownMonitor:
                                     f"🔄 Updated {url}: site_status='{new_status}', takedown_date='{new_takedown}'"
                                 )
 
+                                # Auto-resolve abuse reports when site goes down
+                                if new_status == "down" and current_status != "down":
+                                    conn.execute(
+                                        text(
+                                            """
+                                            UPDATE abuse_reports
+                                            SET status='resolved', response_date=NOW()
+                                            WHERE site_url=:url
+                                            AND status NOT IN ('resolved', 'rejected')
+                                            """
+                                        ),
+                                        {"url": url},
+                                    )
+                                    logger.info(
+                                        f"✅ Auto-resolved abuse reports for taken-down site: {url}"
+                                    )
+
                         except Exception as e:
                             logger.error(f"❌ Error checking status for {url}: {e}")
                             continue

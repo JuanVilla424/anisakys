@@ -253,3 +253,48 @@ class VirusTotalIntegration:
         except Exception as e:
             logger.error(f"❌ VirusTotal domain analysis failed for {domain}: {e}")
             return {"error": str(e)}
+
+    def lookup_file_hash(self, file_hash: str) -> Dict[str, Any]:
+        """
+        Look up a file by its SHA-256 hash in VirusTotal.
+
+        Does NOT upload the file — only queries the existing database by hash.
+        Use this for email attachment triage without storing attachment data.
+
+        Args:
+            file_hash: SHA-256 hex digest of the file.
+
+        Returns:
+            Dict with keys: found, malicious, suspicious, harmless, undetected,
+            total_engines, threat_level, file_type, file_name (if known).
+        """
+        if not self.api_key:
+            return {"found": False, "error": "API key not configured"}
+
+        try:
+            response = self.session.get(f"{self.base_url}/files/{file_hash}")
+
+            if response.status_code == 404:
+                return {"found": False}
+
+            if response.status_code == 200:
+                data = response.json()
+                attributes = data.get("data", {}).get("attributes", {})
+                stats = attributes.get("last_analysis_stats", {})
+                return {
+                    "found": True,
+                    "malicious": stats.get("malicious", 0),
+                    "suspicious": stats.get("suspicious", 0),
+                    "harmless": stats.get("harmless", 0),
+                    "undetected": stats.get("undetected", 0),
+                    "total_engines": sum(stats.values()),
+                    "threat_level": self._calculate_threat_level(stats),
+                    "file_type": attributes.get("type_description"),
+                    "file_name": (attributes.get("names") or [None])[0],
+                }
+
+            return {"found": False, "error": f"Unexpected status: {response.status_code}"}
+
+        except Exception as e:
+            logger.error(f"❌ VirusTotal file hash lookup failed for {file_hash[:16]}…: {e}")
+            return {"found": False, "error": str(e)}

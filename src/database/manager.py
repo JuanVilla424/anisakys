@@ -313,12 +313,16 @@ class DatabaseManager:
                 results = conn.execute(
                     text(
                         """
-                        SELECT url, gsb_threat_type, gsb_last_check,
+                        SELECT url, gsb_threat_type, first_seen,
                                multi_api_threat_level, api_confidence_score
                         FROM phishing_sites
-                        WHERE gsb_safe = 0
-                        AND gsb_last_check > NOW() - INTERVAL '1 hour' * :since_hours
-                        ORDER BY gsb_last_check DESC
+                        WHERE (
+                            (gsb_safe = 0 AND gsb_last_check IS NOT NULL)
+                            OR first_seen > NOW() - INTERVAL '1 hour' * :since_hours
+                        )
+                        AND site_status != 'down'
+                        ORDER BY first_seen DESC
+                        LIMIT 20
                         """
                     ),
                     {"since_hours": since_hours},
@@ -328,7 +332,7 @@ class DatabaseManager:
                     {
                         "url": row[0],
                         "gsb_threat_type": row[1],
-                        "gsb_last_check": row[2],
+                        "gsb_last_check": str(row[2]) if row[2] else None,
                         "threat_level": row[3],
                         "confidence_score": row[4],
                     }
@@ -813,7 +817,99 @@ class DatabaseManager:
                     "CREATE INDEX IF NOT EXISTS idx_results_execution ON thread_results(execution_id)"
                 )
             )
+            conn.execute(
+                text("ALTER TABLE thread_results ADD COLUMN IF NOT EXISTS extra_data JSONB")
+            )
+            conn.execute(
+                text("ALTER TABLE thread_results ADD COLUMN IF NOT EXISTS source_type VARCHAR(20)")
+            )
             conn.commit()
             logger.info(
                 "🗄️  Initialized analysis_threads, thread_results, and thread_executions tables."
             )
+        self._init_email_reputation_db()
+
+    def _init_email_reputation_db(self):
+        """Initialize email sender and domain reputation tables."""
+        with self.engine.connect() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS email_sender_reputation (
+                        id SERIAL PRIMARY KEY,
+                        sender_email VARCHAR(320) NOT NULL,
+                        sender_domain VARCHAR(255) NOT NULL,
+                        display_name VARCHAR(255),
+                        report_count INTEGER NOT NULL DEFAULT 0,
+                        automated_count INTEGER NOT NULL DEFAULT 0,
+                        threat_score_avg REAL NOT NULL DEFAULT 0,
+                        threat_score_max REAL NOT NULL DEFAULT 0,
+                        first_seen_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                        last_seen_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                        blocked BOOLEAN NOT NULL DEFAULT FALSE,
+                        blocked_at TIMESTAMP,
+                        block_reason TEXT,
+                        UNIQUE(sender_email)
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS email_domain_reputation (
+                        id SERIAL PRIMARY KEY,
+                        domain VARCHAR(255) NOT NULL,
+                        sender_count INTEGER NOT NULL DEFAULT 0,
+                        report_count INTEGER NOT NULL DEFAULT 0,
+                        automated_count INTEGER NOT NULL DEFAULT 0,
+                        threat_score_avg REAL NOT NULL DEFAULT 0,
+                        first_seen_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                        last_seen_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                        blocked BOOLEAN NOT NULL DEFAULT FALSE,
+                        blocked_at TIMESTAMP,
+                        block_reason TEXT,
+                        UNIQUE(domain)
+                    )
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_sender_rep_domain "
+                    "ON email_sender_reputation(sender_domain)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_sender_rep_blocked "
+                    "ON email_sender_reputation(blocked)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_domain_rep_blocked "
+                    "ON email_domain_reputation(blocked)"
+                )
+            )
+            # Whitelist columns — added after initial schema; safe to run on existing DBs
+            conn.execute(
+                text(
+                    "ALTER TABLE email_sender_reputation "
+                    "ADD COLUMN IF NOT EXISTS whitelisted BOOLEAN NOT NULL DEFAULT FALSE"
+                )
+            )
+            conn.execute(
+                text(
+                    "ALTER TABLE email_sender_reputation "
+                    "ADD COLUMN IF NOT EXISTS whitelisted_at TIMESTAMP"
+                )
+            )
+            conn.execute(
+                text(
+                    "ALTER TABLE email_sender_reputation "
+                    "ADD COLUMN IF NOT EXISTS whitelist_reason TEXT"
+                )
+            )
+            conn.commit()
+            logger.info("🗄️  Initialized email reputation tables.")

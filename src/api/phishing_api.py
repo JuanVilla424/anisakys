@@ -7,6 +7,7 @@ and Grinder integration.
 
 import base64
 import datetime
+import json
 import re
 import socket
 import threading
@@ -96,7 +97,15 @@ def timeout(seconds=10):
 class PhishingAPI:
     """REST API for external phishing reports with multi-API integration and Grinder integration."""
 
-    def __init__(self, db_manager, abuse_detector, api_key: str = None, report_manager=None):
+    def __init__(
+        self,
+        db_manager,
+        abuse_detector,
+        api_key: str = None,
+        report_manager=None,
+        scheduler=None,
+        email_scheduler=None,
+    ):
         """
         Initialize the Phishing API with authentication support and Grinder integration.
 
@@ -105,10 +114,14 @@ class PhishingAPI:
             abuse_detector: Abuse email detector instance
             api_key (str, optional): API key for authentication
             report_manager: AbuseReportManager instance for immediate report sending
+            scheduler: ImageTrackingScheduler instance for on-demand searches
+            email_scheduler: EmailMonitorScheduler instance for email threat monitoring
         """
         self.db_manager = db_manager
         self.abuse_detector = abuse_detector
         self.report_manager = report_manager
+        self.scheduler = scheduler
+        self.email_scheduler = email_scheduler
         self.multi_api_validator = MultiAPIValidator()
         self.grinder_client = GrinderReportClient()
         self.api_key = api_key
@@ -531,6 +544,16 @@ class PhishingAPI:
                         {"date": seven_days_ago},
                     ).scalar()
 
+                    # Threat level breakdown for active sites
+                    rows = conn.execute(
+                        text(
+                            "SELECT multi_api_threat_level, COUNT(*) FROM phishing_sites "
+                            "WHERE site_status = 'up' AND multi_api_threat_level IS NOT NULL "
+                            "GROUP BY multi_api_threat_level"
+                        )
+                    ).fetchall()
+                    stats["threat_breakdown"] = {r[0]: r[1] for r in rows}
+
                     return jsonify(stats), 200
 
             except Exception as e:
@@ -718,6 +741,1472 @@ class PhishingAPI:
                 logger.error(f"❌ API error in gsb_report_url: {e}")
                 return jsonify({"error": "Internal server error"}), 500
 
+        # ── GET /api/v1/sites ──────────────────────────────────────────────────
+        @self.app.route("/api/v1/sites", methods=["GET"])
+        @self.limiter.limit("30 per minute")
+        @require_api_key(scope="read")
+        def get_sites():
+            """List phishing sites with optional filters and pagination."""
+            try:
+                limit = min(int(request.args.get("limit", 100)), 500)
+                offset = int(request.args.get("offset", 0))
+                status_filter = request.args.get("status")
+                priority_filter = request.args.get("priority")
+                source_filter = request.args.get("source")
+                search = request.args.get("search", "").strip()
+
+                where_clauses = []
+                params: Dict[str, Any] = {"limit": limit, "offset": offset}
+
+                if status_filter:
+                    where_clauses.append("site_status = :status")
+                    params["status"] = status_filter
+                if priority_filter:
+                    where_clauses.append("priority = :priority")
+                    params["priority"] = priority_filter
+                if source_filter:
+                    where_clauses.append("source = :source")
+                    params["source"] = source_filter
+                if search:
+                    where_clauses.append("url ILIKE :search")
+                    params["search"] = f"%{search}%"
+
+                where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
+
+                with self.db_manager.engine.begin() as conn:
+                    total = conn.execute(
+                        text(f"SELECT COUNT(*) FROM phishing_sites {where_sql}"), params
+                    ).scalar()
+
+                    rows = conn.execute(
+                        text(
+                            f"""
+                            SELECT id, url, site_status, priority, source,
+                                   first_seen, last_seen, multi_api_threat_level,
+                                   api_confidence_score, registrar_name, domain_age_days,
+                                   abuse_report_sent, manual_flag, gsb_safe,
+                                   resolved_ip, is_cloudflare, description, assigned_to
+                            FROM phishing_sites {where_sql}
+                            ORDER BY last_seen DESC NULLS LAST
+                            LIMIT :limit OFFSET :offset
+                            """
+                        ),
+                        params,
+                    ).fetchall()
+
+                items = [
+                    {
+                        "id": r[0],
+                        "url": r[1],
+                        "site_status": r[2] or "unknown",
+                        "priority": r[3] or "medium",
+                        "source": r[4] or "manual",
+                        "first_seen": r[5].isoformat() if r[5] else None,
+                        "last_seen": r[6].isoformat() if r[6] else None,
+                        "multi_api_threat_level": r[7],
+                        "api_confidence_score": r[8],
+                        "registrar_name": r[9],
+                        "domain_age_days": r[10],
+                        "abuse_report_sent": bool(r[11]),
+                        "manual_flag": bool(r[12]),
+                        "gsb_safe": bool(r[13]) if r[13] is not None else True,
+                        "resolved_ip": r[14],
+                        "is_cloudflare": bool(r[15]),
+                        "description": r[16],
+                        "assigned_to": r[17],
+                    }
+                    for r in rows
+                ]
+
+                return (
+                    jsonify({"items": items, "total": total, "limit": limit, "offset": offset}),
+                    200,
+                )
+
+            except Exception as e:
+                logger.error(f"❌ API error in get_sites: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── GET /api/v1/reports ────────────────────────────────────────────────
+        @self.app.route("/api/v1/reports", methods=["GET"])
+        @self.limiter.limit("20 per minute")
+        @require_api_key(scope="read")
+        def get_reports():
+            """List abuse reports with threat context from phishing_sites."""
+            try:
+                limit = min(int(request.args.get("limit", 100)), 500)
+                offset = int(request.args.get("offset", 0))
+                status_filter = request.args.get("status")
+
+                where_sql = "WHERE ar.status = :status" if status_filter else ""
+                params: Dict[str, Any] = {"limit": limit, "offset": offset}
+                if status_filter:
+                    params["status"] = status_filter
+
+                with self.db_manager.engine.begin() as conn:
+                    total = conn.execute(
+                        text(f"SELECT COUNT(*) FROM abuse_reports ar {where_sql}"), params
+                    ).scalar()
+
+                    rows = conn.execute(
+                        text(
+                            f"""
+                            SELECT ar.report_id, ar.site_url, ar.recipients, ar.status,
+                                   ar.report_date, ar.sla_deadline, ar.response_received,
+                                   ar.response_date, ar.icann_compliant, ar.screenshot_included,
+                                   ar.follow_up_required,
+                                   ps.multi_api_threat_level, ps.api_confidence_score
+                            FROM abuse_reports ar
+                            LEFT JOIN phishing_sites ps ON ps.url = ar.site_url
+                            {where_sql}
+                            ORDER BY ar.report_date DESC NULLS LAST
+                            LIMIT :limit OFFSET :offset
+                            """
+                        ),
+                        params,
+                    ).fetchall()
+
+                items = [
+                    {
+                        "report_id": r[0],
+                        "site_url": r[1],
+                        "recipients": [e.strip() for e in (r[2] or "").split(",") if e.strip()],
+                        "status": r[3] or "sent",
+                        "report_date": r[4].isoformat() if r[4] else None,
+                        "sla_deadline": r[5].isoformat() if r[5] else None,
+                        "response_received": bool(r[6]),
+                        "response_date": r[7].isoformat() if r[7] else None,
+                        "icann_compliant": bool(r[8]),
+                        "screenshot_included": bool(r[9]),
+                        "follow_up_required": bool(r[10]),
+                        "threat_level": r[11],
+                        "confidence_score": r[12],
+                    }
+                    for r in rows
+                ]
+
+                return jsonify({"items": items, "total": total}), 200
+
+            except Exception as e:
+                logger.error(f"❌ API error in get_reports: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── PATCH /api/v1/reports/<report_id> ─────────────────────────────────
+        @self.app.route("/api/v1/reports/<report_id>", methods=["PATCH"])
+        @self.limiter.limit("30 per minute")
+        @require_api_key(scope="read")
+        def update_report(report_id: str):
+            """Update abuse report status."""
+            try:
+                data = request.get_json() or {}
+                new_status = data.get("status")
+                valid = {
+                    "sent",
+                    "acknowledged",
+                    "in_progress",
+                    "resolved",
+                    "rejected",
+                    "timeout",
+                    "bounced",
+                    "pending",
+                }
+                if not new_status or new_status not in valid:
+                    return (
+                        jsonify(
+                            {"error": f"Invalid status. Must be one of: {', '.join(sorted(valid))}"}
+                        ),
+                        400,
+                    )
+
+                with self.db_manager.engine.begin() as conn:
+                    result = conn.execute(
+                        text(
+                            """
+                            UPDATE abuse_reports
+                            SET status=:status,
+                                response_date=CASE WHEN :status IN ('resolved','acknowledged') THEN NOW() ELSE response_date END,
+                                response_received=CASE WHEN :status IN ('resolved','acknowledged') THEN TRUE ELSE response_received END
+                            WHERE report_id=:report_id
+                        """
+                        ),
+                        {"status": new_status, "report_id": report_id},
+                    )
+                    if result.rowcount == 0:
+                        return jsonify({"error": "Report not found"}), 404
+
+                return jsonify({"report_id": report_id, "status": new_status}), 200
+
+            except Exception as e:
+                logger.error(f"❌ API error in update_report: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── GET /api/v1/reports/stats ──────────────────────────────────────────
+        @self.app.route("/api/v1/reports/stats", methods=["GET"])
+        @self.limiter.limit("20 per minute")
+        @require_api_key(scope="read")
+        def get_reports_stats():
+            """Aggregate stats for the abuse reports pipeline."""
+            try:
+                with self.db_manager.engine.begin() as conn:
+                    total = conn.execute(text("SELECT COUNT(*) FROM abuse_reports")).scalar() or 0
+
+                    status_rows = conn.execute(
+                        text("SELECT status, COUNT(*) FROM abuse_reports GROUP BY status")
+                    ).fetchall()
+                    status_breakdown = {r[0]: r[1] for r in status_rows}
+
+                    responded = (
+                        conn.execute(
+                            text("SELECT COUNT(*) FROM abuse_reports WHERE response_received = 1")
+                        ).scalar()
+                        or 0
+                    )
+
+                    overdue = (
+                        conn.execute(
+                            text(
+                                "SELECT COUNT(*) FROM abuse_reports "
+                                "WHERE response_received = 0 AND sla_deadline < NOW()"
+                            )
+                        ).scalar()
+                        or 0
+                    )
+
+                    avg_row = conn.execute(
+                        text(
+                            "SELECT AVG(EXTRACT(EPOCH FROM (response_date - report_date)) / 3600) "
+                            "FROM abuse_reports WHERE response_received = 1 AND response_date IS NOT NULL"
+                        )
+                    ).scalar()
+
+                return (
+                    jsonify(
+                        {
+                            "total_reports": total,
+                            "status_breakdown": status_breakdown,
+                            "response_rate": round(responded / total, 3) if total > 0 else 0.0,
+                            "overdue_reports": overdue,
+                            "avg_response_time_hours": (
+                                round(float(avg_row), 1) if avg_row else None
+                            ),
+                            "generated_at": datetime.datetime.now().isoformat(),
+                        }
+                    ),
+                    200,
+                )
+
+            except Exception as e:
+                logger.error(f"❌ API error in get_reports_stats: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── GET /api/v1/integrations ───────────────────────────────────────────
+        @self.app.route("/api/v1/integrations", methods=["GET"])
+        @self.limiter.limit("20 per minute")
+        @require_api_key(scope="read")
+        def get_integrations():
+            """Return health and circuit-breaker state of all external integrations."""
+            try:
+
+                def _cb_info(integration, name, display_name):
+                    cb = getattr(integration, "circuit_breaker", None)
+                    if cb is None:
+                        return {
+                            "name": name,
+                            "display_name": display_name,
+                            "status": "online",
+                            "circuit_breaker": "closed",
+                            "last_call_ms": None,
+                            "last_success": None,
+                            "error_rate": None,
+                        }
+                    state = cb.state.value  # 'closed' / 'open' / 'half_open'
+                    stats = cb.stats
+                    total = stats.total_requests or 0
+                    failed = stats.failed_requests or 0
+                    error_rate = round(failed / total, 3) if total > 0 else 0.0
+                    status = (
+                        "online"
+                        if state == "closed"
+                        else ("offline" if state == "open" else "degraded")
+                    )
+                    last_success = (
+                        stats.last_state_change.isoformat()
+                        if stats.last_state_change and state == "closed"
+                        else None
+                    )
+                    return {
+                        "name": name,
+                        "display_name": display_name,
+                        "status": status,
+                        "circuit_breaker": state,
+                        "last_call_ms": None,
+                        "last_success": last_success,
+                        "error_rate": error_rate,
+                    }
+
+                mv = self.multi_api_validator
+                integrations = [
+                    _cb_info(mv.virustotal, "virustotal", "VirusTotal"),
+                    _cb_info(mv.urlvoid, "urlvoid", "URLVoid"),
+                    _cb_info(mv.phishtank, "phishtank", "PhishTank"),
+                    _cb_info(mv.google_safe_browsing, "gsb", "Google Safe Browsing"),
+                    _cb_info(self.grinder_client, "grinder", "Grinder"),
+                ]
+
+                # SMTP is implicit: if grinder is off, use its config flag as proxy
+                smtp_status = "online"
+                if self.report_manager is not None:
+                    smtp_ok = getattr(self.report_manager, "smtp_configured", True)
+                    smtp_status = "online" if smtp_ok else "offline"
+
+                integrations.append(
+                    {
+                        "name": "smtp",
+                        "display_name": "SMTP (Abuse Reports)",
+                        "status": smtp_status,
+                        "circuit_breaker": "closed" if smtp_status == "online" else "open",
+                        "last_call_ms": None,
+                        "last_success": None,
+                        "error_rate": 0.0,
+                    }
+                )
+
+                return jsonify(integrations), 200
+
+            except Exception as e:
+                logger.error(f"❌ API error in get_integrations: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── GET /api/v1/activity ───────────────────────────────────────────────
+        @self.app.route("/api/v1/activity", methods=["GET"])
+        @self.limiter.limit("20 per minute")
+        @require_api_key(scope="read")
+        def get_activity():
+            """Recent platform activity: new detections, reports sent, GSB changes, takedowns."""
+            try:
+                limit = min(int(request.args.get("limit", 20)), 100)
+
+                with self.db_manager.engine.begin() as conn:
+                    # Recent detections (new sites)
+                    detections = conn.execute(
+                        text(
+                            "SELECT id, url, first_seen, multi_api_threat_level, priority "
+                            "FROM phishing_sites ORDER BY first_seen DESC NULLS LAST LIMIT :n"
+                        ),
+                        {"n": limit // 2},
+                    ).fetchall()
+
+                    # Recent abuse reports sent
+                    reports = conn.execute(
+                        text(
+                            "SELECT report_id, site_url, report_date, status "
+                            "FROM abuse_reports ORDER BY report_date DESC NULLS LAST LIMIT :n"
+                        ),
+                        {"n": limit // 2},
+                    ).fetchall()
+
+                    # GSB status changes (taken down sites)
+                    takedowns = conn.execute(
+                        text(
+                            "SELECT id, url, takedown_date, multi_api_threat_level "
+                            "FROM phishing_sites WHERE site_status = 'down' AND takedown_date IS NOT NULL "
+                            "ORDER BY takedown_date DESC NULLS LAST LIMIT :n"
+                        ),
+                        {"n": limit // 4},
+                    ).fetchall()
+
+                activity: List[Dict[str, Any]] = []
+
+                for r in detections:
+                    activity.append(
+                        {
+                            "id": f"det-{r[0]}",
+                            "type": "detection",
+                            "url": r[1],
+                            "timestamp": (
+                                r[2].isoformat() if r[2] else datetime.datetime.now().isoformat()
+                            ),
+                            "detail": f"New phishing site detected — priority: {r[4] or 'medium'}",
+                            "severity": r[3] or r[4] or "medium",
+                        }
+                    )
+
+                for r in reports:
+                    activity.append(
+                        {
+                            "id": f"rpt-{r[0]}",
+                            "type": "report",
+                            "url": r[1],
+                            "timestamp": (
+                                r[2].isoformat() if r[2] else datetime.datetime.now().isoformat()
+                            ),
+                            "detail": f"Abuse report {r[0]} — status: {r[3]}",
+                            "severity": "info",
+                        }
+                    )
+
+                for r in takedowns:
+                    activity.append(
+                        {
+                            "id": f"td-{r[0]}",
+                            "type": "takedown",
+                            "url": r[1],
+                            "timestamp": (
+                                r[2].isoformat() if r[2] else datetime.datetime.now().isoformat()
+                            ),
+                            "detail": "Site confirmed offline / takedown successful",
+                            "severity": "info",
+                        }
+                    )
+
+                # Sort by timestamp descending and trim to limit
+                activity.sort(key=lambda x: x["timestamp"], reverse=True)
+                return jsonify(activity[:limit]), 200
+
+            except Exception as e:
+                logger.error(f"❌ API error in get_activity: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── GET /api/v1/nav/counts ─────────────────────────────────────────────
+        @self.app.route("/api/v1/nav/counts", methods=["GET"])
+        @self.limiter.limit("30 per minute")
+        @require_api_key(scope="read")
+        def get_nav_counts():
+            try:
+                with self.db_manager.engine.begin() as conn:
+                    row = conn.execute(
+                        text(
+                            """
+                        SELECT
+                            (SELECT COUNT(*) FROM phishing_sites WHERE site_status = 'up') AS threats,
+                            (SELECT COUNT(*) FROM analysis_threads WHERE status = 'running') AS threads,
+                            (SELECT COUNT(DISTINCT registrar_name) FROM phishing_sites
+                             WHERE registrar_name IS NOT NULL AND site_status = 'up'
+                             AND registrar_name IN (
+                                 SELECT registrar_name FROM phishing_sites
+                                 WHERE registrar_name IS NOT NULL
+                                 GROUP BY registrar_name HAVING COUNT(*) >= 2
+                             )) AS campaigns
+                    """
+                        )
+                    ).fetchone()
+                return (
+                    jsonify(
+                        {
+                            "threats": int(row[0] or 0),
+                            "threads": int(row[1] or 0),
+                            "campaigns": int(row[2] or 0),
+                        }
+                    ),
+                    200,
+                )
+            except Exception as e:
+                logger.error(f"❌ API error in get_nav_counts: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── GET /api/v1/threads ────────────────────────────────────────────────
+        @self.app.route("/api/v1/threads", methods=["GET"])
+        @self.limiter.limit("20 per minute")
+        @require_api_key(scope="read")
+        def get_threads():
+            try:
+                with self.db_manager.engine.begin() as conn:
+                    own_domain = (getattr(settings, "GOOGLE_WORKSPACE_DOMAIN", None) or "").lower()
+                    rows = conn.execute(
+                        text(
+                            """
+                        SELECT t.id, t.thread_type, t.label, t.status, t.started_at,
+                               t.completed_at, t.results_count, t.details, t.error_message,
+                               t.search_interval_hours, t.last_searched_at,
+                               (SELECT COUNT(*) FROM thread_results tr
+                                LEFT JOIN email_sender_reputation esr
+                                    ON tr.result_type = 'email_threat'
+                                    AND LOWER(tr.extra_data->>'sender') = esr.sender_email
+                                WHERE tr.thread_id = t.id
+                                AND tr.status != 'discarded'
+                                AND (esr.id IS NULL OR esr.whitelisted IS NOT TRUE)
+                                AND (:own_domain = '' OR tr.result_type != 'email_threat'
+                                     OR LOWER(tr.extra_data->>'sender_domain') != :own_domain)
+                                AND (tr.result_type != 'email_threat'
+                                     OR LOWER(tr.extra_data->>'sender_domain') NOT IN ('google.com', 'googlemail.com'))) AS total_results,
+                               (SELECT id FROM thread_executions te
+                                WHERE te.thread_id = t.id AND te.status = 'running'
+                                ORDER BY te.started_at DESC LIMIT 1) AS running_execution_id
+                        FROM analysis_threads t
+                        ORDER BY t.started_at DESC NULLS LAST
+                    """
+                        ),
+                        {"own_domain": own_domain},
+                    ).fetchall()
+                items = []
+                for r in rows:
+                    db_status = r[3]
+                    has_running_exec = r[12] is not None
+                    if db_status == "error":
+                        effective_status = "error"
+                    elif db_status in ("idle", "completed", "paused"):
+                        effective_status = db_status
+                    else:
+                        # active / running → always show as running (continuous monitor)
+                        effective_status = "running"
+                    items.append(
+                        {
+                            "id": r[0],
+                            "thread_type": r[1],
+                            "label": r[2],
+                            "status": effective_status,
+                            "started_at": str(r[4]) if r[4] else None,
+                            "completed_at": str(r[5]) if r[5] else None,
+                            "results_count": int(r[11] or 0),
+                            "details": r[7],
+                            "error_message": r[8],
+                            "search_interval_hours": r[9],
+                            "last_searched_at": str(r[10]) if r[10] else None,
+                            "total_results": int(r[11] or 0),
+                        }
+                    )
+                return jsonify({"items": items, "total": len(items)}), 200
+            except Exception as e:
+                logger.error(f"❌ API error in get_threads: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── GET /api/v1/threads/stats ──────────────────────────────────────────
+        @self.app.route("/api/v1/threads/stats", methods=["GET"])
+        @self.limiter.limit("20 per minute")
+        @require_api_key(scope="read")
+        def get_threads_stats():
+            try:
+                with self.db_manager.engine.begin() as conn:
+                    own_domain = (getattr(settings, "GOOGLE_WORKSPACE_DOMAIN", None) or "").lower()
+                    row = conn.execute(
+                        text(
+                            """
+                        SELECT
+                            (SELECT COUNT(*) FROM analysis_threads WHERE status = 'active'),
+                            (SELECT COUNT(*) FROM analysis_threads WHERE status = 'idle'),
+                            (SELECT COUNT(*) FROM analysis_threads WHERE status = 'error'),
+                            (SELECT COUNT(*) FROM thread_results tr
+                             LEFT JOIN email_sender_reputation esr
+                                 ON tr.result_type = 'email_threat'
+                                 AND LOWER(tr.extra_data->>'sender') = esr.sender_email
+                             WHERE tr.first_detected_at >= CURRENT_DATE
+                             AND tr.status != 'discarded'
+                             AND (esr.id IS NULL OR esr.whitelisted IS NOT TRUE)
+                             AND (:own_domain = '' OR tr.result_type != 'email_threat'
+                                  OR LOWER(tr.extra_data->>'sender_domain') != :own_domain)
+                             AND (tr.result_type != 'email_threat'
+                                  OR LOWER(tr.extra_data->>'sender_domain') NOT IN ('google.com', 'googlemail.com'))),
+                            (SELECT COUNT(*) FROM thread_results tr
+                             LEFT JOIN email_sender_reputation esr
+                                 ON tr.result_type = 'email_threat'
+                                 AND LOWER(tr.extra_data->>'sender') = esr.sender_email
+                             WHERE (tr.status = 'threat' OR tr.result_type = 'email_threat')
+                             AND tr.status != 'discarded'
+                             AND tr.first_detected_at >= CURRENT_DATE
+                             AND (esr.id IS NULL OR esr.whitelisted IS NOT TRUE)
+                             AND (:own_domain = '' OR tr.result_type != 'email_threat'
+                                  OR LOWER(tr.extra_data->>'sender_domain') != :own_domain)
+                             AND (tr.result_type != 'email_threat'
+                                  OR LOWER(tr.extra_data->>'sender_domain') NOT IN ('google.com', 'googlemail.com')))
+                    """
+                        ),
+                        {"own_domain": own_domain},
+                    ).fetchone()
+                return (
+                    jsonify(
+                        {
+                            "running": int(row[0] or 0),
+                            "idle": int(row[1] or 0),
+                            "error": int(row[2] or 0),
+                            "scanned_today": int(row[3] or 0),
+                            "threats_today": int(row[4] or 0),
+                        }
+                    ),
+                    200,
+                )
+            except Exception as e:
+                logger.error(f"❌ API error in get_threads_stats: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── GET /api/v1/threads/<id>/results ──────────────────────────────────
+        @self.app.route("/api/v1/threads/<int:thread_id>/results", methods=["GET"])
+        @self.limiter.limit("20 per minute")
+        @require_api_key(scope="read")
+        def get_thread_results(thread_id: int):
+            try:
+                limit = min(int(request.args.get("limit", 50)), 1000)
+                offset = int(request.args.get("offset", 0))
+                own_domain = (getattr(settings, "GOOGLE_WORKSPACE_DOMAIN", None) or "").lower()
+                with self.db_manager.engine.begin() as conn:
+                    total = (
+                        conn.execute(
+                            text(
+                                """
+                        SELECT COUNT(*) FROM thread_results tr
+                        LEFT JOIN email_sender_reputation esr
+                            ON tr.result_type = 'email_threat'
+                            AND LOWER(tr.extra_data->>'sender') = esr.sender_email
+                        WHERE tr.thread_id = :tid
+                        AND tr.status != 'discarded'
+                        AND (esr.id IS NULL OR esr.whitelisted IS NOT TRUE)
+                        AND (:own_domain = '' OR tr.result_type != 'email_threat'
+                             OR LOWER(tr.extra_data->>'sender_domain') != :own_domain)
+                        AND (tr.result_type != 'email_threat'
+                             OR LOWER(tr.extra_data->>'sender_domain') NOT IN ('google.com', 'googlemail.com'))
+                    """
+                            ),
+                            {"tid": thread_id, "own_domain": own_domain},
+                        ).scalar()
+                        or 0
+                    )
+                    rows = conn.execute(
+                        text(
+                            """
+                        SELECT tr.id, tr.result_type, tr.found_url, tr.title, tr.confidence,
+                               tr.source, tr.first_detected_at, tr.last_detected_at,
+                               tr.status, tr.details, tr.extra_data
+                        FROM thread_results tr
+                        LEFT JOIN email_sender_reputation esr
+                            ON tr.result_type = 'email_threat'
+                            AND LOWER(tr.extra_data->>'sender') = esr.sender_email
+                        WHERE tr.thread_id = :tid
+                        AND tr.status != 'discarded'
+                        AND (esr.id IS NULL OR esr.whitelisted IS NOT TRUE)
+                        AND (:own_domain = '' OR tr.result_type != 'email_threat'
+                             OR LOWER(tr.extra_data->>'sender_domain') != :own_domain)
+                        AND (tr.result_type != 'email_threat'
+                             OR LOWER(tr.extra_data->>'sender_domain') NOT IN ('google.com', 'googlemail.com'))
+                        ORDER BY tr.last_detected_at DESC LIMIT :lim OFFSET :off
+                    """
+                        ),
+                        {"tid": thread_id, "lim": limit, "off": offset, "own_domain": own_domain},
+                    ).fetchall()
+                items = [
+                    {
+                        "id": r[0],
+                        "result_type": r[1],
+                        "found_url": r[2],
+                        "title": r[3],
+                        "confidence": r[4],
+                        "source": r[5],
+                        "first_detected_at": str(r[6]),
+                        "last_detected_at": str(r[7]),
+                        "status": r[8],
+                        "details": r[9],
+                        "extra_data": r[10],
+                    }
+                    for r in rows
+                ]
+                return jsonify({"items": items, "total": int(total)}), 200
+            except Exception as e:
+                logger.error(f"❌ API error in get_thread_results: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── PATCH /api/v1/threads/<id>/results/<result_id>/discard ────────────
+        @self.app.route(
+            "/api/v1/threads/<int:thread_id>/results/<int:result_id>/discard", methods=["PATCH"]
+        )
+        @self.limiter.limit("30 per minute")
+        @require_api_key(scope="write")
+        def discard_thread_result(thread_id: int, result_id: int):
+            try:
+                with self.db_manager.engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            "UPDATE thread_results SET status = 'discarded' WHERE id = :rid AND thread_id = :tid"
+                        ),
+                        {"rid": result_id, "tid": thread_id},
+                    )
+                return jsonify({"discarded": result_id}), 200
+            except Exception as e:
+                logger.error(f"❌ API error in discard_thread_result: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── GET /api/v1/campaigns ──────────────────────────────────────────────
+        @self.app.route("/api/v1/campaigns", methods=["GET"])
+        @self.limiter.limit("20 per minute")
+        @require_api_key(scope="read")
+        def get_campaigns():
+            import datetime as _dt
+
+            try:
+                with self.db_manager.engine.begin() as conn:
+                    groups = conn.execute(
+                        text(
+                            """
+                        SELECT registrar_name,
+                               COUNT(*) AS site_count,
+                               COUNT(*) FILTER (WHERE site_status = 'up') AS active_count,
+                               COUNT(*) FILTER (WHERE site_status = 'down') AS takedown_count,
+                               MIN(first_seen) AS first_seen,
+                               MAX(last_seen) AS last_activity,
+                               array_agg(DISTINCT resolved_ip)
+                                   FILTER (WHERE resolved_ip IS NOT NULL) AS ips,
+                               AVG(api_confidence_score)
+                                   FILTER (WHERE api_confidence_score IS NOT NULL) AS avg_confidence
+                        FROM phishing_sites
+                        WHERE registrar_name IS NOT NULL
+                        GROUP BY registrar_name
+                        HAVING COUNT(*) >= 2
+                        ORDER BY COUNT(*) FILTER (WHERE site_status = 'up') DESC,
+                                 MAX(last_seen) DESC
+                    """
+                        )
+                    ).fetchall()
+
+                    items = []
+                    now = _dt.datetime.utcnow()
+                    for i, g in enumerate(groups):
+                        active_count = int(g[2] or 0)
+                        last_activity = g[5]
+                        stale = (
+                            (now - last_activity).total_seconds() > 86400 if last_activity else True
+                        )
+                        if active_count > 0 and not stale:
+                            status = "active"
+                        elif active_count > 0:
+                            status = "monitoring"
+                        else:
+                            status = "closed"
+
+                        threats_rows = conn.execute(
+                            text(
+                                """
+                            SELECT url, site_status, first_seen, multi_api_threat_level
+                            FROM phishing_sites WHERE registrar_name = :r
+                            ORDER BY first_seen DESC LIMIT 20
+                        """
+                            ),
+                            {"r": g[0]},
+                        ).fetchall()
+
+                        items.append(
+                            {
+                                "id": f"CAMP-{i+1:03d}",
+                                "name": f"{g[0]} cluster",
+                                "registrar": g[0],
+                                "status": status,
+                                "sites": int(g[1] or 0),
+                                "takedowns": int(g[3] or 0),
+                                "first_seen": str(g[4]) if g[4] else None,
+                                "last_activity": str(g[5]) if g[5] else None,
+                                "confidence": round(float(g[7] or 0)),
+                                "resolved_ips": list(g[6]) if g[6] else [],
+                                "threats": [
+                                    {
+                                        "url": t[0],
+                                        "status": t[1],
+                                        "first_seen": str(t[2]),
+                                        "threat_level": t[3],
+                                    }
+                                    for t in threats_rows
+                                ],
+                            }
+                        )
+
+                kpi = {
+                    "active": sum(1 for c in items if c["status"] == "active"),
+                    "monitoring": sum(1 for c in items if c["status"] == "monitoring"),
+                    "closed": sum(1 for c in items if c["status"] == "closed"),
+                    "total_sites": sum(c["sites"] for c in items),
+                    "total_takedowns": sum(c["takedowns"] for c in items),
+                }
+                return jsonify({"items": items, "total": len(items), "kpi": kpi}), 200
+            except Exception as e:
+                logger.error(f"❌ API error in get_campaigns: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── GET /api/v1/intelligence/iocs ──────────────────────────────────────
+        @self.app.route("/api/v1/intelligence/iocs", methods=["GET"])
+        @self.limiter.limit("20 per minute")
+        @require_api_key(scope="read")
+        def get_iocs():
+            ioc_type = request.args.get("type", "domain")
+            limit = min(int(request.args.get("limit", 100)), 500)
+            offset = int(request.args.get("offset", 0))
+            try:
+                with self.db_manager.engine.begin() as conn:
+                    if ioc_type == "ip":
+                        rows = conn.execute(
+                            text(
+                                """
+                            SELECT resolved_ip AS value,
+                                   MIN(first_seen)::text AS first_seen,
+                                   MAX(last_seen)::text AS last_seen,
+                                   COUNT(*) AS hits,
+                                   CASE WHEN bool_or(is_cloudflare = 1) THEN 'cloudflare'
+                                        ELSE 'direct' END AS tag
+                            FROM phishing_sites WHERE resolved_ip IS NOT NULL
+                            GROUP BY resolved_ip
+                            ORDER BY COUNT(*) DESC LIMIT :lim OFFSET :off
+                        """
+                            ),
+                            {"lim": limit, "off": offset},
+                        ).fetchall()
+                        items = [
+                            {
+                                "id": f"IP-{offset+i+1}",
+                                "type": "ip",
+                                "value": r[0],
+                                "first_seen": r[1],
+                                "last_seen": r[2],
+                                "threat": None,
+                                "source": None,
+                                "hits": int(r[3]),
+                                "tags": [r[4]],
+                            }
+                            for i, r in enumerate(rows)
+                        ]
+                    elif ioc_type == "email":
+                        rows = conn.execute(
+                            text(
+                                """
+                            SELECT email, COUNT(*) AS hits
+                            FROM (
+                                SELECT UNNEST(STRING_TO_ARRAY(all_abuse_emails, ', ')) AS email
+                                FROM phishing_sites
+                                WHERE all_abuse_emails IS NOT NULL AND all_abuse_emails != ''
+                            ) sub
+                            GROUP BY email ORDER BY COUNT(*) DESC LIMIT :lim OFFSET :off
+                        """
+                            ),
+                            {"lim": limit, "off": offset},
+                        ).fetchall()
+                        items = [
+                            {
+                                "id": f"E-{offset+i+1}",
+                                "type": "email",
+                                "value": r[0],
+                                "first_seen": None,
+                                "last_seen": None,
+                                "threat": None,
+                                "source": None,
+                                "hits": int(r[1]),
+                                "tags": [],
+                            }
+                            for i, r in enumerate(rows)
+                        ]
+                    else:  # domain (default)
+                        rows = conn.execute(
+                            text(
+                                """
+                            SELECT SPLIT_PART(SPLIT_PART(url, '://', 2), '/', 1) AS value,
+                                   MIN(first_seen)::text AS first_seen,
+                                   MAX(last_seen)::text AS last_seen,
+                                   multi_api_threat_level AS threat, source,
+                                   COUNT(*) AS hits
+                            FROM phishing_sites WHERE url IS NOT NULL
+                            GROUP BY value, multi_api_threat_level, source
+                            ORDER BY MAX(last_seen) DESC LIMIT :lim OFFSET :off
+                        """
+                            ),
+                            {"lim": limit, "off": offset},
+                        ).fetchall()
+                        items = [
+                            {
+                                "id": f"D-{offset+i+1}",
+                                "type": "domain",
+                                "value": r[0],
+                                "first_seen": r[1],
+                                "last_seen": r[2],
+                                "threat": r[3],
+                                "source": r[4],
+                                "hits": int(r[5]),
+                                "tags": [],
+                            }
+                            for i, r in enumerate(rows)
+                        ]
+
+                    counts_row = conn.execute(
+                        text(
+                            """
+                        SELECT
+                            COUNT(DISTINCT SPLIT_PART(SPLIT_PART(url,'://',2),'/',1)),
+                            COUNT(DISTINCT resolved_ip),
+                            (SELECT COUNT(DISTINCT e)
+                             FROM (SELECT UNNEST(STRING_TO_ARRAY(all_abuse_emails,', ')) AS e
+                                   FROM phishing_sites
+                                   WHERE all_abuse_emails IS NOT NULL
+                                   AND all_abuse_emails != '') sub)
+                        FROM phishing_sites
+                    """
+                        )
+                    ).fetchone()
+
+                return (
+                    jsonify(
+                        {
+                            "items": items,
+                            "total": len(items),
+                            "counts": {
+                                "domain": int(counts_row[0] or 0),
+                                "ip": int(counts_row[1] or 0),
+                                "email": int(counts_row[2] or 0),
+                            },
+                        }
+                    ),
+                    200,
+                )
+            except Exception as e:
+                logger.error(f"❌ API error in get_iocs: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── GET /api/v1/intelligence/brands ───────────────────────────────────
+        @self.app.route("/api/v1/intelligence/brands", methods=["GET"])
+        @self.limiter.limit("20 per minute")
+        @require_api_key(scope="read")
+        def get_brands():
+            try:
+                keywords = [k.strip() for k in settings.KEYWORDS.split(",") if k.strip()]
+                results = []
+                with self.db_manager.engine.begin() as conn:
+                    for kw in keywords:
+                        pat = f"%{kw}%"
+                        total = (
+                            conn.execute(
+                                text("SELECT COUNT(*) FROM phishing_sites WHERE url ILIKE :p"),
+                                {"p": pat},
+                            ).scalar()
+                            or 0
+                        )
+                        if total == 0:
+                            continue
+                        active = (
+                            conn.execute(
+                                text(
+                                    "SELECT COUNT(*) FROM phishing_sites "
+                                    "WHERE url ILIKE :p AND site_status = 'up'"
+                                ),
+                                {"p": pat},
+                            ).scalar()
+                            or 0
+                        )
+                        results.append(
+                            {
+                                "name": kw.capitalize(),
+                                "sites": int(total),
+                                "active": int(active),
+                            }
+                        )
+                results.sort(key=lambda x: x["sites"], reverse=True)
+                return jsonify(results), 200
+            except Exception as e:
+                logger.error(f"❌ API error in get_brands: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── POST /api/v1/threads/image-tracking ───────────────────────────────
+        @self.app.route("/api/v1/threads/image-tracking", methods=["POST"])
+        @self.limiter.limit("10 per minute")
+        @require_api_key(scope="write")
+        def create_image_tracking_thread():
+            data = request.get_json(silent=True) or {}
+            label = data.get("label")
+            s3_key = data.get("s3_key")
+            search_interval_hours = data.get("search_interval_hours")
+            if not s3_key:
+                return jsonify({"error": "s3_key is required"}), 400
+            try:
+                with self.db_manager.engine.begin() as conn:
+                    row = conn.execute(
+                        text(
+                            "INSERT INTO analysis_threads "
+                            "(thread_type, label, status, image_s3_key, search_interval_hours) "
+                            "VALUES ('image_tracking', :label, 'active', :s3_key, :interval) "
+                            "RETURNING id"
+                        ),
+                        {"label": label, "s3_key": s3_key, "interval": search_interval_hours},
+                    ).fetchone()
+                    thread_id = row[0]
+                if self.scheduler and self.scheduler.client:
+                    threading.Thread(
+                        target=self._trigger_image_search,
+                        args=(thread_id, s3_key),
+                        daemon=True,
+                    ).start()
+                return jsonify({"id": thread_id, "status": "active"}), 201
+            except Exception as e:
+                logger.error(f"❌ create_image_tracking_thread: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── POST /api/v1/threads/google-ads ───────────────────────────────────
+        @self.app.route("/api/v1/threads/google-ads", methods=["POST"])
+        @self.limiter.limit("10 per minute")
+        @require_api_key(scope="write")
+        def create_google_ads_thread():
+            data = request.get_json(silent=True) or {}
+            label = data.get("label")
+            keyword = data.get("keyword")
+            location = data.get("location")
+            if not keyword or not location:
+                return jsonify({"error": "keyword and location are required"}), 400
+            details = {
+                "keyword": keyword,
+                "location": location,
+                "country_code": data.get("country_code", "us"),
+                "language": data.get("language", "en"),
+            }
+            search_interval_hours = data.get("search_interval_hours")
+            try:
+                with self.db_manager.engine.begin() as conn:
+                    row = conn.execute(
+                        text(
+                            "INSERT INTO analysis_threads "
+                            "(thread_type, label, status, details, search_interval_hours) "
+                            "VALUES ('google_ads', :label, 'active', :details::jsonb, :interval) "
+                            "RETURNING id"
+                        ),
+                        {
+                            "label": label,
+                            "details": json.dumps(details),
+                            "interval": search_interval_hours,
+                        },
+                    ).fetchone()
+                    thread_id = row[0]
+                if self.scheduler and self.scheduler.ads_client:
+                    threading.Thread(
+                        target=self._trigger_ads_search,
+                        args=(thread_id, details),
+                        daemon=True,
+                    ).start()
+                return jsonify({"id": thread_id, "status": "active"}), 201
+            except Exception as e:
+                logger.error(f"❌ create_google_ads_thread: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── POST /api/v1/threads/<id>/search ──────────────────────────────────
+        @self.app.route("/api/v1/threads/<int:thread_id>/search", methods=["POST"])
+        @self.limiter.limit("5 per minute")
+        @require_api_key(scope="write")
+        def trigger_thread_search(thread_id: int):
+            try:
+                with self.db_manager.engine.begin() as conn:
+                    row = conn.execute(
+                        text(
+                            "SELECT thread_type, image_s3_key, details FROM analysis_threads "
+                            "WHERE id = :id"
+                        ),
+                        {"id": thread_id},
+                    ).fetchone()
+                if not row:
+                    return jsonify({"error": "Thread not found"}), 404
+                thread_type, s3_key, details = row[0], row[1], row[2]
+                if thread_type == "image_tracking":
+                    if not self.scheduler:
+                        return (
+                            jsonify(
+                                {"error": "Scheduler not available (SERPAPI_KEY not configured)"}
+                            ),
+                            503,
+                        )
+                    if not self.scheduler.client:
+                        return jsonify({"error": "Image search client not available"}), 503
+                    threading.Thread(
+                        target=self._trigger_image_search,
+                        args=(thread_id, s3_key),
+                        daemon=True,
+                    ).start()
+                elif thread_type == "google_ads":
+                    if not self.scheduler:
+                        return (
+                            jsonify(
+                                {"error": "Scheduler not available (SERPAPI_KEY not configured)"}
+                            ),
+                            503,
+                        )
+                    if not self.scheduler.ads_client:
+                        return jsonify({"error": "Ads search client not available"}), 503
+                    threading.Thread(
+                        target=self._trigger_ads_search,
+                        args=(thread_id, details),
+                        daemon=True,
+                    ).start()
+                elif thread_type == "email_monitor":
+                    if not self.email_scheduler:
+                        return jsonify({"error": "Email monitoring not configured"}), 503
+                    threading.Thread(
+                        target=self._trigger_email_scan,
+                        args=(thread_id, details),
+                        daemon=True,
+                    ).start()
+                else:
+                    return (
+                        jsonify(
+                            {
+                                "error": f"Manual search not supported for thread_type '{thread_type}'"
+                            }
+                        ),
+                        400,
+                    )
+                return jsonify({"status": "search_triggered", "thread_id": thread_id}), 202
+            except Exception as e:
+                logger.error(f"❌ trigger_thread_search: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── PATCH /api/v1/threads/<id> ─────────────────────────────────────────
+        @self.app.route("/api/v1/threads/<int:thread_id>", methods=["PATCH"])
+        @self.limiter.limit("20 per minute")
+        @require_api_key(scope="write")
+        def update_thread(thread_id: int):
+            data = request.get_json(silent=True) or {}
+            allowed = {"label": str, "status": str, "search_interval_hours": int}
+            updates, params = [], {"id": thread_id}
+            for field, cast in allowed.items():
+                if field in data:
+                    updates.append(f"{field} = :{field}")
+                    params[field] = cast(data[field]) if data[field] is not None else None
+            if not updates:
+                return jsonify({"error": "No valid fields to update"}), 400
+            try:
+                with self.db_manager.engine.begin() as conn:
+                    conn.execute(
+                        text(f"UPDATE analysis_threads SET {', '.join(updates)} WHERE id = :id"),
+                        params,
+                    )
+                return jsonify({"status": "updated"}), 200
+            except Exception as e:
+                logger.error(f"❌ update_thread: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── PATCH /api/v1/threads/<id>/results/<rid> ──────────────────────────
+        @self.app.route(
+            "/api/v1/threads/<int:thread_id>/results/<int:result_id>", methods=["PATCH"]
+        )
+        @self.limiter.limit("20 per minute")
+        @require_api_key(scope="write")
+        def update_thread_result(thread_id: int, result_id: int):
+            data = request.get_json(silent=True) or {}
+            allowed = {"status": str, "assigned_to": str}
+            updates, params = [], {"id": result_id, "tid": thread_id}
+            for field, cast in allowed.items():
+                if field in data:
+                    updates.append(f"{field} = :{field}")
+                    params[field] = cast(data[field]) if data[field] is not None else None
+            if not updates:
+                return jsonify({"error": "No valid fields to update"}), 400
+            try:
+                with self.db_manager.engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            f"UPDATE thread_results SET {', '.join(updates)} "
+                            "WHERE id = :id AND thread_id = :tid"
+                        ),
+                        params,
+                    )
+                return jsonify({"status": "updated"}), 200
+            except Exception as e:
+                logger.error(f"❌ update_thread_result: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── GET /api/v1/threads/<id>/executions ───────────────────────────────
+        @self.app.route("/api/v1/threads/<int:thread_id>/executions", methods=["GET"])
+        @self.limiter.limit("20 per minute")
+        @require_api_key(scope="read")
+        def get_thread_executions(thread_id: int):
+            limit = min(int(request.args.get("limit", 20)), 100)
+            offset = int(request.args.get("offset", 0))
+            try:
+                with self.db_manager.engine.begin() as conn:
+                    exists = conn.execute(
+                        text("SELECT id FROM analysis_threads WHERE id = :id"),
+                        {"id": thread_id},
+                    ).fetchone()
+                    if not exists:
+                        return jsonify({"error": "Thread not found"}), 404
+                    total = (
+                        conn.execute(
+                            text("SELECT COUNT(*) FROM thread_executions WHERE thread_id = :tid"),
+                            {"tid": thread_id},
+                        ).scalar()
+                        or 0
+                    )
+                    rows = conn.execute(
+                        text(
+                            "SELECT id, execution_type, started_at, completed_at, status, "
+                            "results_count, error_message, details "
+                            "FROM thread_executions WHERE thread_id = :tid "
+                            "ORDER BY started_at DESC NULLS LAST LIMIT :lim OFFSET :off"
+                        ),
+                        {"tid": thread_id, "lim": limit, "off": offset},
+                    ).fetchall()
+                items = [
+                    {
+                        "id": r[0],
+                        "execution_type": r[1],
+                        "started_at": str(r[2]) if r[2] else None,
+                        "completed_at": str(r[3]) if r[3] else None,
+                        "status": r[4],
+                        "results_count": int(r[5] or 0),
+                        "error_message": r[6],
+                        "details": r[7],
+                    }
+                    for r in rows
+                ]
+                return jsonify({"items": items, "total": int(total)}), 200
+            except Exception as e:
+                logger.error(f"❌ get_thread_executions: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── POST /api/v1/threads/email-monitor ───────────────────────────────
+        @self.app.route("/api/v1/threads/email-monitor", methods=["POST"])
+        @self.limiter.limit("10 per minute")
+        @require_api_key(scope="write")
+        def create_email_monitor_thread():
+            data = request.get_json(silent=True) or {}
+            label = data.get("label")
+            target_mailbox = data.get("target_mailbox")
+            domain = data.get("domain")
+            admin_email = data.get("admin_email")
+
+            if not target_mailbox and not domain:
+                return jsonify({"error": "Either target_mailbox or domain is required"}), 400
+
+            if domain:
+                details = {
+                    "domain": domain,
+                    "admin_email": admin_email,
+                    "exclude_domains": data.get("exclude_domains", []),
+                    "exclude_users": data.get("exclude_users", []),
+                    "last_history_ids": {},
+                }
+            else:
+                details = {
+                    "target_mailbox": target_mailbox,
+                    "exclude_domains": data.get("exclude_domains", []),
+                    "last_history_id": None,
+                }
+
+            search_interval_hours = data.get("search_interval_hours", 1)
+            try:
+                with self.db_manager.engine.begin() as conn:
+                    row = conn.execute(
+                        text(
+                            "INSERT INTO analysis_threads "
+                            "(thread_type, label, status, details, search_interval_hours) "
+                            "VALUES ('email_monitor', :label, 'active', CAST(:details AS JSONB), :interval) "
+                            "RETURNING id"
+                        ),
+                        {
+                            "label": label,
+                            "details": json.dumps(details),
+                            "interval": search_interval_hours,
+                        },
+                    ).fetchone()
+                    thread_id = row[0]
+                if self.email_scheduler:
+                    threading.Thread(
+                        target=self._trigger_email_scan,
+                        args=(thread_id, details),
+                        daemon=True,
+                    ).start()
+                return jsonify({"id": thread_id, "status": "active"}), 201
+            except Exception as e:
+                logger.error(f"❌ create_email_monitor_thread: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── GET /api/v1/threads/<id>/email-inboxes ───────────────────────────
+        @self.app.route("/api/v1/threads/<int:thread_id>/email-inboxes", methods=["GET"])
+        @self.limiter.limit("20 per minute")
+        @require_api_key(scope="read")
+        def get_thread_email_inboxes(thread_id: int):
+            """Aggregate email scan results grouped by recipient inbox."""
+            try:
+                with self.db_manager.engine.begin() as conn:
+                    exists = conn.execute(
+                        text("SELECT id FROM analysis_threads WHERE id = :id"),
+                        {"id": thread_id},
+                    ).fetchone()
+                    if not exists:
+                        return jsonify({"error": "Thread not found"}), 404
+
+                    rows = conn.execute(
+                        text(
+                            """
+                            SELECT
+                                extra_data->>'inbox' AS inbox,
+                                COUNT(*) AS threat_count,
+                                MAX((extra_data->>'threat_score')::int) AS max_score,
+                                AVG((extra_data->>'threat_score')::float)::int AS avg_score,
+                                MAX(first_detected_at) AS last_threat_at
+                            FROM thread_results
+                            WHERE thread_id = :tid
+                              AND extra_data->>'inbox' IS NOT NULL
+                            GROUP BY extra_data->>'inbox'
+                            ORDER BY max_score DESC, threat_count DESC
+                            """
+                        ),
+                        {"tid": thread_id},
+                    ).fetchall()
+
+                    items = [
+                        {
+                            "inbox": r[0],
+                            "threat_count": r[1],
+                            "max_score": r[2],
+                            "avg_score": r[3],
+                            "last_threat_at": str(r[4]) if r[4] else None,
+                        }
+                        for r in rows
+                    ]
+                    return jsonify({"items": items, "total": len(items)}), 200
+            except Exception as e:
+                logger.error(f"❌ get_thread_email_inboxes: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── GET /api/v1/email/senders ─────────────────────────────────────────
+        @self.app.route("/api/v1/email/senders", methods=["GET"])
+        @self.limiter.limit("30 per minute")
+        @require_api_key(scope="read")
+        def list_email_senders():
+            from src.intelligence.email_reputation import SenderReputationTracker
+
+            blocked_only = request.args.get("blocked_only", "false").lower() == "true"
+            whitelisted_only = request.args.get("whitelisted_only", "false").lower() == "true"
+            limit = min(int(request.args.get("limit", 50)), 200)
+            offset = int(request.args.get("offset", 0))
+            try:
+                tracker = SenderReputationTracker()
+                with self.db_manager.engine.begin() as conn:
+                    items, total = tracker.list_senders(
+                        conn,
+                        blocked_only=blocked_only,
+                        whitelisted_only=whitelisted_only,
+                        limit=limit,
+                        offset=offset,
+                    )
+                return jsonify({"items": items, "total": total}), 200
+            except Exception as e:
+                logger.error(f"❌ list_email_senders: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── GET /api/v1/email/senders/<email>/reputation ──────────────────────
+        @self.app.route("/api/v1/email/senders/<path:sender_email>/reputation", methods=["GET"])
+        @self.limiter.limit("30 per minute")
+        @require_api_key(scope="read")
+        def get_sender_reputation(sender_email: str):
+            from src.intelligence.email_reputation import SenderReputationTracker
+
+            try:
+                tracker = SenderReputationTracker()
+                with self.db_manager.engine.begin() as conn:
+                    rep = tracker.get_reputation(conn, sender_email)
+                if not rep:
+                    return jsonify({"error": "Sender not found"}), 404
+                return jsonify(rep), 200
+            except Exception as e:
+                logger.error(f"❌ get_sender_reputation: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── PATCH /api/v1/email/senders/<email>/block ─────────────────────────
+        @self.app.route("/api/v1/email/senders/<path:sender_email>/block", methods=["PATCH"])
+        @self.limiter.limit("20 per minute")
+        @require_api_key(scope="write")
+        def block_sender(sender_email: str):
+            from src.intelligence.email_reputation import SenderReputationTracker
+
+            data = request.get_json(silent=True) or {}
+            reason = data.get("reason", "Manual block by admin")
+            try:
+                tracker = SenderReputationTracker()
+                with self.db_manager.engine.begin() as conn:
+                    existing = conn.execute(
+                        text("SELECT id FROM email_sender_reputation WHERE sender_email = :email"),
+                        {"email": sender_email.lower()},
+                    ).fetchone()
+                    if not existing:
+                        return jsonify({"error": "Sender not found"}), 404
+                    tracker.mark_blocked(conn, sender_email, reason)
+                return jsonify({"status": "blocked", "sender": sender_email}), 200
+            except Exception as e:
+                logger.error(f"❌ block_sender: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── PATCH /api/v1/email/senders/<email>/unblock ───────────────────────
+        @self.app.route("/api/v1/email/senders/<path:sender_email>/unblock", methods=["PATCH"])
+        @self.limiter.limit("20 per minute")
+        @require_api_key(scope="write")
+        def unblock_sender(sender_email: str):
+            from src.intelligence.email_reputation import SenderReputationTracker
+
+            try:
+                tracker = SenderReputationTracker()
+                with self.db_manager.engine.begin() as conn:
+                    existing = conn.execute(
+                        text("SELECT id FROM email_sender_reputation WHERE sender_email = :email"),
+                        {"email": sender_email.lower()},
+                    ).fetchone()
+                    if not existing:
+                        return jsonify({"error": "Sender not found"}), 404
+                    tracker.mark_unblocked(conn, sender_email)
+                return jsonify({"status": "unblocked", "sender": sender_email}), 200
+            except Exception as e:
+                logger.error(f"❌ unblock_sender: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── PATCH /api/v1/email/senders/<email>/whitelist ─────────────────────
+        @self.app.route("/api/v1/email/senders/<path:sender_email>/whitelist", methods=["PATCH"])
+        @self.limiter.limit("20 per minute")
+        @require_api_key(scope="write")
+        def whitelist_sender(sender_email: str):
+            from src.intelligence.email_reputation import SenderReputationTracker
+
+            data = request.get_json(silent=True) or {}
+            reason = data.get("reason", "Manual whitelist by admin")
+            try:
+                tracker = SenderReputationTracker()
+                with self.db_manager.engine.begin() as conn:
+                    existing = conn.execute(
+                        text("SELECT id FROM email_sender_reputation WHERE sender_email = :email"),
+                        {"email": sender_email.lower()},
+                    ).fetchone()
+                    if not existing:
+                        # Auto-create a reputation record so we can whitelist unknown senders
+                        conn.execute(
+                            text(
+                                "INSERT INTO email_sender_reputation "
+                                "(sender_email, sender_domain, whitelisted, whitelisted_at, whitelist_reason) "
+                                "VALUES (:email, :domain, TRUE, NOW(), :reason) "
+                                "ON CONFLICT (sender_email) DO UPDATE SET "
+                                "whitelisted = TRUE, whitelisted_at = NOW(), whitelist_reason = :reason, "
+                                "blocked = FALSE, blocked_at = NULL, block_reason = NULL"
+                            ),
+                            {
+                                "email": sender_email.lower(),
+                                "domain": (
+                                    sender_email.split("@")[-1].lower()
+                                    if "@" in sender_email
+                                    else sender_email.lower()
+                                ),
+                                "reason": reason,
+                            },
+                        )
+                    else:
+                        tracker.mark_whitelisted(conn, sender_email, reason)
+                return jsonify({"status": "whitelisted", "sender": sender_email}), 200
+            except Exception as e:
+                logger.error(f"❌ whitelist_sender: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── GET /api/v1/email/domains ─────────────────────────────────────────
+        @self.app.route("/api/v1/email/domains", methods=["GET"])
+        @self.limiter.limit("30 per minute")
+        @require_api_key(scope="read")
+        def list_email_domains():
+            from src.intelligence.email_reputation import SenderReputationTracker
+
+            blocked_only = request.args.get("blocked_only", "false").lower() == "true"
+            limit = min(int(request.args.get("limit", 50)), 200)
+            offset = int(request.args.get("offset", 0))
+            try:
+                tracker = SenderReputationTracker()
+                with self.db_manager.engine.begin() as conn:
+                    items, total = tracker.list_domains(
+                        conn, blocked_only=blocked_only, limit=limit, offset=offset
+                    )
+                return jsonify({"items": items, "total": total}), 200
+            except Exception as e:
+                logger.error(f"❌ list_email_domains: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
         @self.app.route("/api/v1/health", methods=["GET"])
         @self.limiter.exempt
         def health_check():
@@ -744,6 +2233,29 @@ class PhishingAPI:
                 generate_latest(),
                 mimetype=CONTENT_TYPE_LATEST,
             )
+
+    def _trigger_image_search(self, thread_id: int, s3_key: str):
+        """Run an image tracking search in a fresh DB connection (for background threads)."""
+        try:
+            with self.db_manager.engine.begin() as conn:
+                self.scheduler._run_image_tracking(conn, thread_id, s3_key)
+        except Exception as e:
+            logger.error(f"❌ _trigger_image_search thread {thread_id}: {e}")
+
+    def _trigger_ads_search(self, thread_id: int, details):
+        """Run a google_ads search in a fresh DB connection (for background threads)."""
+        try:
+            with self.db_manager.engine.begin() as conn:
+                self.scheduler._run_google_ads(conn, thread_id, details)
+        except Exception as e:
+            logger.error(f"❌ _trigger_ads_search thread {thread_id}: {e}")
+
+    def _trigger_email_scan(self, thread_id: int, details):
+        """Run an email_monitor scan — manages its own transactions internally."""
+        try:
+            self.email_scheduler._run_email_monitor(thread_id, details)
+        except Exception as e:
+            logger.error(f"❌ _trigger_email_scan thread {thread_id}: {e}")
 
     @timeout(10)  # 10 second timeout for API database operations
     def process_phishing_report(
