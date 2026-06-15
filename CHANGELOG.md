@@ -1,3 +1,25 @@
+## [1.1.1] - 2025-11-22
+
+### Features
+
+- **core**: extract network utilities to dns module (`patch candidate`)
+- **core**: create module structure for EPIC-006 modularization (`minor candidate`)
+- **core**: add AbuseContactResolver for multi-contact handling (`patch candidate`)
+- **core**: normalize ASN/Provider databases to lists for multi-contact handling (`patch candidate`)
+- **core**: implement redirect chain detection and analysis (`minor candidate`)
+- **core**: refactor baseline
+- **core**: implement structured logging, circuit breakers, and database migrations (`minor candidate`)
+
+### Bug Fixes
+
+- **deps**: Update sqlalchemy requirement from ~=2.0.42 to ~=2.0.43 (#166)
+- **deps**: Update sqlalchemy requirement from ~=2.0.42 to ~=2.0.43
+
+### Chores
+
+- ignore database submodule in pylint
+- **deps**: update database submodule
+
 ## [1.1.0] - 2025-08-26
 
 ### Features
@@ -16,6 +38,11 @@
 ### Bug Fixes
 
 - **core**: fixed attachments values (`patch candidate`)
+
+## [1.0.49] - 2025-08-06
+
+### Bug Fixes
+
 - **core**: fixed screenshots err (`patch candidate`)
 
 ## [1.0.48] - 2025-08-05
@@ -29,9 +56,29 @@
 ### Bug Fixes
 
 - **core**: rebased follow up due to overdues (`patch candidate`)
+
+## [1.0.46] - 2025-08-05
+
+### Bug Fixes
+
 - **core**: fixed ccs and follow correlation (`patch candidate`)
+
+## [1.0.45] - 2025-08-05
+
+### Bug Fixes
+
 - **core**: fixed log level err (`patch candidate`)
+
+## [1.0.44] - 2025-08-05
+
+### Bug Fixes
+
 - **core**: fixed log level (`patch candidate`)
+
+## [1.0.43] - 2025-08-05
+
+### Bug Fixes
+
 - **core**: fixed sender email err (`patch candidate`)
 
 ## [1.0.42] - 2025-08-04
@@ -45,7 +92,17 @@
 ### Bug Fixes
 
 - **core**: fixed main thread execution (`patch candidate`)
+
+## [1.0.40] - 2025-08-04
+
+### Bug Fixes
+
 - **core**: fixed timeout err (`patch candidate`)
+
+## [1.0.39] - 2025-08-04
+
+### Bug Fixes
+
 - **core**: fixed report from grinder (`patch candidate`)
 - **deps**: Update sqlalchemy requirement from ~=2.0.41 to ~=2.0.42 (#122)
 - **deps**: Update sqlalchemy requirement from ~=2.0.41 to ~=2.0.42
@@ -74,9 +131,29 @@
 ### Bug Fixes
 
 - **core**: fixed hangs on all (`patch candidate`)
+
+## [1.0.34] - 2025-07-30
+
+### Bug Fixes
+
 - **core**: fixed hang on db lock (`patch candidate`)
+
+## [1.0.33] - 2025-07-30
+
+### Bug Fixes
+
 - **core**: fixed abuse_list cannot got (`patch candidate`)
+
+## [1.0.32] - 2025-07-30
+
+### Bug Fixes
+
 - **core**: fixed serialization err (`patch candidate`)
+
+## [1.0.31] - 2025-07-30
+
+### Bug Fixes
+
 - **core**: fixed error when send reports due to validation (`patch candidate`)
 
 ## [1.0.30] - 2025-07-30
@@ -233,6 +310,11 @@
 ### Features
 
 - **core**: added sqlite and well docs (`patch candidate`)
+
+## [1.0.5] - 2025-02-24
+
+### Features
+
 - **core**: added sqlite and well docs (`patch candidate`)
 
 ## [1.0.4] - 2025-02-23
@@ -254,7 +336,6 @@
 ### Features
 
 - **core**: added initial version (`patch candidate`)
-- **core**: init dev (#1)
 - **core**: init dev
 
 ### Other Changes
