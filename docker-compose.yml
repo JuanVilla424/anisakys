@@ -1,0 +1,59 @@
+---
+# Anisakys stack demo local — todo orquestado desde el repo del backend.
+# Levanta: PostgreSQL + backend (este repo) + frontend (../anisakys-frontend).
+name: anisakys-demo
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [anisakys-net]
+
+  backend:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+    volumes:
+      - ./queries.txt:/app/queries.txt:ro
+      - ./entrypoint-backend.sh:/app/entrypoint-backend.sh:ro
+    command: ["sh", "/app/entrypoint-backend.sh"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    ports: ["8080:8080"]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-m", "3", "http://localhost:8080/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks: [anisakys-net]
+
+  frontend:
+    build:
+      context: ../anisakys-frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on: [backend]
+    ports: ["5174:80"]
+    networks: [anisakys-net]
+
+volumes:
+  pgdata:
+
+networks:
+  anisakys-net:
+    driver: bridge
