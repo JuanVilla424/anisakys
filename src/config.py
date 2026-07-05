@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     ANISAKYS_API_KEY: Optional[str] = None
     ANISAKYS_API_PORT: Optional[int] = 8091
     RATELIMIT_STORAGE_URL: Optional[str] = None
+    CT_MONITOR_ENABLED: Optional[bool] = False
+    CT_MONITOR_MIN_SCORE: Optional[int] = None
+    CT_STREAM_URL: Optional[str] = None
     TEST_EMAIL: Optional[str] = None
     SERPAPI_KEY: Optional[str] = None
     S3_DATA_BUCKET: Optional[str] = None

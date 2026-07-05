@@ -323,3 +323,60 @@ class TestGraphEndpoint:
         client, mock_db, _ = graph_setup
         self._rows(mock_db, [])
         assert client.get("/api/v1/graph").status_code == 401
+
+
+class TestCTMonitorThreadRoute:
+    """Tests for POST /api/v1/threads/ct-monitor and the ct_monitor branch
+    of POST /api/v1/threads/<id>/search."""
+
+    @pytest.fixture
+    def api_setup(self):
+        with (
+            patch("src.api.phishing_api.GrinderReportClient"),
+            patch("src.api.phishing_api.MultiAPIValidator"),
+        ):
+            from src.api.phishing_api import PhishingAPI
+
+            mock_db = MagicMock()
+            api = PhishingAPI(
+                mock_db, MagicMock(spec=EnhancedAbuseEmailDetector), api_key="test_key"
+            )
+            api.app.config["TESTING"] = True
+            client = api.app.test_client()
+            return client, mock_db, {"Authorization": "Bearer test_key"}
+
+    def test_create_inserts_new_row_when_none_exists(self, api_setup):
+        client, mock_db, headers = api_setup
+        conn = mock_db.engine.begin.return_value.__enter__.return_value
+        conn.execute.return_value.fetchone.side_effect = [None, (5,)]
+
+        resp = client.post("/api/v1/threads/ct-monitor", headers=headers)
+
+        assert resp.status_code == 201
+        assert json.loads(resp.data) == {"id": 5, "status": "active"}
+
+    def test_create_returns_existing_row_idempotently(self, api_setup):
+        client, mock_db, headers = api_setup
+        conn = mock_db.engine.begin.return_value.__enter__.return_value
+        conn.execute.return_value.fetchone.return_value = (7,)
+
+        resp = client.post("/api/v1/threads/ct-monitor", headers=headers)
+
+        assert resp.status_code == 200
+        data = json.loads(resp.data)
+        assert data["id"] == 7
+        assert data["existing"] is True
+
+    def test_create_requires_auth(self, api_setup):
+        client, _, _ = api_setup
+        assert client.post("/api/v1/threads/ct-monitor").status_code == 401
+
+    def test_search_trigger_rejects_ct_monitor_with_400(self, api_setup):
+        client, mock_db, headers = api_setup
+        conn = mock_db.engine.begin.return_value.__enter__.return_value
+        conn.execute.return_value.fetchone.return_value = ("ct_monitor", None, None)
+
+        resp = client.post("/api/v1/threads/1/search", headers=headers)
+
+        assert resp.status_code == 400
+        assert "no on-demand search trigger" in json.loads(resp.data)["error"]

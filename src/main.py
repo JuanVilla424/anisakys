@@ -614,6 +614,17 @@ class Engine:
                 email_scheduler.start()
                 logger.info("📧 Email threat monitoring scheduler started")
 
+            # Start CT (Certificate Transparency) log monitoring if enabled
+            if getattr(settings, "CT_MONITOR_ENABLED", False):
+                from src.monitoring.ct_monitor import start_ct_monitor_job
+
+                start_ct_monitor_job(
+                    db_manager=self.db_manager,
+                    stream_url=getattr(settings, "CT_STREAM_URL", None) or None,
+                    min_score=getattr(settings, "CT_MONITOR_MIN_SCORE", None),
+                )
+                logger.info("🔭 CT monitoring job started")
+
             # Store the API key globally for decorator access
             global flask_app
 

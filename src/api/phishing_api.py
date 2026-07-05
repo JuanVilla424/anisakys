@@ -2051,6 +2051,45 @@ class PhishingAPI:
                 logger.error(f"❌ create_google_ads_thread: {e}")
                 return jsonify({"error": "Internal server error"}), 500
 
+        # ── POST /api/v1/threads/ct-monitor ───────────────────────────────────
+        @self.app.route("/api/v1/threads/ct-monitor", methods=["POST"])
+        @self.limiter.limit("10 per minute")
+        @require_api_key(scope="write")
+        def create_ct_monitor_thread():
+            # ct_monitor is a global singleton (one continuous CT-log stream,
+            # not a per-user config like the other 3 thread types) -- this
+            # route mostly exists for manual/API bootstrap convenience and UI
+            # consistency with the other create-routes. In practice
+            # CTMonitorJob.start() already bootstraps this row at server
+            # startup when CT_MONITOR_ENABLED is set, so this usually just
+            # confirms the existing row (idempotent, matching that bootstrap).
+            data = request.get_json(silent=True) or {}
+            label = data.get("label", "Certificate Transparency Monitor")
+            try:
+                with self.db_manager.engine.begin() as conn:
+                    existing = conn.execute(
+                        text(
+                            "SELECT id FROM analysis_threads WHERE thread_type = 'ct_monitor' LIMIT 1"
+                        )
+                    ).fetchone()
+                    if existing:
+                        return (
+                            jsonify({"id": existing[0], "status": "active", "existing": True}),
+                            200,
+                        )
+                    row = conn.execute(
+                        text(
+                            "INSERT INTO analysis_threads (thread_type, label, status) "
+                            "VALUES ('ct_monitor', :label, 'active') RETURNING id"
+                        ),
+                        {"label": label},
+                    ).fetchone()
+                    thread_id = row[0]
+                return jsonify({"id": thread_id, "status": "active"}), 201
+            except Exception as e:
+                logger.error(f"❌ create_ct_monitor_thread: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
         # ── POST /api/v1/threads/<id>/search ──────────────────────────────────
         @self.app.route("/api/v1/threads/<int:thread_id>/search", methods=["POST"])
         @self.limiter.limit("5 per minute")
@@ -2106,6 +2145,16 @@ class PhishingAPI:
                         args=(thread_id, details),
                         daemon=True,
                     ).start()
+                elif thread_type == "ct_monitor":
+                    return (
+                        jsonify(
+                            {
+                                "error": "ct_monitor is a continuous background stream; "
+                                "there is no on-demand search trigger"
+                            }
+                        ),
+                        400,
+                    )
                 else:
                     return (
                         jsonify(
