@@ -13,6 +13,7 @@ import re
 import socket
 import threading
 import time
+import tomllib
 import traceback
 from functools import wraps
 from pathlib import Path
@@ -52,6 +53,21 @@ screenshot_service = (
     if (PLAYWRIGHT_AVAILABLE or SELENIUM_AVAILABLE)
     else None
 )
+
+
+def _load_app_version() -> str:
+    """Read the app version once from pyproject.toml (the single source of
+    truth bump2version keeps in sync) -- avoids yet another hardcoded copy
+    that would drift on the next version bump."""
+    try:
+        pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
+        with open(pyproject_path, "rb") as f:
+            return tomllib.load(f)["tool"]["poetry"]["version"]
+    except Exception:
+        return "unknown"
+
+
+APP_VERSION = _load_app_version()
 
 
 class TimeoutError(Exception):
@@ -2543,6 +2559,7 @@ class PhishingAPI:
                     {
                         "status": "healthy",
                         "timestamp": datetime.datetime.now().isoformat(),
+                        "version": APP_VERSION,
                         "grinder_integration": GRINDER_INTEGRATION_ENABLED,
                         "api_authentication": bool(self.api_key),
                     }

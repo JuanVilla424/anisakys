@@ -102,6 +102,14 @@ class TestPhishingAPIEndpoints:
         data = json.loads(response.data)
         assert "grinder_integration" in data
 
+    def test_health_endpoint_includes_version(self, api_client):
+        """Health endpoint should include a non-empty app version string."""
+        response = api_client.get("/api/v1/health")
+        data = json.loads(response.data)
+        assert "version" in data
+        assert isinstance(data["version"], str)
+        assert data["version"] != ""
+
     def test_health_endpoint_includes_auth_status(self, api_client):
         """Health endpoint should include authentication status."""
         response = api_client.get("/api/v1/health")
