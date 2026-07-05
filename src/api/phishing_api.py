@@ -41,8 +41,9 @@ from src.monitoring.gsb_rescan import get_gsb_rescan_job, start_gsb_rescan_job
 
 # Initialize screenshot service
 SCREENSHOTS_DIR = (
-    Path(settings.DATA_DIR if hasattr(settings, "DATA_DIR") else "/opt/anisakys/data")
-    / "screenshots"
+    Path(settings.SCREENSHOTS_DIR)
+    if getattr(settings, "SCREENSHOTS_DIR", None)
+    else Path("/opt/anisakys/data/screenshots")
 )
 screenshot_service = (
     ScreenshotService(str(SCREENSHOTS_DIR))
@@ -1651,6 +1652,229 @@ class PhishingAPI:
                 logger.error(f"❌ API error in get_iocs: {e}")
                 return jsonify({"error": "Internal server error"}), 500
 
+        # ── GET /api/v1/graph ──────────────────────────────────────────────────
+        @self.app.route("/api/v1/graph", methods=["GET"])
+        @self.limiter.limit("20 per minute")
+        @require_api_key(scope="read")
+        def get_graph():
+            """Relationship graph built from real phishing sites.
+
+            Nodes: domain, ip, registrar (derived from phishing_sites).
+            Edges: domain --resolves_to--> ip, domain --registered_with--> registrar.
+
+            Query params:
+              limit (<=500, default 200) — cap on source rows.
+              focus  (optional) — "domain:foo.com" / "ip:1.2.3.4" /
+                                  "registrar:Name" restricts to the 1-hop
+                                  neighborhood of that node.
+            """
+            try:
+                limit = min(int(request.args.get("limit", 200)), 500)
+                focus = request.args.get("focus", "").strip().lower()
+
+                with self.db_manager.engine.begin() as conn:
+                    rows = conn.execute(
+                        text(
+                            """
+                            SELECT
+                                SPLIT_PART(SPLIT_PART(url, '://', 2), '/', 1) AS domain,
+                                resolved_ip,
+                                registrar_name,
+                                multi_api_threat_level,
+                                AVG(api_confidence_score) AS avg_conf,
+                                bool_or(is_cloudflare = 1) AS cloudflare,
+                                MIN(first_seen)::text AS first_seen,
+                                MAX(last_seen)::text AS last_seen,
+                                COUNT(*) AS hits
+                            FROM phishing_sites
+                            WHERE url IS NOT NULL
+                              AND SPLIT_PART(SPLIT_PART(url, '://', 2), '/', 1) <> ''
+                            GROUP BY domain, resolved_ip, registrar_name,
+                                     multi_api_threat_level
+                            ORDER BY MAX(last_seen) DESC NULLS LAST
+                            LIMIT :lim
+                        """
+                        ),
+                        {"lim": limit},
+                    ).fetchall()
+
+                sev_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
+
+                def severer(current, candidate):
+                    if candidate is None:
+                        return current
+                    if current is None or sev_rank.get(candidate, 0) > sev_rank.get(current, 0):
+                        return candidate
+                    return current
+
+                def meta_without_none(pairs):
+                    return {k: v for k, v in pairs if v is not None}
+
+                domains: Dict[str, Dict[str, Any]] = {}
+                ips: Dict[str, Dict[str, Any]] = {}
+                registrars: Dict[str, Dict[str, Any]] = {}
+                edge_keys = set()  # (source, target, relation)
+
+                for r in rows:
+                    domain = (r[0] or "").strip()
+                    if not domain:
+                        continue
+                    ip = (r[1] or "").strip() if r[1] else None
+                    reg = (r[2] or "").strip() if r[2] else None
+                    threat = r[3]
+                    conf = round(float(r[4])) if r[4] is not None else None
+                    cloud = bool(r[5])
+                    first, last, hits = r[6], r[7], int(r[8] or 0)
+
+                    d = domains.setdefault(
+                        domain,
+                        {
+                            "severity": None,
+                            "conf": None,
+                            "cloudflare": False,
+                            "first": first,
+                            "last": last,
+                            "hits": 0,
+                        },
+                    )
+                    d["severity"] = severer(d["severity"], threat)
+                    if conf is not None:
+                        d["conf"] = max(d["conf"] or 0, conf)
+                    d["cloudflare"] = d["cloudflare"] or cloud
+                    d["hits"] += hits
+                    if first and (d["first"] is None or first < d["first"]):
+                        d["first"] = first
+                    if last and (d["last"] is None or last > d["last"]):
+                        d["last"] = last
+
+                    if ip:
+                        ipp = ips.setdefault(
+                            ip,
+                            {
+                                "cloudflare": cloud,
+                                "first": first,
+                                "last": last,
+                                "hits": 0,
+                            },
+                        )
+                        ipp["cloudflare"] = ipp["cloudflare"] or cloud
+                        ipp["hits"] += hits
+                        if first and (ipp["first"] is None or first < ipp["first"]):
+                            ipp["first"] = first
+                        if last and (ipp["last"] is None or last > ipp["last"]):
+                            ipp["last"] = last
+                        edge_keys.add((f"domain:{domain}", f"ip:{ip}", "resolves_to"))
+
+                    if reg:
+                        rg = registrars.setdefault(reg, {"sites": 0, "first": first, "last": last})
+                        rg["sites"] += hits
+                        if first and (rg["first"] is None or first < rg["first"]):
+                            rg["first"] = first
+                        if last and (rg["last"] is None or last > rg["last"]):
+                            rg["last"] = last
+                        edge_keys.add((f"domain:{domain}", f"registrar:{reg}", "registered_with"))
+
+                node_list = []
+                for dom, m in domains.items():
+                    node_list.append(
+                        {
+                            "id": f"domain:{dom}",
+                            "label": dom,
+                            "type": "domain",
+                            "severity": m["severity"] or "low",
+                            "meta": meta_without_none(
+                                [
+                                    ("Hosting", "Cloudflare" if m["cloudflare"] else "Direct"),
+                                    ("Hits", m["hits"]),
+                                    (
+                                        "Confidence",
+                                        f"{m['conf']}%" if m["conf"] is not None else None,
+                                    ),
+                                    ("First seen", m["first"]),
+                                    ("Last seen", m["last"]),
+                                ]
+                            ),
+                        }
+                    )
+                for ip, m in ips.items():
+                    node_list.append(
+                        {
+                            "id": f"ip:{ip}",
+                            "label": ip,
+                            "type": "ip",
+                            "severity": "medium",
+                            "meta": meta_without_none(
+                                [
+                                    ("Hosting", "Cloudflare" if m["cloudflare"] else "Direct"),
+                                    ("Hits", m["hits"]),
+                                    ("First seen", m["first"]),
+                                    ("Last seen", m["last"]),
+                                ]
+                            ),
+                        }
+                    )
+                for reg, m in registrars.items():
+                    node_list.append(
+                        {
+                            "id": f"registrar:{reg}",
+                            "label": reg,
+                            "type": "registrar",
+                            "severity": "high" if m["sites"] >= 5 else "medium",
+                            "meta": meta_without_none(
+                                [
+                                    ("Sites", m["sites"]),
+                                    ("First seen", m["first"]),
+                                    ("Last seen", m["last"]),
+                                ]
+                            ),
+                        }
+                    )
+
+                edge_list = [
+                    {
+                        "id": f"e{i}",
+                        "source": s,
+                        "target": t,
+                        "relation": rel,
+                        "confidence": 1.0,
+                    }
+                    for i, (s, t, rel) in enumerate(sorted(edge_keys))
+                ]
+
+                # Optional focus → 1-hop neighborhood
+                if focus:
+                    ftype, _, fval = focus.partition(":")
+                    ftype, fval = ftype.strip(), fval.strip()
+                    fid = (
+                        f"{ftype}:{fval}"
+                        if ftype in ("domain", "ip", "registrar") and fval
+                        else None
+                    )
+                    if fid:
+                        keep = {fid}
+                        kept_edges = []
+                        for e in edge_list:
+                            if e["source"] == fid or e["target"] == fid:
+                                keep.add(e["source"])
+                                keep.add(e["target"])
+                                kept_edges.append(e)
+                        node_list = [n for n in node_list if n["id"] in keep]
+                        edge_list = kept_edges
+
+                meta = {
+                    "domains": len(domains),
+                    "ips": len(ips),
+                    "registrars": len(registrars),
+                    "limited": len(rows) >= limit,
+                }
+                return (
+                    jsonify({"nodes": node_list, "edges": edge_list, "meta": meta}),
+                    200,
+                )
+            except Exception as e:
+                logger.error(f"❌ API error in get_graph: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
         # ── GET /api/v1/intelligence/brands ───────────────────────────────────
         @self.app.route("/api/v1/intelligence/brands", methods=["GET"])
         @self.limiter.limit("20 per minute")
@@ -2446,7 +2670,7 @@ class PhishingAPI:
             logger.error(f"❌ Failed to process phishing report for {url}: {e}")
             return {"status": "error", "message": f"Failed to process report: {str(e)}", "url": url}
 
-    def run(self, host: str = "0.0.0.0", port: int = 8080, debug: bool = False):
+    def run(self, host: str = "0.0.0.0", port: int = 8091, debug: bool = False):
         """Run the API server."""
         auth_status = "with API key authentication" if self.api_key else "without authentication"
         grinder_status = (

@@ -33,9 +33,9 @@ services:
     command: ["sh", "/app/entrypoint-backend.sh"]
     depends_on:
       postgres: { condition: service_healthy }
-    ports: ["8080:8080"]
+    ports: ["8091:8091"]
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "-m", "3", "http://localhost:8080/api/v1/health"]
+      test: ["CMD", "curl", "-fsS", "-m", "3", "http://localhost:8091/api/v1/health"]
       interval: 10s
       timeout: 5s
       retries: 30

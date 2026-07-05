@@ -230,6 +230,13 @@ class MultiAPIValidator:
         results["confidence_score"] = self._calculate_confidence_score(
             vt_result, uv_result, pt_result, domain_age, url_analysis, gsb_result
         )
+
+        # If every external threat API errored, heuristics alone (domain age,
+        # lexical score) must not claim a verdict — report unknown, zero trust.
+        if vt_result.get("error") and uv_result.get("error") and pt_result.get("error"):
+            results["aggregated_threat_level"] = "unknown"
+            results["confidence_score"] = 0
+
         results["recommendations"] = self._generate_recommendations(
             vt_result, uv_result, pt_result, domain_age, url_analysis, gsb_result
         )

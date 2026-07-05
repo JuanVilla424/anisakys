@@ -4,15 +4,17 @@ Phishing Utils for Anisakys Phishing Detection Engine.
 Utility functions for URL processing and phishing detection.
 """
 
+import datetime
 import re
 import socket
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import requests
+from sqlalchemy import create_engine, text
 
 from src.config import settings
-from src.database import DATABASE_URL
+from src.database import DATABASE_URL, db_engine
 from src.logger import logger
 
 # Default User-Agent for HTTP requests

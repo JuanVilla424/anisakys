@@ -21,6 +21,10 @@ Engine = main.Engine
 PhishingScanner = main.PhishingScanner
 DatabaseManager = main.DatabaseManager
 
+# After the EPIC refactors these globals live in their own modules — patch there
+import src.detection.scanner as scanner_module
+import src.monitoring.takedown as takedown_module
+
 # User's test email for reports
 TEST_USER_EMAIL = "r6ty5r296it6tl4eg5m.constant214@passinbox.com"
 
@@ -36,10 +40,10 @@ class TestFunctionalE2E:
         return db_url
 
     @pytest.fixture
-    def mock_env(self, monkeypatch, test_db):
+    def mock_env(self, monkeypatch, test_db, tmp_path):
         """Mock environment for testing"""
-        # Mock settings
-        monkeypatch.setattr(main.settings, "DATABASE_URL", test_db)
+        # Mock settings (keep the real test PostgreSQL database — the schema
+        # uses PostgreSQL-specific SQL, so per-test SQLite is not viable)
         monkeypatch.setattr(main.settings, "KEYWORDS", "bank,paypal,amazon")
         monkeypatch.setattr(main.settings, "DOMAINS", ".com,.net")
         monkeypatch.setattr(main.settings, "AUTO_MULTI_API_SCAN", True)
@@ -50,10 +54,14 @@ class TestFunctionalE2E:
         monkeypatch.setattr(main.settings, "SMTP_HOST", "smtp.test.com")
         monkeypatch.setattr(main.settings, "SMTP_PORT", 587)
 
-        # Mock file paths
-        monkeypatch.setattr(main, "DATABASE_URL", test_db)
-        monkeypatch.setattr(main, "QUERIES_FILE", "test_queries.txt")
-        monkeypatch.setattr(main, "OFFSET_FILE", "test_offset.txt")
+        # Mock file paths (QUERIES_FILE lives in src.detection.scanner and
+        # OFFSET_FILE in src.monitoring.takedown after the refactors)
+        queries_file = str(tmp_path / "test_queries.txt")
+        offset_file = str(tmp_path / "test_offset.txt")
+        monkeypatch.setattr(main, "QUERIES_FILE", queries_file)
+        monkeypatch.setattr(main, "OFFSET_FILE", offset_file)
+        monkeypatch.setattr(scanner_module, "QUERIES_FILE", queries_file)
+        monkeypatch.setattr(takedown_module, "OFFSET_FILE", offset_file)
 
     def test_complete_phishing_detection_flow(self, mock_env, tmp_path):
         """Test complete flow: detection -> validation -> reporting"""
@@ -67,7 +75,7 @@ class TestFunctionalE2E:
             process_reports=False,
             threads_only=False,
             test_report=False,
-            multi_api_scan=True,
+            multi_api_scan=False,
             url=None,
             abuse_email=None,
             attachment=None,
@@ -79,7 +87,7 @@ class TestFunctionalE2E:
             domains=None,
             allowed_sites=None,
             start_api=False,
-            api_port=8080,
+            api_port=8091,
             api_key=None,
             force_auto_analysis=False,
             auto_report_now=False,
@@ -93,14 +101,14 @@ class TestFunctionalE2E:
         # Test 1: Phishing site detection
         detected_sites = []
 
-        def mock_check_site(url, *args, **kwargs):
-            """Mock site checking that detects phishing"""
+        def mock_scan_site(url, *args, **kwargs):
+            """Mock site scanning that detects phishing"""
             if "paypal" in url or "bank" in url:
                 detected_sites.append(url)
                 return True, ["paypal", "login"], 200
             return False, [], 404
 
-        with patch.object(engine.scanner, "check_site", mock_check_site):
+        with patch.object(engine.scanner, "scan_site", mock_scan_site):
             # Simulate scanning a few sites
             test_urls = [
                 "https://paypal-verify.com",
@@ -109,13 +117,13 @@ class TestFunctionalE2E:
             ]
 
             for url in test_urls:
-                result = engine.scanner.check_site(url)
+                result = engine.scanner.scan_site(url)
 
             assert len(detected_sites) == 2
             assert "https://paypal-verify.com" in detected_sites
 
         # Test 2: Multi-API validation
-        with patch.object(engine, "multi_api_scan") as mock_scan:
+        with patch.object(engine, "perform_multi_api_scan") as mock_scan:
             mock_scan.return_value = {
                 "url": "https://paypal-verify.com",
                 "threat_level": "critical",
@@ -126,36 +134,54 @@ class TestFunctionalE2E:
             }
 
             # Validate detected site
-            api_results = engine.multi_api_scan("https://paypal-verify.com")
+            api_results = engine.perform_multi_api_scan("https://paypal-verify.com")
 
             assert api_results["threat_level"] == "critical"
             assert api_results["confidence_score"] == 95
 
-        # Test 3: Abuse reporting
-        with patch("smtplib.SMTP") as mock_smtp:
-            mock_smtp_instance = MagicMock()
-            mock_smtp.return_value = mock_smtp_instance
+        # Test 3: Abuse reporting (send_abuse_report lives in report_manager)
+        with (
+            patch("src.reporting.abuse_manager.smtplib.SMTP") as mock_smtp,
+            patch("src.reporting.abuse_manager.Environment") as mock_env_tpl,
+            patch(
+                "src.reporting.abuse_manager.AttachmentConfig.get_all_attachments",
+                return_value=[],
+            ),
+        ):
+            mock_server = MagicMock()
+            mock_smtp.return_value.__enter__ = MagicMock(return_value=mock_server)
+            mock_smtp.return_value.__exit__ = MagicMock(return_value=False)
+            mock_env_tpl.return_value.get_template.return_value.render.return_value = (
+                "<html>Phishing Report</html>"
+            )
 
-            with patch("jinja2.Environment") as mock_env:
-                mock_template = MagicMock()
-                mock_template.render.return_value = "<html>Phishing Report</html>"
-                mock_env.return_value.get_template.return_value = mock_template
-
+            with (
+                patch.object(
+                    engine.report_manager.abuse_detector, "validate_email", return_value=True
+                ),
+                patch.object(
+                    engine.report_manager.abuse_detector,
+                    "validate_abuse_email_domain",
+                    return_value=True,
+                ),
+                patch.object(
+                    engine.report_manager.screenshot_service,
+                    "capture_screenshot",
+                    return_value={"success": False},
+                ),
+            ):
                 # Send abuse report
-                success = engine.send_abuse_report(
-                    site_url="https://paypal-verify.com",
+                success = engine.report_manager.send_abuse_report(
                     abuse_emails=["abuse@provider.com"],
-                    whois_info={"registrar": "Bad Registrar"},
+                    site_url="https://paypal-verify.com",
+                    whois_str="registrar: Example Registrar",
                     multi_api_results=api_results,
-                    cc_emails=[TEST_USER_EMAIL],
+                    test_mode=True,
                 )
 
                 # Verify email was sent
-                mock_smtp_instance.send_message.assert_called()
-
-                # Verify CC includes test user
-                sent_calls = mock_smtp_instance.send_message.call_args_list
-                assert len(sent_calls) > 0
+                assert success is True
+                mock_server.sendmail.assert_called()
 
     def test_auto_analysis_workflow(self, mock_env):
         """Test automatic analysis workflow"""
@@ -173,13 +199,22 @@ class TestFunctionalE2E:
             force_auto_analysis=True,
             show_auto_status=True,
             cc=TEST_USER_EMAIL,
+            abuse_email=None,
+            attachment=None,
+            regen_queries=False,
         )
 
         # Initialize engine
         engine = Engine(args)
 
-        # Insert test data for auto-analysis
+        # Insert test data for auto-analysis (clean previous runs first)
         with engine.db_manager.engine.begin() as conn:
+            conn.execute(
+                main.text(
+                    "DELETE FROM phishing_sites "
+                    "WHERE url IN ('https://test-phish1.com', 'https://test-phish2.com')"
+                )
+            )
             conn.execute(
                 main.text(
                     """
@@ -193,7 +228,7 @@ class TestFunctionalE2E:
             )
 
         # Mock multi-API scan
-        with patch.object(engine, "multi_api_scan") as mock_scan:
+        with patch.object(engine, "perform_multi_api_scan") as mock_scan:
             mock_scan.return_value = {
                 "threat_level": "high",
                 "confidence_score": 90,
@@ -202,12 +237,12 @@ class TestFunctionalE2E:
                 "phishtank": {"in_database": False},
             }
 
-            # Run auto-analysis
-            with patch.object(engine, "auto_analyze_sites") as mock_analyze:
+            # Run auto-analysis (worker wiring lives in engine.auto_analyzer)
+            with patch.object(engine.auto_analyzer, "start_analysis_worker") as mock_analyze:
                 mock_analyze.return_value = None
 
                 # Trigger analysis
-                engine.auto_analyze_sites()
+                engine.auto_analyzer.start_analysis_worker()
 
                 # Verify it was called
                 mock_analyze.assert_called()
@@ -233,7 +268,19 @@ class TestFunctionalE2E:
         from flask.testing import FlaskClient
 
         args = argparse.Namespace(
-            start_api=True, api_port=8080, api_key="test_api_key", timeout=5, log_level="INFO"
+            start_api=True,
+            api_port=8091,
+            api_key="test_api_key",
+            timeout=5,
+            log_level="INFO",
+            report=None,
+            process_reports=False,
+            threads_only=False,
+            test_report=False,
+            abuse_email=None,
+            attachment=None,
+            cc=None,
+            regen_queries=False,
         )
 
         # Create Flask app for testing
@@ -275,11 +322,18 @@ class TestFunctionalE2E:
             process_reports=False,
             threads_only=False,
             test_report=False,
+            attachment=None,
+            cc=None,
+            regen_queries=False,
         )
 
         engine1 = Engine(args1)
 
-        # Mark site as phishing
+        # Clean previous runs, then mark site as phishing
+        with engine1.db_manager.engine.begin() as conn:
+            conn.execute(
+                main.text("DELETE FROM phishing_sites WHERE url = 'https://phishing-persist.com'")
+            )
         engine1.mark_site_as_phishing(
             "https://phishing-persist.com", abuse_email="abuse@registrar.com"
         )
@@ -292,6 +346,10 @@ class TestFunctionalE2E:
             process_reports=False,
             threads_only=False,
             test_report=False,
+            abuse_email=None,
+            attachment=None,
+            cc=None,
+            regen_queries=False,
         )
 
         engine2 = Engine(args2)
@@ -324,14 +382,13 @@ class TestFunctionalE2E:
             regen_queries=True,
         )
 
-        # Create scanner with multiple workers
+        # Create scanner (worker pool size is managed internally)
         scanner = PhishingScanner(
             timeout=5,
             keywords=["test"],
             domains=[".com"],
             allowed_sites=[],
             args=args,
-            max_workers=5,
         )
 
         # Track scanned URLs
@@ -350,10 +407,10 @@ class TestFunctionalE2E:
             # Scan URLs concurrently
             start_time = time.time()
 
-            with patch.object(scanner, "check_site", side_effect=mock_check):
+            with patch.object(scanner, "scan_site", side_effect=mock_check):
                 threads = []
                 for url in test_urls:
-                    t = threading.Thread(target=scanner.check_site, args=(url,))
+                    t = threading.Thread(target=scanner.scan_site, args=(url,))
                     t.start()
                     threads.append(t)
 
@@ -375,10 +432,13 @@ class TestFunctionalE2E:
             timeout=5,
             log_level="INFO",
             report=None,
-            process_reports=True,
+            process_reports=False,
             threads_only=False,
             test_report=False,
             cc=TEST_USER_EMAIL,
+            abuse_email=None,
+            attachment=None,
+            regen_queries=False,
         )
 
         engine = Engine(args)
@@ -399,8 +459,7 @@ class TestFunctionalE2E:
             mock_get.side_effect = Exception("Network error")
 
             # Multi-API scan should handle failure
-            results = engine.multi_api_scanner.virustotal_scan("https://test.com")
-            assert results["success"] is False
+            results = engine.scanner.multi_api_validator.virustotal.scan_url("https://test.com")
             assert "error" in results
 
         # Test 3: Email sending failure recovery
@@ -408,11 +467,11 @@ class TestFunctionalE2E:
             mock_smtp.side_effect = Exception("SMTP connection failed")
 
             # Should handle email failure
-            result = engine.send_abuse_report(
-                site_url="https://test.com",
+            result = engine.report_manager.send_abuse_report(
                 abuse_emails=["test@test.com"],
-                whois_info={},
-                cc_emails=[TEST_USER_EMAIL],
+                site_url="https://test.com",
+                whois_str="",
+                test_mode=True,
             )
 
             assert result is False

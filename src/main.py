@@ -7,7 +7,7 @@ featuring API key authentication and automated IP reporting capabilities.
 
 Usage examples:
   ./anisakys.py --timeout 30 --log-level DEBUG
-  ./anisakys.py --start-api --api-port 8080 --api-key your_anisakys_api_key
+  ./anisakys.py --start-api --api-port 8091 --api-key your_anisakys_api_key
   ./anisakys.py --multi-api-scan --url https://suspicious-site.com
 """
 
@@ -49,7 +49,15 @@ from functools import wraps
 import signal
 import sys
 
-from src.config import settings, CLOUDFLARE_IP_RANGES
+from src.config import (
+    settings,
+    CLOUDFLARE_IP_RANGES,
+    ALLOWED_HEAD_STATUS,
+    DEFAULT_USER_AGENT,
+    FIREFOX_USER_AGENT,
+    BROWSER_HEADERS,
+    DNS_ERROR_KEY_PHRASES,
+)
 from src.logger import logger
 from src.observability.structured_logger import (
     setup_structured_logging,
@@ -159,40 +167,9 @@ MAX_REDIRECT_HOPS = getattr(settings, "MAX_REDIRECT_HOPS", 5)
 REDIRECT_TIMEOUT_PER_HOP = getattr(settings, "REDIRECT_TIMEOUT_PER_HOP", 10)
 
 
-# Constants
-ALLOWED_HEAD_STATUS = {200, 201, 202, 203, 204, 205, 206, 301, 302, 403, 405, 503, 504}
-# Realistic browser user agents - Chrome is primary, Firefox as fallback
-DEFAULT_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/131.0.0.0 Safari/537.36"
-)
-
-FIREFOX_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) " "Gecko/20100101 Firefox/122.0"
-)
-
-# Standard browser headers to appear as legitimate traffic
-BROWSER_HEADERS = {
-    "User-Agent": DEFAULT_USER_AGENT,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "DNT": "1",
-    "Connection": "keep-alive",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Cache-Control": "max-age=0",
-}
-DNS_ERROR_KEY_PHRASES = {
-    "Name or service not known",
-    "getaddrinfo failed",
-    "Failed to resolve",
-    "Max retries exceeded",
-}
+# Constants ALLOWED_HEAD_STATUS, DEFAULT_USER_AGENT, FIREFOX_USER_AGENT,
+# BROWSER_HEADERS and DNS_ERROR_KEY_PHRASES moved to src.config (shared
+# with src.detection.scanner) — re-exported here via the import above.
 
 # Enhanced abuse email patterns
 ABUSE_EMAIL_PATTERNS = [
@@ -651,7 +628,7 @@ class Engine:
             flask_app = api.app
 
             api_port = getattr(self.args, "api_port", None) or getattr(
-                settings, "ANISAKYS_API_PORT", 8080
+                settings, "ANISAKYS_API_PORT", 8091
             )
             logger.info("🚀 Starting API server with background reporting enabled...")
             api.run(
@@ -812,7 +789,7 @@ def parse_arguments() -> argparse.Namespace:
         epilog=(
             "Example usages:\n"
             "  ./anisakys.py --timeout 30 --log-level DEBUG\n"
-            "  ./anisakys.py --start-api --api-port 8080 --api-key your_secure_api_key\n"
+            "  ./anisakys.py --start-api --api-port 8091 --api-key your_secure_api_key\n"
             "  ./anisakys.py --multi-api-scan --url https://suspicious-site.com\n"
             "  ./anisakys.py --test-grinder-integration\n"
             "\n"
@@ -890,7 +867,7 @@ def parse_arguments() -> argparse.Namespace:
         help="Start the REST API server for external reports and multi-API scanning.",
     )
     parser.add_argument(
-        "--api-port", type=int, default=8080, help="Port for the API server (default: 8080)"
+        "--api-port", type=int, default=8091, help="Port for the API server (default: 8091)"
     )
     parser.add_argument(
         "--api-host", type=str, default="0.0.0.0", help="Host for the API server (default: 0.0.0.0)"

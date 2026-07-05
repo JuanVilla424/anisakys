@@ -111,16 +111,19 @@ class TestDatabaseManagerOperations:
 
         manager = DatabaseManager()
 
-        # Mock the engine connection to simulate database query
+        # Mock the engine connection to simulate database query.
+        # manager.engine is the SHARED global db_engine — patch.object restores
+        # it afterwards; a bare assignment would poison every later test.
         mock_conn = MagicMock()
         mock_conn.execute.return_value.fetchone.return_value = None
-        manager.engine.connect = MagicMock(
+        mock_connect = MagicMock(
             return_value=MagicMock(
                 __enter__=MagicMock(return_value=mock_conn), __exit__=MagicMock()
             )
         )
 
-        result = manager.get_registrar_abuse_emails("test-registrar")
+        with patch.object(manager.engine, "connect", mock_connect):
+            result = manager.get_registrar_abuse_emails("test-registrar")
         assert result is None
 
     def test_get_hosting_abuse_emails_returns_none_for_empty(self, manager):

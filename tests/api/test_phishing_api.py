@@ -122,47 +122,44 @@ class TestPhishingAPIAuthentication:
     def api_with_mocked_auth(self):
         """Create API with properly mocked auth decorator."""
 
-        def mock_require_api_key(f):
-            """Mock require_api_key that uses current_app."""
+        def mock_require_api_key(f=None, *, scope=None):
+            """Mock require_api_key supporting bare and factory (scope=...) usage."""
             from flask import current_app, request, jsonify
 
-            @wraps(f)
-            def decorated_function(*args, **kwargs):
-                auth_header = request.headers.get("Authorization", "")
+            def decorator(func):
+                @wraps(func)
+                def decorated_function(*args, **kwargs):
+                    auth_header = request.headers.get("Authorization", "")
 
-                if not auth_header.startswith("Bearer "):
-                    return jsonify({"error": "Authorization required"}), 401
+                    if not auth_header.startswith("Bearer "):
+                        return jsonify({"error": "Authorization required"}), 401
 
-                provided_key = auth_header[7:]
-                expected_key = current_app.api_key
+                    provided_key = auth_header[7:]
+                    expected_key = current_app.api_key
 
-                if not expected_key:
-                    return jsonify({"error": "API not configured"}), 500
+                    if not expected_key:
+                        return jsonify({"error": "API not configured"}), 500
 
-                if provided_key != expected_key:
-                    return jsonify({"error": "Invalid API key"}), 401
+                    if provided_key != expected_key:
+                        return jsonify({"error": "Invalid API key"}), 401
 
-                return f(*args, **kwargs)
+                    return func(*args, **kwargs)
 
-            return decorated_function
+                return decorated_function
+
+            return decorator(f) if f is not None else decorator
 
         with (
-            patch("src.intelligence.grinder.require_api_key", mock_require_api_key),
             patch("src.api.phishing_api.require_api_key", mock_require_api_key),
             patch("src.api.phishing_api.GrinderReportClient") as mock_grinder,
-            patch("src.api.phishing_api.MultiAPIValidator") as mock_validator,
+            patch("src.api.phishing_api.MultiAPIValidator"),
         ):
-
-            # Force reimport with patched decorator
-            import importlib
-            import src.api.phishing_api as api_module
-
-            importlib.reload(api_module)
+            from src.api.phishing_api import PhishingAPI
 
             mock_grinder.return_value.test_connection.return_value = {"status": "success"}
             mock_db = MagicMock(spec=DatabaseManager)
             mock_detector = MagicMock(spec=EnhancedAbuseEmailDetector)
-            api = api_module.PhishingAPI(mock_db, mock_detector, api_key="secret_key_123")
+            api = PhishingAPI(mock_db, mock_detector, api_key="secret_key_123")
             api.app.config["TESTING"] = True
             return api.app.test_client()
 
@@ -199,3 +196,130 @@ class TestPhishingAPIAuthentication:
         """Multi-scan endpoint should require authentication."""
         response = api_with_mocked_auth.post("/api/v1/multi-scan", json={"url": "http://test.com"})
         assert response.status_code == 401
+
+
+class TestGraphEndpoint:
+    """Tests for GET /api/v1/graph — builds nodes/edges from real sites."""
+
+    SAMPLE_ROWS = [
+        # domain, resolved_ip, registrar, threat, avg_conf, cloudflare, first, last, hits
+        (
+            "brand-alpha.example",
+            "203.0.113.10",
+            "Acme Registrar",
+            "critical",
+            92.0,
+            False,
+            "2026-01-01",
+            "2026-01-05",
+            3,
+        ),
+        (
+            "brand-alpha.example",
+            "203.0.113.10",
+            "Acme Registrar",
+            "high",
+            80.0,
+            False,
+            "2026-01-02",
+            "2026-01-06",
+            1,
+        ),
+        (
+            "acme-bank.example",
+            "190.2.3.4",
+            "Acme Registrar",
+            "medium",
+            70.0,
+            True,
+            "2026-01-03",
+            "2026-01-07",
+            2,
+        ),
+        ("solo.example", None, None, None, None, False, "2026-01-04", "2026-01-08", 1),
+    ]
+
+    @pytest.fixture
+    def graph_setup(self):
+        """API with a mocked DB engine; master-key auth (no DB auth needed)."""
+        with (
+            patch("src.api.phishing_api.GrinderReportClient"),
+            patch("src.api.phishing_api.MultiAPIValidator"),
+        ):
+            from src.api.phishing_api import PhishingAPI
+
+            mock_db = MagicMock()
+            mock_db.engine.begin.return_value.__enter__.return_value
+            api = PhishingAPI(
+                mock_db, MagicMock(spec=EnhancedAbuseEmailDetector), api_key="test_key"
+            )
+            api.app.config["TESTING"] = True
+            client = api.app.test_client()
+            return client, mock_db, {"Authorization": "Bearer test_key"}
+
+    @staticmethod
+    def _rows(mock_db, rows):
+        conn = mock_db.engine.begin.return_value.__enter__.return_value
+        conn.execute.return_value.fetchall.return_value = rows
+
+    def test_graph_builds_nodes_and_edges(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, self.SAMPLE_ROWS)
+
+        resp = client.get("/api/v1/graph", headers=headers)
+        assert resp.status_code == 200
+        data = json.loads(resp.data)
+
+        assert data["meta"]["domains"] == 3
+        assert data["meta"]["ips"] == 2
+        assert data["meta"]["registrars"] == 1
+        assert len(data["nodes"]) == 6
+        assert len(data["edges"]) == 4
+
+        ids = {n["id"] for n in data["nodes"]}
+        assert "domain:brand-alpha.example" in ids
+        assert "ip:203.0.113.10" in ids
+        assert "registrar:Acme Registrar" in ids
+
+    def test_graph_picks_severest_threat(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, self.SAMPLE_ROWS)
+
+        data = json.loads(client.get("/api/v1/graph", headers=headers).data)
+        node = next(n for n in data["nodes"] if n["id"] == "domain:brand-alpha.example")
+        assert node["severity"] == "critical"
+
+    def test_graph_dedupes_edges(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, self.SAMPLE_ROWS)
+
+        data = json.loads(client.get("/api/v1/graph", headers=headers).data)
+        same = [
+            e
+            for e in data["edges"]
+            if e["source"] == "domain:brand-alpha.example" and e["target"] == "ip:203.0.113.10"
+        ]
+        assert len(same) == 1
+
+    def test_graph_focus_one_hop(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, self.SAMPLE_ROWS)
+
+        data = json.loads(client.get("/api/v1/graph?focus=ip:203.0.113.10", headers=headers).data)
+        ids = {n["id"] for n in data["nodes"]}
+        assert ids == {"ip:203.0.113.10", "domain:brand-alpha.example"}
+        assert len(data["edges"]) == 1
+
+    def test_graph_empty_when_no_sites(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, [])
+
+        data = json.loads(client.get("/api/v1/graph", headers=headers).data)
+        assert data["nodes"] == []
+        assert data["edges"] == []
+        assert data["meta"]["domains"] == 0
+
+    def test_graph_requires_auth(self, graph_setup):
+        client, mock_db, _ = graph_setup
+        self._rows(mock_db, [])
+        assert client.get("/api/v1/graph").status_code == 401

@@ -29,7 +29,12 @@ class DatabaseManager:
 
     def __init__(self, db_url: str = None):
         self.db_url = db_url or DATABASE_URL
-        self.engine = db_engine
+        # Reuse the shared global engine for the default URL; honor an
+        # explicit different db_url instead of silently ignoring it.
+        if self.db_url == DATABASE_URL:
+            self.engine = db_engine
+        else:
+            self.engine = create_engine(self.db_url, poolclass=NullPool, echo=False)
 
     def init_db(self):
         """Initialize scan results table."""

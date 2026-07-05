@@ -18,27 +18,27 @@ spec.loader.exec_module(main)
 upgrade_phishing_db = main.upgrade_phishing_db
 DatabaseManager = main.DatabaseManager
 
+# upgrade_phishing_db() lives in src.api.phishing_api and reads the db_engine
+# global of THAT module — monkeypatch there, not on main.
+import src.api.phishing_api as phishing_api_module
+
 
 class TestDatabaseUpgrade:
     """Test database upgrade functionality"""
 
     @pytest.fixture
-    def test_db_engine(self):
-        """Create a test database engine"""
-        # Use SQLite for testing
-        engine = create_engine("sqlite:///:memory:")
-        return engine
-
-    @pytest.fixture
-    def test_db_with_old_schema(self, test_db_engine):
-        """Create a test database with old schema (missing columns)"""
-        with test_db_engine.begin() as conn:
-            # Create table with minimal columns (old schema)
+    def pg_old_schema_engine(self):
+        """Recreate phishing_sites with the legacy minimal schema on the test
+        PostgreSQL database (upgrade_phishing_db needs information_schema),
+        then restore the full modern table for the rest of the suite."""
+        engine = create_engine(main.DATABASE_URL)
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS phishing_sites CASCADE"))
             conn.execute(
                 text(
                     """
                 CREATE TABLE phishing_sites (
-                    id INTEGER PRIMARY KEY,
+                    id SERIAL PRIMARY KEY,
                     url TEXT UNIQUE,
                     manual_flag INTEGER DEFAULT 0,
                     first_seen TIMESTAMP,
@@ -47,42 +47,29 @@ class TestDatabaseUpgrade:
             """
                 )
             )
-        return test_db_engine
+        yield engine
+        with engine.begin() as conn:
+            conn.execute(text("DROP TABLE IF EXISTS phishing_sites CASCADE"))
+        engine.dispose()
+        DatabaseManager(db_url=main.DATABASE_URL).init_phishing_db()
 
-    @pytest.fixture
-    def test_db_with_wrong_type(self, test_db_engine):
-        """Create a test database with wrong column type"""
-        with test_db_engine.begin() as conn:
-            # Create table with wrong type for api_confidence_score
-            conn.execute(
-                text(
-                    """
-                CREATE TABLE phishing_sites (
-                    id INTEGER PRIMARY KEY,
-                    url TEXT UNIQUE,
-                    manual_flag INTEGER DEFAULT 0,
-                    first_seen TIMESTAMP,
-                    last_seen TIMESTAMP,
-                    api_confidence_score NUMERIC(5,4)
-                )
-            """
-                )
-            )
-        return test_db_engine
-
-    def test_upgrade_adds_missing_columns(self, test_db_with_old_schema, monkeypatch):
+    def test_upgrade_adds_missing_columns(self, pg_old_schema_engine, monkeypatch):
         """Test that upgrade adds all missing columns"""
-        # Monkeypatch the db_engine to use our test engine
-        monkeypatch.setattr(main, "db_engine", test_db_with_old_schema)
+        # Monkeypatch the db_engine of the module that owns the function
+        monkeypatch.setattr(phishing_api_module, "db_engine", pg_old_schema_engine)
 
         # Run upgrade
         upgrade_phishing_db()
 
         # Check columns exist
-        with test_db_with_old_schema.begin() as conn:
-            # For SQLite, use pragma
-            result = conn.execute(text("PRAGMA table_info(phishing_sites)"))
-            columns = {row[1] for row in result}
+        with pg_old_schema_engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    "SELECT column_name FROM information_schema.columns "
+                    "WHERE table_name = 'phishing_sites'"
+                )
+            )
+            columns = {row[0] for row in result}
 
         # Verify all expected columns exist
         expected_columns = {
@@ -114,26 +101,12 @@ class TestDatabaseUpgrade:
         missing_columns = expected_columns - columns
         assert len(missing_columns) == 0, f"Missing columns: {missing_columns}"
 
-    def test_upgrade_handles_existing_columns(self, test_db_engine, monkeypatch, caplog):
+    def test_upgrade_handles_existing_columns(self, pg_old_schema_engine, monkeypatch, caplog):
         """Test that upgrade gracefully handles existing columns"""
-        # Create table with all columns
-        with test_db_engine.begin() as conn:
-            conn.execute(
-                text(
-                    """
-                CREATE TABLE phishing_sites (
-                    id INTEGER PRIMARY KEY,
-                    url TEXT UNIQUE,
-                    virustotal_result TEXT,
-                    api_confidence_score INTEGER
-                )
-            """
-                )
-            )
+        monkeypatch.setattr(phishing_api_module, "db_engine", pg_old_schema_engine)
 
-        monkeypatch.setattr(main, "db_engine", test_db_engine)
-
-        # Run upgrade - should not fail
+        # First run adds every missing column; second run must skip them all
+        upgrade_phishing_db()
         upgrade_phishing_db()
 
         # Check that it logged existing columns
@@ -160,6 +133,9 @@ class TestDatabaseUpgrade:
                         return MockResult()
                 return None
 
+            def commit(self):
+                pass
+
             def __enter__(self):
                 return self
 
@@ -167,10 +143,13 @@ class TestDatabaseUpgrade:
                 pass
 
         class MockEngine:
+            def connect(self):
+                return MockConn()
+
             def begin(self):
                 return MockConn()
 
-        monkeypatch.setattr(main, "db_engine", MockEngine())
+        monkeypatch.setattr(phishing_api_module, "db_engine", MockEngine())
 
         # Run upgrade - should attempt to fix column type
         upgrade_phishing_db()

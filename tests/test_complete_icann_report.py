@@ -46,7 +46,7 @@ def test_complete_icann_report_with_screenshot():
         domains=None,
         allowed_sites=None,
         start_api=False,
-        api_port=8080,
+        api_port=8091,
         api_key=None,
         force_auto_analysis=False,
         auto_report_now=False,

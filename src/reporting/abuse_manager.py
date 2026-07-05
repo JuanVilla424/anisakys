@@ -600,8 +600,12 @@ class AbuseReportManager:
                                 with open(attachment_path, "rb") as f:
                                     file_data = f.read()
 
-                                # Check file size (limit to 25MB per file)
-                                max_size_mb = getattr(settings, "MAX_ATTACHMENT_SIZE_MB", 25)
+                                # Check file size (limit to 25MB per file).
+                                # settings declares the field as Optional=None, so
+                                # getattr always finds it — fall back with `or`.
+                                max_size_mb = (
+                                    getattr(settings, "MAX_ATTACHMENT_SIZE_MB", None) or 25
+                                )
                                 max_size = max_size_mb * 1024 * 1024
                                 if len(file_data) > max_size:
                                     logger.warning(
@@ -628,7 +632,7 @@ class AbuseReportManager:
 
                 # Check total email size
                 total_size = len(msg.as_string())
-                max_email_size_mb = getattr(settings, "MAX_EMAIL_SIZE_MB", 50)
+                max_email_size_mb = getattr(settings, "MAX_EMAIL_SIZE_MB", None) or 50
                 max_email_size = max_email_size_mb * 1024 * 1024
                 if total_size > max_email_size:
                     logger.error(

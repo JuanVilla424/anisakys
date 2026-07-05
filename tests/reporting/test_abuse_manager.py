@@ -61,6 +61,7 @@ def mock_settings(monkeypatch):
     cfg.DEFAULT_CC_EMAILS_ESCALATION_LEVEL3 = None
     cfg.MAX_ATTACHMENT_SIZE_MB = 25
     cfg.MAX_EMAIL_SIZE_MB = 50
+    cfg.SMTP_RATE_LIMIT_PER_HOUR = 100
     cfg.SCREENSHOTS_DIR = "/tmp/screenshots"
     cfg.DATABASE_URL = "postgresql://user:pass@localhost/testdb"
     monkeypatch.setattr(abuse_manager_module, "settings", cfg)

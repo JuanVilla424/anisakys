@@ -23,6 +23,9 @@ from src.dns.network_utils import get_ip_info
 from src.logger import logger
 from src.shutdown import shutdown_requested
 
+# Offset file path used by get_offset/save_offset (same source as src.main)
+OFFSET_FILE = getattr(settings, "OFFSET_FILE")
+
 
 class TakedownMonitor:
     """Enhanced takedown monitor with better status detection."""

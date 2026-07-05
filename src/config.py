@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     DEFAULT_ATTACHMENT: Optional[str] = None
     LOG_LEVEL: Optional[str] = None
     ANISAKYS_API_KEY: Optional[str] = None
-    ANISAKYS_API_PORT: Optional[int] = 8080
+    ANISAKYS_API_PORT: Optional[int] = 8091
     TEST_EMAIL: Optional[str] = None
     SERPAPI_KEY: Optional[str] = None
     S3_DATA_BUCKET: Optional[str] = None
@@ -90,3 +90,39 @@ CLOUDFLARE_IP_RANGES = [
     ipaddress.ip_network("172.64.0.0/13"),
     ipaddress.ip_network("131.0.72.0/22"),
 ]
+
+# Shared HTTP scanning constants (used by src.main and src.detection.scanner)
+ALLOWED_HEAD_STATUS = {200, 201, 202, 203, 204, 205, 206, 301, 302, 403, 405, 503, 504}
+
+# Realistic browser user agents - Chrome is primary, Firefox as fallback
+DEFAULT_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/131.0.0.0 Safari/537.36"
+)
+
+FIREFOX_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) " "Gecko/20100101 Firefox/122.0"
+)
+
+# Standard browser headers to appear as legitimate traffic
+BROWSER_HEADERS = {
+    "User-Agent": DEFAULT_USER_AGENT,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    "DNT": "1",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Cache-Control": "max-age=0",
+}
+DNS_ERROR_KEY_PHRASES = {
+    "Name or service not known",
+    "getaddrinfo failed",
+    "Failed to resolve",
+    "Max retries exceeded",
+}

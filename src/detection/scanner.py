@@ -15,7 +15,13 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from src.config import settings, CLOUDFLARE_IP_RANGES
+from src.config import (
+    settings,
+    CLOUDFLARE_IP_RANGES,
+    ALLOWED_HEAD_STATUS,
+    BROWSER_HEADERS,
+    DNS_ERROR_KEY_PHRASES,
+)
 from src.data import ASN_ABUSE_EMAIL_DB, PROVIDER_ABUSE_EMAIL_DB
 from src.database import DatabaseManager, DATABASE_URL
 from src.detection.redirect_analyzer import RedirectAnalyzer

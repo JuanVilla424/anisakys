@@ -406,7 +406,9 @@ class TestICannComplianceIntegration:
         engine = main.Engine(mock_engine_args)
 
         # Create AbuseReportManager instance (since send_abuse_report is in that class)
-        report_manager = main.AbuseReportManager(engine.abuse_detector, engine.cc_emails)
+        report_manager = main.AbuseReportManager(
+            engine.db_manager, engine.abuse_detector, engine.cc_emails, engine.timeout
+        )
 
         # Mock the ICANN services on the report manager
         with patch.object(

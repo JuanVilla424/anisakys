@@ -1,7 +1,7 @@
 #!/bin/sh
 # Entrypoint del backend Anisakys (montado por docker-compose).
 # 1. retry alembic upgrade head (espera a que postgres acepte conexiones)
-# 2. arranca la API Flask en :8080 con la master key del entorno
+# 2. arranca la API Flask en :8091 con la master key del entorno
 set -e
 cd /app
 
@@ -19,5 +19,5 @@ for i in $(seq 1 30); do
   fi
 done
 
-echo "[entrypoint] starting Anisakys API on :8080"
-exec python anisakys.py --start-api --api-port 8080 --api-key "$ANISAKYS_API_KEY"
+echo "[entrypoint] starting Anisakys API on :8091"
+exec python anisakys.py --start-api --api-port 8091 --api-key "$ANISAKYS_API_KEY"

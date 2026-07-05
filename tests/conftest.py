@@ -10,6 +10,11 @@ from contextlib import contextmanager
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+# Preload detection.analyzer first to resolve a src.intelligence <-> src.detection
+# import cycle that otherwise breaks test collection. Safe at runtime (the app
+# boots via src.main which imports these in a working order).
+import src.detection.analyzer  # noqa: F401,E402
+
 
 @pytest.fixture(scope="session")
 def main_module():
