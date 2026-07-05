@@ -36,6 +36,7 @@ from src.intelligence import (
     GRINDER_INTEGRATION_ENABLED,
 )
 from src.logger import logger
+from src.dns.network_utils import assess_url_target
 from src.screenshot_service import ScreenshotService, PLAYWRIGHT_AVAILABLE, SELENIUM_AVAILABLE
 from src.monitoring.gsb_rescan import get_gsb_rescan_job, start_gsb_rescan_job
 
@@ -262,7 +263,9 @@ class PhishingAPI:
                     return jsonify({"error": "No JSON data provided"}), 400
 
                 url = data.get("url")
-                include_screenshot = data.get("include_screenshot", True)
+                # Accept the canonical `include_screenshot`; keep `screenshot`
+                # as a legacy alias so older clients keep working.
+                include_screenshot = data.get("include_screenshot", data.get("screenshot", True))
 
                 if not url:
                     return jsonify({"error": "URL is required"}), 400
@@ -270,6 +273,17 @@ class PhishingAPI:
                 # Validate URL
                 if not validators.url(url):
                     return jsonify({"error": "Invalid URL format"}), 400
+
+                # SSRF guard: never let an attacker-supplied URL point us at an
+                # internal address. Refuse private targets outright; screenshots
+                # (a direct render) run only when the host is provably public.
+                target_class = assess_url_target(url)
+                if target_class == "blocked":
+                    logger.warning(f"🛑 Refusing multi-scan of non-public target: {url}")
+                    return (
+                        jsonify({"error": "URL resolves to a non-public address"}),
+                        403,
+                    )
 
                 # Perform comprehensive scan with ALL APIs (URL analysis, VirusTotal, URLVoid, PhishTank, Google Safe Browsing)
                 scan_result = self.multi_api_validator.comprehensive_scan(url)
@@ -288,9 +302,11 @@ class PhishingAPI:
                     logger.warning(f"⚠️ Abuse email resolution failed: {ae_err}")
                     scan_result["all_abuse_emails"] = None
 
-                # Capture screenshot if requested and service available
+                # Capture screenshot if requested and service available.
+                # The headless browser is a direct render of the page, so it
+                # only ever navigates to a provably-public host.
                 screenshot_data = None
-                if include_screenshot and screenshot_service:
+                if include_screenshot and screenshot_service and target_class == "public":
                     try:
                         logger.info(f"📸 Capturing screenshot for {url}")
                         screenshot_result = screenshot_service.capture_screenshot(
@@ -895,7 +911,7 @@ class PhishingAPI:
         # ── PATCH /api/v1/reports/<report_id> ─────────────────────────────────
         @self.app.route("/api/v1/reports/<report_id>", methods=["PATCH"])
         @self.limiter.limit("30 per minute")
-        @require_api_key(scope="read")
+        @require_api_key(scope="report")
         def update_report(report_id: str):
             """Update abuse report status."""
             try:
