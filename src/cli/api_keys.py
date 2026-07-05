@@ -19,7 +19,7 @@ from sqlalchemy import create_engine, text
 
 from src.config import settings
 
-VALID_SCOPES = {"read", "scan", "report", "admin"}
+VALID_SCOPES = {"read", "scan", "report", "write", "admin"}
 KEY_PREFIX = "ank_"
 
 

@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     LOG_LEVEL: Optional[str] = None
     ANISAKYS_API_KEY: Optional[str] = None
     ANISAKYS_API_PORT: Optional[int] = 8091
+    RATELIMIT_STORAGE_URL: Optional[str] = None
     TEST_EMAIL: Optional[str] = None
     SERPAPI_KEY: Optional[str] = None
     S3_DATA_BUCKET: Optional[str] = None

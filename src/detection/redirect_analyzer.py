@@ -18,6 +18,8 @@ from urllib.parse import urlparse
 
 import requests
 
+from src.dns.network_utils import assess_url_target
+
 # Suspicious TLDs commonly used in phishing
 SUSPICIOUS_TLDS = {
     ".ru",
@@ -84,6 +86,7 @@ class RedirectChain:
     total_time_ms: float
     chain_urls: List[str]
     status_codes: List[int]
+    has_blocked_hop: bool = False
 
 
 class RedirectAnalyzer:
@@ -137,6 +140,7 @@ class RedirectAnalyzer:
         seen_urls: Set[str] = set()
         current_url = url
         has_loop = False
+        has_blocked_hop = False
 
         # Default headers to simulate browser behavior
         if headers is None:
@@ -161,6 +165,16 @@ class RedirectAnalyzer:
                 break
 
             seen_urls.add(current_url)
+
+            # SSRF guard: refuse to fetch this hop (original URL or any
+            # redirect target) if it resolves to a non-public address —
+            # break BEFORE the request, never after.
+            if assess_url_target(current_url) in ("blocked", "invalid"):
+                has_blocked_hop = True
+                self.logger.warning(
+                    f"🛑 SSRF: redirect chain reached non-public {current_url}; truncating"
+                )
+                break
 
             try:
                 hop_start = time.time()
@@ -235,6 +249,7 @@ class RedirectAnalyzer:
             total_time_ms=total_time,
             chain_urls=[h.url for h in hops],
             status_codes=[h.status_code for h in hops],
+            has_blocked_hop=has_blocked_hop,
         )
 
         # Calculate risk score

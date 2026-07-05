@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse
 
+import requests
+
+from src.dns.network_utils import assess_url_target, safe_get_with_redirects, SSRFRedirectError
+
 try:
     from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 
@@ -65,6 +69,28 @@ class ScreenshotService:
                 "Neither Playwright nor Selenium available. Screenshot functionality disabled."
             )
 
+    def _navigation_blocked_reason(self, url: str) -> Optional[str]:
+        """Return a reason string if `url` (or a redirect hop) is an
+        SSRF-unsafe target the browser must not render; None if safe.
+
+        Some callers (e.g. the abuse-report flow) invoke screenshot capture
+        directly on an attacker-supplied URL with no guard of their own, so
+        this check has to live at the sink, not just at the API layer.
+        """
+        verdict = assess_url_target(url)
+        if verdict in ("blocked", "invalid"):
+            return verdict
+        if verdict == "unresolved":
+            return None  # nothing to reach; let the browser fail naturally
+        try:  # verdict == "public" — walk redirects to catch redirect->internal
+            resp = safe_get_with_redirects(url, timeout=self.timeout, max_hops=5, stream=True)
+            resp.close()
+        except SSRFRedirectError as exc:
+            return f"redirect->{exc.verdict}"
+        except requests.RequestException:
+            pass  # unreachable public host — browser will try & fail; not SSRF
+        return None
+
     async def capture_screenshot_async(
         self, url: str, filename: str = None
     ) -> Optional[Dict[str, Any]]:
@@ -88,6 +114,15 @@ class ScreenshotService:
             filename = f"phishing_{domain}_{timestamp}.png"
 
         screenshot_path = self.screenshots_dir / filename
+
+        blocked_reason = self._navigation_blocked_reason(url)
+        if blocked_reason:
+            logger.warning(f"🛑 SSRF guard refused screenshot of {url} ({blocked_reason})")
+            return {
+                "success": False,
+                "error": f"ssrf_blocked:{blocked_reason}",
+                "engine": "playwright",
+            }
 
         tmp_profile = tempfile.mkdtemp(prefix="anisakys_pw_")
         try:
@@ -146,6 +181,28 @@ class ScreenshotService:
                 )
 
                 page = await context.new_page()
+
+                # Defense-in-depth: refuse subresources (img/script/xhr/etc.)
+                # that point at a non-public host — the preflight above only
+                # validated the top-level navigation. Cache verdicts per
+                # hostname so repeated same-domain subresources don't each
+                # trigger a fresh DNS lookup.
+                route_cache: Dict[str, str] = {}
+
+                async def _guard_route(route):
+                    req_url = route.request.url
+                    parsed = urlparse(req_url)
+                    if parsed.scheme in ("http", "https") and parsed.hostname:
+                        verdict = route_cache.get(parsed.hostname)
+                        if verdict is None:
+                            verdict = assess_url_target(req_url)
+                            route_cache[parsed.hostname] = verdict
+                        if verdict == "blocked":
+                            await route.abort()
+                            return
+                    await route.continue_()
+
+                await page.route("**/*", _guard_route)
 
                 # Set longer timeout for phishing sites that might be slow
                 page.set_default_timeout(self.timeout * 1000)
@@ -222,6 +279,15 @@ class ScreenshotService:
             filename = f"phishing_{domain}_{timestamp}.png"
 
         screenshot_path = self.screenshots_dir / filename
+
+        blocked_reason = self._navigation_blocked_reason(url)
+        if blocked_reason:
+            logger.warning(f"🛑 SSRF guard refused screenshot of {url} ({blocked_reason})")
+            return {
+                "success": False,
+                "error": f"ssrf_blocked:{blocked_reason}",
+                "engine": "selenium",
+            }
 
         tmp_profile = tempfile.mkdtemp(prefix="anisakys_sel_")
         # Configure Chrome options for headless operation with anti-detection measures

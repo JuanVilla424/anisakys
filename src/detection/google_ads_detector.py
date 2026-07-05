@@ -21,6 +21,12 @@ from urllib.parse import quote, parse_qs
 import os
 
 from src.config import settings
+from src.dns.network_utils import (
+    assess_url_target,
+    safe_get_with_redirects,
+    SSRFRedirectError,
+    REDIRECT_STATUS_CODES,
+)
 from src.logger import logger
 
 
@@ -272,24 +278,40 @@ class GoogleAdsPhishingDetector:
         return False
 
     def _follow_redirects(self, url: str, max_redirects: int = 10) -> Dict:
-        """Follow URL redirects and return the chain"""
+        """Follow URL redirects and return the chain.
+
+        Walks hops manually (rather than requests' own allow_redirects=True)
+        so each hop can be checked against the SSRF guard BEFORE it's fetched
+        — letting requests follow redirects itself would silently reach an
+        internal address before we ever got a chance to refuse it.
+        """
         redirect_chain = []
         final_url = url
+        current_url = url
 
         try:
             session = requests.Session()
-            session.max_redirects = max_redirects
             session.headers.update(
                 {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
             )
 
-            response = session.get(url, allow_redirects=True, timeout=self.timeout)
+            for _ in range(max_redirects):
+                if assess_url_target(current_url) in ("blocked", "invalid"):
+                    logger.warning(f"🛑 SSRF: refusing redirect to {current_url}")
+                    break
 
-            for hist in response.history:
-                redirect_chain.append({"url": hist.url, "status_code": hist.status_code})
+                response = session.get(current_url, allow_redirects=False, timeout=self.timeout)
+                redirect_chain.append({"url": current_url, "status_code": response.status_code})
+                final_url = current_url
 
-            final_url = response.url
-            redirect_chain.append({"url": final_url, "status_code": response.status_code})
+                if response.status_code not in REDIRECT_STATUS_CODES:
+                    break
+
+                location = response.headers.get("Location")
+                if not location:
+                    break
+
+                current_url = urllib.parse.urljoin(current_url, location)
 
         except Exception as e:
             logger.error(f"Error following redirects: {e}")
@@ -406,13 +428,18 @@ class GoogleAdsPhishingDetector:
     def _analyze_landing_page(self, url: str) -> Optional[Dict]:
         """Analyze landing page for phishing indicators"""
         try:
-            response = requests.get(
-                url,
-                timeout=self.timeout,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-                },
-            )
+            try:
+                response = safe_get_with_redirects(
+                    url,
+                    timeout=self.timeout,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+                    },
+                    max_hops=5,
+                )
+            except SSRFRedirectError as exc:
+                logger.warning(f"🛑 SSRF: skipping landing-page analysis of {exc.blocked_url}")
+                return None
 
             soup = BeautifulSoup(response.text, "html.parser")
             analysis = {

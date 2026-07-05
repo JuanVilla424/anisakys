@@ -10,8 +10,9 @@ import logging
 import socket
 import ipaddress
 from typing import Tuple, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
+import requests
 from ipwhois import IPWhois
 
 from src.config import CLOUDFLARE_IP_RANGES
@@ -86,6 +87,63 @@ def assess_url_target(url: str) -> str:
         logger.warning(f"🛑 SSRF guard blocked {host} — resolves to non-public address")
         return "blocked"
     return "public"
+
+
+# HTTP redirect status codes that carry a Location header to follow.
+REDIRECT_STATUS_CODES = frozenset({301, 302, 303, 307, 308})
+
+
+class SSRFRedirectError(Exception):
+    """A URL or one of its redirect hops resolved to a non-public/invalid
+    target; the fetch was refused before any request to it was issued."""
+
+    def __init__(self, url: str, verdict: str):
+        self.blocked_url = url
+        self.verdict = verdict
+        super().__init__(f"SSRF guard refused {url} (verdict={verdict})")
+
+
+def safe_get_with_redirects(
+    url: str,
+    *,
+    headers: Optional[dict] = None,
+    timeout: int = 10,
+    max_hops: int = 5,
+    session: Optional[requests.Session] = None,
+    verify: bool = True,
+    stream: bool = False,
+) -> requests.Response:
+    """GET `url`, following up to `max_hops` redirects manually, validating the
+    initial URL and every redirect target with assess_url_target BEFORE issuing
+    each request — a plain `allow_redirects=True` call lets requests silently
+    follow a redirect into a private network before any guard can see it.
+
+    Raises SSRFRedirectError on the first blocked/invalid hop (nothing is ever
+    fetched at that hop); raises requests.TooManyRedirects past max_hops;
+    propagates ordinary requests exceptions otherwise. Returns the final
+    non-redirect Response.
+    """
+    getter = (session or requests).get
+    current = url
+    for _ in range(max_hops):
+        verdict = assess_url_target(current)
+        if verdict in ("blocked", "invalid"):
+            raise SSRFRedirectError(current, verdict)
+        resp = getter(
+            current,
+            headers=headers,
+            allow_redirects=False,
+            timeout=timeout,
+            verify=verify,
+            stream=stream,
+        )
+        if resp.status_code not in REDIRECT_STATUS_CODES:
+            return resp
+        loc = resp.headers.get("Location")
+        if not loc:
+            return resp
+        current = urljoin(current, loc)
+    raise requests.TooManyRedirects(f"Exceeded {max_hops} redirects from {url}")
 
 
 def get_ip_info(domain: str) -> Tuple[Optional[str], Optional[str]]:

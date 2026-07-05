@@ -7,6 +7,7 @@ and Grinder integration.
 
 import base64
 import datetime
+import hmac
 import json
 import re
 import socket
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import validators
-from flask import Flask, jsonify, request
+from flask import Flask, current_app, jsonify, request
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import logging as flask_logging
@@ -26,7 +27,7 @@ import logging as flask_logging
 from src.config import settings
 from sqlalchemy import text
 from src.database import db_engine, DATABASE_URL
-from src.auth import require_api_key
+from src.auth import require_api_key, _hash_key
 from src.intelligence import (
     MultiAPIValidator,
     VIRUSTOTAL_API_KEY,
@@ -96,6 +97,34 @@ def timeout(seconds=10):
     return decorator
 
 
+def rate_limit_key() -> str:
+    """Rate-limit bucket key for flask-limiter.
+
+    Runs BEFORE require_api_key (the limiter decorator wraps the auth
+    decorator, so it fires first on every request) — it must parse the
+    Authorization header itself and cannot assume auth has run yet.
+
+    Master key -> one shared operator bucket; any other Bearer token ->
+    bucketed by its own hash (so one leaked/rotated key can't dilute its
+    limit across IPs); no Bearer header -> caller IP, preserving today's
+    behavior for exempt/unauthenticated routes (health, metrics).
+
+    Bucketing an invalid token by its own hash is an accepted, low-severity
+    tradeoff: require_api_key() still 401s it immediately afterwards, so
+    rotating garbage tokens never unlocks any real backend work — it only
+    means the cheap 401-rejection path isn't globally IP-throttled for
+    spoofed tokens.
+    """
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+        master_key = getattr(current_app, "api_key", None)
+        if master_key and hmac.compare_digest(token.encode(), master_key.encode()):
+            return "apikey:master"
+        return f"apikey:{_hash_key(token)}"
+    return get_remote_address()
+
+
 class PhishingAPI:
     """REST API for external phishing reports with multi-API integration and Grinder integration."""
 
@@ -136,11 +165,16 @@ class PhishingAPI:
         # Configure Flask logging to be less verbose
         flask_logging.getLogger("werkzeug").setLevel(flask_logging.WARNING)
 
-        # Rate limiting
+        # Rate limiting — bucketed by API key (falls back to IP when no
+        # Bearer header is present). Storage defaults to the in-memory
+        # backend (today's behavior, single-process only); set
+        # RATELIMIT_STORAGE_URL to a redis:// URI for multi-worker deployments
+        # where counters must be shared across processes.
         self.limiter = Limiter(
             app=self.app,
-            key_func=get_remote_address,
+            key_func=rate_limit_key,
             default_limits=["200 per day", "50 per hour", "10 per minute"],
+            storage_uri=(getattr(settings, "RATELIMIT_STORAGE_URL", None) or "memory://"),
         )
 
         self.setup_routes()
@@ -252,7 +286,11 @@ class PhishingAPI:
                 return jsonify({"error": "Internal server error"}), 500
 
         @self.app.route("/api/v1/multi-scan", methods=["POST"])
+        # Key-based bucketing (see rate_limit_key) means one leaked/shared key
+        # can no longer dilute its limit across IPs — cap the heaviest route
+        # (multi-API validation + headless render + DB writes) per day too.
         @self.limiter.limit("3 per minute")
+        @self.limiter.limit("100 per day")
         @require_api_key(scope="scan")
         def multi_api_scan():
             """Perform multi-API validation scan with authentication."""

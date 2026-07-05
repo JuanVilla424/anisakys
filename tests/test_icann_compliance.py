@@ -39,8 +39,15 @@ class TestScreenshotService:
 
     @patch("src.screenshot_service.SELENIUM_AVAILABLE", True)
     @patch("src.screenshot_service.webdriver.Chrome")
-    def test_screenshot_capture_sync_success(self, mock_chrome):
-        """Test successful screenshot capture with Selenium"""
+    @patch("src.screenshot_service.assess_url_target", return_value="unresolved")
+    def test_screenshot_capture_sync_success(self, mock_assess, mock_chrome):
+        """Test successful screenshot capture with Selenium.
+
+        assess_url_target is patched to "unresolved" — phishing-test.com is a
+        real, resolvable public host, and without this patch the new SSRF
+        guard would make a real network preflight call in what is meant to
+        be a fully offline unit test (everything else here is mocked).
+        """
         # Mock webdriver
         mock_driver = MagicMock()
         mock_driver.title = "Test Phishing Site"
@@ -69,8 +76,13 @@ class TestScreenshotService:
 
     @patch("src.screenshot_service.SELENIUM_AVAILABLE", True)
     @patch("src.screenshot_service.webdriver.Chrome")
-    def test_screenshot_capture_timeout(self, mock_chrome):
-        """Test screenshot capture timeout handling"""
+    @patch("src.screenshot_service.assess_url_target", return_value="unresolved")
+    def test_screenshot_capture_timeout(self, mock_assess, mock_chrome):
+        """Test screenshot capture timeout handling.
+
+        assess_url_target is patched for determinism — don't rely on
+        timeout-test.com staying unresolved forever.
+        """
         from selenium.common.exceptions import TimeoutException
 
         mock_driver = MagicMock()

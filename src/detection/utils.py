@@ -15,6 +15,7 @@ from sqlalchemy import create_engine, text
 
 from src.config import settings
 from src.database import DATABASE_URL, db_engine
+from src.dns.network_utils import safe_get_with_redirects, SSRFRedirectError
 from src.logger import logger
 
 # Default User-Agent for HTTP requests
@@ -153,7 +154,7 @@ class PhishingUtils:
             new_takedown = current_takedown if current_status == "down" else timestamp
         else:
             try:
-                response = requests.get(
+                response = safe_get_with_redirects(
                     url,
                     timeout=timeout,
                     headers={
@@ -176,6 +177,10 @@ class PhishingUtils:
                 else:
                     new_status = "down"
                     new_takedown = current_takedown if current_status == "down" else timestamp
+            except SSRFRedirectError as e:
+                logger.warning(f"🛑 SSRF: {e.blocked_url} is non-public; marking site down")
+                new_status = "down"
+                new_takedown = current_takedown if current_status == "down" else timestamp
             except Exception as e:
                 logger.error(f"❌ GET request failed for {url}: {e}")
                 new_status = "down"

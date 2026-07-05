@@ -36,7 +36,7 @@ from src.observability.metrics import METRIC_AUTH_TOTAL, increment_counter
 
 logger = logging.getLogger(__name__)
 
-VALID_SCOPES = frozenset({"read", "scan", "report", "admin"})
+VALID_SCOPES = frozenset({"read", "scan", "report", "write", "admin"})
 
 # Throttle last_used_at updates: only write to DB if >60s since last update per key
 _last_used_cache: dict = {}

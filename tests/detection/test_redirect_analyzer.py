@@ -370,6 +370,73 @@ class TestRiskScoring(unittest.TestCase):
         self.assertGreaterEqual(score, 90)
 
 
+class TestSSRFGuard(unittest.TestCase):
+    """Test the SSRF guard: analyze() must refuse to fetch any hop —
+    original URL or redirect target — that resolves non-public."""
+
+    @patch("src.detection.redirect_analyzer.requests.get")
+    @patch("src.detection.redirect_analyzer.assess_url_target", return_value="blocked")
+    def test_blocked_initial_url_truncates_without_any_request(self, mock_assess, mock_get):
+        analyzer = RedirectAnalyzer(max_hops=5)
+        chain = analyzer.analyze("https://public-looking.example/")
+
+        self.assertTrue(chain.has_blocked_hop)
+        self.assertEqual(chain.hop_count, 0)
+        mock_get.assert_not_called()
+
+    @patch("src.detection.redirect_analyzer.requests.get")
+    @patch(
+        "src.detection.redirect_analyzer.assess_url_target",
+        side_effect=["public", "blocked"],
+    )
+    def test_mid_chain_block_stops_before_fetching_blocked_hop(self, mock_assess, mock_get):
+        mock_redirect = Mock()
+        mock_redirect.status_code = 302
+        mock_redirect.headers = {"Location": "http://169.254.169.254/latest/meta-data/"}
+        mock_get.return_value = mock_redirect
+
+        analyzer = RedirectAnalyzer(max_hops=5)
+        chain = analyzer.analyze("https://public-looking.example/click")
+
+        self.assertTrue(chain.has_blocked_hop)
+        mock_get.assert_called_once()  # the blocked hop itself was never fetched
+        self.assertEqual(chain.hop_count, 1)
+        self.assertEqual(chain.hops[0].url, "https://public-looking.example/click")
+        # final_url reflects where the chain was truncated (observability),
+        # not the last URL actually fetched.
+        self.assertEqual(chain.final_url, "http://169.254.169.254/latest/meta-data/")
+
+    @patch("src.detection.redirect_analyzer.requests.get")
+    @patch("src.detection.redirect_analyzer.assess_url_target", return_value="public")
+    def test_public_chain_leaves_has_blocked_hop_false(self, mock_assess, mock_get):
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.headers = {"Content-Type": "text/html"}
+        mock_get.return_value = mock_response
+
+        analyzer = RedirectAnalyzer(max_hops=5)
+        chain = analyzer.analyze("https://example.com")
+
+        self.assertFalse(chain.has_blocked_hop)
+
+    def test_risk_score_ignores_has_blocked_hop_on_bare_mock(self):
+        """A bare Mock() auto-vivifies unset attrs as truthy — confirm
+        _calculate_risk_score never reads has_blocked_hop, or every
+        TestRiskScoring assertion above would silently inflate."""
+        analyzer = RedirectAnalyzer()
+        chain = Mock()
+        chain.hop_count = 1
+        chain.has_cloudflare = False
+        chain.has_suspicious_tld = False
+        chain.has_url_shortener = False
+        chain.has_cross_domain = False
+        chain.has_loop = False
+        # has_blocked_hop deliberately left unset on this bare Mock.
+
+        score = analyzer._calculate_risk_score(chain)
+        self.assertEqual(score, 10)  # would be 40 if has_blocked_hop were scored
+
+
 class TestTimeoutHandling(unittest.TestCase):
     """Test timeout handling."""
 
