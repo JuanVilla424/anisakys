@@ -388,3 +388,91 @@ class TestCTMonitorThreadRoute:
 
         assert resp.status_code == 400
         assert "no on-demand search trigger" in json.loads(resp.data)["error"]
+
+
+class TestThreadUpdateRoutes404:
+    """PATCH /threads/<id>, /threads/<id>/results/<rid>, and .../discard must
+    404 on a nonexistent id instead of silently reporting success (rowcount
+    == 0) -- confirmed as a real, narrowly-scoped gap during the BOLA/IDOR
+    audit: update_report and block_sender/unblock_sender already get this
+    right elsewhere in this same file; these 3 routes didn't."""
+
+    @pytest.fixture
+    def api_setup(self):
+        with (
+            patch("src.api.phishing_api.GrinderReportClient"),
+            patch("src.api.phishing_api.MultiAPIValidator"),
+        ):
+            from src.api.phishing_api import PhishingAPI
+
+            mock_db = MagicMock()
+            api = PhishingAPI(
+                mock_db, MagicMock(spec=EnhancedAbuseEmailDetector), api_key="test_key"
+            )
+            api.app.config["TESTING"] = True
+            client = api.app.test_client()
+            return client, mock_db, {"Authorization": "Bearer test_key"}
+
+    def test_update_thread_404_when_no_row_matched(self, api_setup):
+        client, mock_db, headers = api_setup
+        conn = mock_db.engine.begin.return_value.__enter__.return_value
+        conn.execute.return_value.rowcount = 0
+
+        resp = client.patch("/api/v1/threads/999", json={"label": "x"}, headers=headers)
+
+        assert resp.status_code == 404
+        assert json.loads(resp.data)["error"] == "Thread not found"
+
+    def test_update_thread_200_when_row_matched(self, api_setup):
+        client, mock_db, headers = api_setup
+        conn = mock_db.engine.begin.return_value.__enter__.return_value
+        conn.execute.return_value.rowcount = 1
+
+        resp = client.patch("/api/v1/threads/1", json={"label": "x"}, headers=headers)
+
+        assert resp.status_code == 200
+        assert json.loads(resp.data)["status"] == "updated"
+
+    def test_update_thread_result_404_when_no_row_matched(self, api_setup):
+        client, mock_db, headers = api_setup
+        conn = mock_db.engine.begin.return_value.__enter__.return_value
+        conn.execute.return_value.rowcount = 0
+
+        resp = client.patch(
+            "/api/v1/threads/1/results/999", json={"status": "clean"}, headers=headers
+        )
+
+        assert resp.status_code == 404
+        assert json.loads(resp.data)["error"] == "Thread result not found"
+
+    def test_update_thread_result_200_when_row_matched(self, api_setup):
+        client, mock_db, headers = api_setup
+        conn = mock_db.engine.begin.return_value.__enter__.return_value
+        conn.execute.return_value.rowcount = 1
+
+        resp = client.patch(
+            "/api/v1/threads/1/results/1", json={"status": "clean"}, headers=headers
+        )
+
+        assert resp.status_code == 200
+        assert json.loads(resp.data)["status"] == "updated"
+
+    def test_discard_thread_result_404_when_no_row_matched(self, api_setup):
+        client, mock_db, headers = api_setup
+        conn = mock_db.engine.begin.return_value.__enter__.return_value
+        conn.execute.return_value.rowcount = 0
+
+        resp = client.patch("/api/v1/threads/1/results/999/discard", headers=headers)
+
+        assert resp.status_code == 404
+        assert json.loads(resp.data)["error"] == "Thread result not found"
+
+    def test_discard_thread_result_200_when_row_matched(self, api_setup):
+        client, mock_db, headers = api_setup
+        conn = mock_db.engine.begin.return_value.__enter__.return_value
+        conn.execute.return_value.rowcount = 1
+
+        resp = client.patch("/api/v1/threads/1/results/1/discard", headers=headers)
+
+        assert resp.status_code == 200
+        assert json.loads(resp.data)["discarded"] == 1

@@ -1490,12 +1490,14 @@ class PhishingAPI:
         def discard_thread_result(thread_id: int, result_id: int):
             try:
                 with self.db_manager.engine.begin() as conn:
-                    conn.execute(
+                    result = conn.execute(
                         text(
                             "UPDATE thread_results SET status = 'discarded' WHERE id = :rid AND thread_id = :tid"
                         ),
                         {"rid": result_id, "tid": thread_id},
                     )
+                    if result.rowcount == 0:
+                        return jsonify({"error": "Thread result not found"}), 404
                 return jsonify({"discarded": result_id}), 200
             except Exception as e:
                 logger.error(f"❌ API error in discard_thread_result: {e}")
@@ -2209,10 +2211,12 @@ class PhishingAPI:
                 return jsonify({"error": "No valid fields to update"}), 400
             try:
                 with self.db_manager.engine.begin() as conn:
-                    conn.execute(
+                    result = conn.execute(
                         text(f"UPDATE analysis_threads SET {', '.join(updates)} WHERE id = :id"),
                         params,
                     )
+                    if result.rowcount == 0:
+                        return jsonify({"error": "Thread not found"}), 404
                 return jsonify({"status": "updated"}), 200
             except Exception as e:
                 logger.error(f"❌ update_thread: {e}")
@@ -2236,13 +2240,15 @@ class PhishingAPI:
                 return jsonify({"error": "No valid fields to update"}), 400
             try:
                 with self.db_manager.engine.begin() as conn:
-                    conn.execute(
+                    result = conn.execute(
                         text(
                             f"UPDATE thread_results SET {', '.join(updates)} "
                             "WHERE id = :id AND thread_id = :tid"
                         ),
                         params,
                     )
+                    if result.rowcount == 0:
+                        return jsonify({"error": "Thread result not found"}), 404
                 return jsonify({"status": "updated"}), 200
             except Exception as e:
                 logger.error(f"❌ update_thread_result: {e}")
