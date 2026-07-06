@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     CT_MONITOR_ENABLED: Optional[bool] = False
     CT_MONITOR_MIN_SCORE: Optional[int] = None
     CT_STREAM_URL: Optional[str] = None
+    FEED_INTEL_ENABLED: Optional[bool] = False
+    URLHAUS_API_KEY: Optional[str] = None
+    URLSCAN_API_KEY: Optional[str] = None
     SCREENSHOT_WORKER_SOCKET: Optional[str] = None
     TEST_EMAIL: Optional[str] = None
     SERPAPI_KEY: Optional[str] = None

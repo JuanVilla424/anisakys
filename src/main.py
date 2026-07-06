@@ -641,6 +641,14 @@ class Engine:
                 )
                 logger.info("🔭 CT monitoring job started")
 
+            # Start external feed intelligence (OpenPhish/URLhaus corroboration
+            # + urlscan.io discovery) if enabled
+            if getattr(settings, "FEED_INTEL_ENABLED", False):
+                from src.monitoring.feed_intel import start_feed_intel_job
+
+                start_feed_intel_job(db_manager=self.db_manager)
+                logger.info("🌐 Feed intel job started")
+
             # Store the API key globally for decorator access
             global flask_app
 
