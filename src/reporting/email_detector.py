@@ -589,6 +589,19 @@ class EnhancedAbuseEmailDetector:
     # These are now handled by AbuseContactResolver class in src/intelligence/
 
     @staticmethod
+    def _iter_rdap_entities(entities: list):
+        """Yield every RDAP entity at any nesting depth. Per the standard
+        ICANN RDAP profile, the "abuse" role is typically a sub-entity
+        nested inside the "registrar" entity's own "entities" list rather
+        than a top-level sibling -- confirmed against a real response
+        (rdap.markmonitor.com/rdap/domain/google.com)."""
+        for entity in entities:
+            yield entity
+            nested = entity.get("entities")
+            if nested:
+                yield from EnhancedAbuseEmailDetector._iter_rdap_entities(nested)
+
+    @staticmethod
     def get_rdap_server(tld: str) -> Optional[str]:
         """
         Get RDAP server URL for a TLD from IANA bootstrap.
@@ -709,6 +722,25 @@ class EnhancedAbuseEmailDetector:
                             if item[0] == "fn":
                                 result["org"] = item[3]
 
+            # Extract abuse contact email(s) -- the whole point of trying
+            # RDAP first for abuse reporting; AbuseContactResolver already
+            # reads whois_data["abuse_contacts"] with no changes needed
+            # (src/intelligence/abuse_contact_resolver.py). Confirmed live
+            # against a real gTLD RDAP response (google.com via MarkMonitor)
+            # that the "abuse" role is nested INSIDE the "registrar" entity's
+            # own "entities" list, not a top-level sibling -- this is the
+            # standard ICANN RDAP profile shape, not an edge case, so this
+            # has to walk nested entities or it misses abuse contacts on
+            # most real gTLD domains.
+            for entity in EnhancedAbuseEmailDetector._iter_rdap_entities(data.get("entities", [])):
+                if "abuse" not in entity.get("roles", []):
+                    continue
+                vcard = entity.get("vcardArray", [])
+                if len(vcard) > 1:
+                    abuse_emails = [item[3] for item in vcard[1] if item[0] == "email"]
+                    if abuse_emails:
+                        result.setdefault("abuse_contacts", []).extend(abuse_emails)
+
             # Extract domain name
             result["domain_name"] = data.get("ldhName", domain)
 
@@ -798,8 +830,24 @@ class EnhancedAbuseEmailDetector:
 
             return whois_dict
 
+        # RDAP first: the modern, structured replacement for WHOIS, and the
+        # only one of these sources get_rdap_info() extracts abuse contacts
+        # from (see its "abuse" in roles branch) -- tried before the legacy
+        # text-parsing fallbacks below, not after them.
         try:
-            # First try with python-whois library
+            rdap_result = EnhancedAbuseEmailDetector.get_rdap_info(domain)
+            if rdap_result and (
+                rdap_result.get("registrar")
+                or rdap_result.get("creation_date")
+                or rdap_result.get("abuse_contacts")
+            ):
+                logger.info(f"📋 Got RDAP data for {domain}")
+                return rdap_result
+        except Exception as e:
+            logger.debug(f"RDAP query failed for {domain}: {e}")
+
+        # Fallback 1 - python-whois library
+        try:
             data = whois.whois(domain)
             if data and (data.domain_name or data.registrar):
                 logger.info(f"📋 Got WHOIS data for {domain} using python-whois")
@@ -807,7 +855,7 @@ class EnhancedAbuseEmailDetector:
         except Exception as e:
             logger.debug(f"Python-whois failed for {domain}: {e}")
 
-        # If that fails, try with specific WHOIS server for TLD
+        # Fallback 2 - specific WHOIS server for TLD
         try:
             tld = domain.split(".")[-1].lower()
             whois_server = TLD_WHOIS_SERVERS.get(tld)
@@ -832,7 +880,7 @@ class EnhancedAbuseEmailDetector:
         except Exception as e:
             logger.debug(f"Direct WHOIS query failed for {domain}: {e}")
 
-        # Fallback 3 - try generic whois command
+        # Fallback 3 - generic whois command
         try:
             logger.info(f"📋 Trying generic whois command for {domain}")
             result = subprocess.run(["whois", domain], capture_output=True, text=True, timeout=15)
@@ -844,19 +892,9 @@ class EnhancedAbuseEmailDetector:
                     logger.info(f"📋 Got WHOIS data for {domain} using generic whois")
                     return whois_dict
                 else:
-                    logger.warning(f"⚠️ WHOIS server busy/rate-limited for {domain}, trying RDAP...")
+                    logger.warning(f"⚠️ WHOIS server busy/rate-limited for {domain}")
         except Exception as e:
             logger.debug(f"Generic whois failed for {domain}: {e}")
-
-        # Fallback 4 - try RDAP (Registration Data Access Protocol)
-        # RDAP is the modern replacement for WHOIS with better availability
-        try:
-            rdap_result = EnhancedAbuseEmailDetector.get_rdap_info(domain)
-            if rdap_result and (rdap_result.get("registrar") or rdap_result.get("creation_date")):
-                logger.info(f"📋 Got RDAP data for {domain}")
-                return rdap_result
-        except Exception as e:
-            logger.debug(f"RDAP query failed for {domain}: {e}")
 
         logger.warning(f"⚠️  All WHOIS/RDAP methods failed for {domain}")
         return {}

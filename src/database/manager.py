@@ -109,6 +109,15 @@ class DatabaseManager:
                 """
                 )
             )
+            conn.execute(
+                text("ALTER TABLE phishing_sites ADD COLUMN IF NOT EXISTS detected_kit_type TEXT")
+            )
+            conn.execute(
+                text("ALTER TABLE phishing_sites ADD COLUMN IF NOT EXISTS kit_confidence INTEGER")
+            )
+            conn.execute(
+                text("ALTER TABLE phishing_sites ADD COLUMN IF NOT EXISTS kit_indicators TEXT")
+            )
             conn.commit()
             logger.info("🗄️  Initialized phishing_sites table with enhanced multi-API support.")
 

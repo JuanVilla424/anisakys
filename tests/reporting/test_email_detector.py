@@ -287,7 +287,10 @@ class TestGetEnhancedWhoisInfo:
         mock_whois_data.domain_name = "example.com"
         mock_whois_data.registrar = "GoDaddy"
 
-        with patch("src.reporting.email_detector.whois.whois", return_value=mock_whois_data):
+        with (
+            patch("src.reporting.email_detector.whois.whois", return_value=mock_whois_data),
+            patch.object(EnhancedAbuseEmailDetector, "get_rdap_info", return_value={}),
+        ):
             result = EnhancedAbuseEmailDetector.get_enhanced_whois_info("example.com")
 
         assert result is mock_whois_data
@@ -322,3 +325,140 @@ class TestGetEnhancedWhoisInfo:
             result = EnhancedAbuseEmailDetector.get_enhanced_whois_info("example.com")
 
         assert isinstance(result, dict)
+
+    def test_rdap_is_tried_before_python_whois(self):
+        """RDAP-first: a successful RDAP result must win even when
+        python-whois would also have succeeded -- confirms the fallback
+        chain was reordered, not just that RDAP works as a last resort."""
+        mock_whois_data = MagicMock()
+        mock_whois_data.domain_name = "example.com"
+
+        with (
+            patch(
+                "src.reporting.email_detector.whois.whois", return_value=mock_whois_data
+            ) as mock_whois,
+            patch.object(
+                EnhancedAbuseEmailDetector,
+                "get_rdap_info",
+                return_value={"registrar": "Example Registrar"},
+            ),
+        ):
+            result = EnhancedAbuseEmailDetector.get_enhanced_whois_info("example.com")
+
+        assert result == {"registrar": "Example Registrar"}
+        mock_whois.assert_not_called()
+
+    def test_abuse_contacts_alone_counts_as_an_rdap_hit(self):
+        """A domain with only an abuse contact (no registrar name, no
+        creation date) is RDAP's most valuable possible result for this
+        tool and must not be discarded as a miss."""
+        with patch.object(
+            EnhancedAbuseEmailDetector,
+            "get_rdap_info",
+            return_value={"abuse_contacts": ["abuse@registrar.example"]},
+        ):
+            result = EnhancedAbuseEmailDetector.get_enhanced_whois_info("example.com")
+
+        assert result == {"abuse_contacts": ["abuse@registrar.example"]}
+
+
+class TestGetRdapInfo:
+    """get_rdap_info() parses raw RDAP entities/vcardArray -- the exact
+    shape confirmed against the real RDAP spec/IANA bootstrap this session,
+    not assumed."""
+
+    def _rdap_response(self, entities):
+        return {"ldhName": "EXAMPLE.COM", "events": [], "entities": entities}
+
+    def test_extracts_abuse_email_from_abuse_role_entity(self):
+        entities = [
+            {
+                "roles": ["abuse"],
+                "vcardArray": [
+                    "vcard",
+                    [
+                        ["version", {}, "text", "4.0"],
+                        ["email", {}, "text", "abuse@registrar.example"],
+                    ],
+                ],
+            }
+        ]
+        mock_response = MagicMock(status_code=200)
+        mock_response.json.return_value = self._rdap_response(entities)
+
+        with (
+            patch.object(
+                EnhancedAbuseEmailDetector,
+                "get_rdap_server",
+                return_value="https://rdap.example/rdap",
+            ),
+            patch("src.reporting.email_detector.requests.get", return_value=mock_response),
+        ):
+            result = EnhancedAbuseEmailDetector.get_rdap_info("example.com")
+
+        assert result["abuse_contacts"] == ["abuse@registrar.example"]
+
+    def test_extracts_abuse_email_nested_under_registrar_entity(self):
+        """The standard ICANN RDAP profile shape -- "abuse" is a sub-entity
+        nested inside "registrar"'s own "entities" list, not a top-level
+        sibling. Confirmed against a real response (google.com via
+        rdap.markmonitor.com) during this session's live verification."""
+        entities = [
+            {
+                "roles": ["registrar"],
+                "vcardArray": ["vcard", [["fn", {}, "text", "MarkMonitor Inc."]]],
+                "entities": [
+                    {
+                        "roles": ["abuse"],
+                        "vcardArray": [
+                            "vcard",
+                            [["email", {}, "text", "abusecomplaints@markmonitor.com"]],
+                        ],
+                    }
+                ],
+            }
+        ]
+        mock_response = MagicMock(status_code=200)
+        mock_response.json.return_value = self._rdap_response(entities)
+
+        with (
+            patch.object(
+                EnhancedAbuseEmailDetector,
+                "get_rdap_server",
+                return_value="https://rdap.example/rdap",
+            ),
+            patch("src.reporting.email_detector.requests.get", return_value=mock_response),
+        ):
+            result = EnhancedAbuseEmailDetector.get_rdap_info("example.com")
+
+        assert result["registrar"] == "MarkMonitor Inc."
+        assert result["abuse_contacts"] == ["abusecomplaints@markmonitor.com"]
+
+    def test_ignores_non_abuse_roles_for_abuse_contacts(self):
+        entities = [
+            {
+                "roles": ["registrar"],
+                "vcardArray": ["vcard", [["fn", {}, "text", "Example Registrar"]]],
+            }
+        ]
+        mock_response = MagicMock(status_code=200)
+        mock_response.json.return_value = self._rdap_response(entities)
+
+        with (
+            patch.object(
+                EnhancedAbuseEmailDetector,
+                "get_rdap_server",
+                return_value="https://rdap.example/rdap",
+            ),
+            patch("src.reporting.email_detector.requests.get", return_value=mock_response),
+        ):
+            result = EnhancedAbuseEmailDetector.get_rdap_info("example.com")
+
+        assert "abuse_contacts" not in result
+        assert result["registrar"] == "Example Registrar"
+
+    def test_no_rdap_server_for_tld_returns_empty_dict(self):
+        with patch.object(EnhancedAbuseEmailDetector, "get_rdap_server", return_value=None):
+            result = EnhancedAbuseEmailDetector.get_rdap_info("example.unknown-tld")
+
+        assert result == {}

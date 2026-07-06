@@ -25,3 +25,5 @@ serpapi>=0.1.5
 boto3>=1.34.0
 google-api-python-client>=2.197.0
 google-auth>=2.23.0
+stix2>=3.0
+pymisp>=2.4

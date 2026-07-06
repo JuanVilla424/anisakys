@@ -428,7 +428,10 @@ class PhishingAPI:
                                         registrar_name = COALESCE(:registrar, registrar_name),
                                         registrant_org = COALESCE(:registrant_org, registrant_org),
                                         domain_age_days = COALESCE(:domain_age, domain_age_days),
-                                        all_abuse_emails = COALESCE(:all_abuse_emails, all_abuse_emails)
+                                        all_abuse_emails = COALESCE(:all_abuse_emails, all_abuse_emails),
+                                        detected_kit_type = COALESCE(:kit_type, detected_kit_type),
+                                        kit_confidence = COALESCE(:kit_confidence, kit_confidence),
+                                        kit_indicators = COALESCE(:kit_indicators, kit_indicators)
                                     WHERE url = :url
                                 """
                                 ),
@@ -444,6 +447,13 @@ class PhishingAPI:
                                     "registrant_org": scan_result.get("registrant_org"),
                                     "domain_age": scan_result.get("domain_age_days"),
                                     "all_abuse_emails": scan_result.get("all_abuse_emails"),
+                                    "kit_type": scan_result.get("detected_kit_type"),
+                                    "kit_confidence": scan_result.get("kit_confidence"),
+                                    "kit_indicators": (
+                                        json.dumps(scan_result["kit_indicators"])
+                                        if scan_result.get("kit_indicators")
+                                        else None
+                                    ),
                                     "url": url,
                                 },
                             )
@@ -457,13 +467,13 @@ class PhishingAPI:
                                         virustotal_result, urlvoid_result, phishtank_result,
                                         multi_api_threat_level, api_confidence_score,
                                         auto_analysis_status, registration_date, registrar_name, registrant_org, domain_age_days,
-                                        all_abuse_emails
+                                        all_abuse_emails, detected_kit_type, kit_confidence, kit_indicators
                                     ) VALUES (
                                         :url, :timestamp, :timestamp, 'api_scan',
                                         :vt_result, :uv_result, :pt_result,
                                         :threat_level, :confidence,
                                         'completed', :reg_date, :registrar, :registrant_org, :domain_age,
-                                        :all_abuse_emails
+                                        :all_abuse_emails, :kit_type, :kit_confidence, :kit_indicators
                                     )
                                 """
                                 ),
@@ -480,6 +490,13 @@ class PhishingAPI:
                                     "registrant_org": scan_result.get("registrant_org"),
                                     "domain_age": scan_result.get("domain_age_days"),
                                     "all_abuse_emails": scan_result.get("all_abuse_emails"),
+                                    "kit_type": scan_result.get("detected_kit_type"),
+                                    "kit_confidence": scan_result.get("kit_confidence"),
+                                    "kit_indicators": (
+                                        json.dumps(scan_result["kit_indicators"])
+                                        if scan_result.get("kit_indicators")
+                                        else None
+                                    ),
                                 },
                             )
                     logger.info(f"✅ Scan results saved for {url}")
@@ -1739,14 +1756,15 @@ class PhishingAPI:
         def get_graph():
             """Relationship graph built from real phishing sites.
 
-            Nodes: domain, ip, registrar (derived from phishing_sites).
-            Edges: domain --resolves_to--> ip, domain --registered_with--> registrar.
+            Nodes: domain, ip, registrar, kit (derived from phishing_sites).
+            Edges: domain --resolves_to--> ip, domain --registered_with--> registrar,
+                   domain --detected_as--> kit.
 
             Query params:
               limit (<=500, default 200) — cap on source rows.
               focus  (optional) — "domain:foo.com" / "ip:1.2.3.4" /
-                                  "registrar:Name" restricts to the 1-hop
-                                  neighborhood of that node.
+                                  "registrar:Name" / "kit:evilginx" restricts
+                                  to the 1-hop neighborhood of that node.
             """
             try:
                 limit = min(int(request.args.get("limit", 200)), 500)
@@ -1765,12 +1783,13 @@ class PhishingAPI:
                                 bool_or(is_cloudflare = 1) AS cloudflare,
                                 MIN(first_seen)::text AS first_seen,
                                 MAX(last_seen)::text AS last_seen,
-                                COUNT(*) AS hits
+                                COUNT(*) AS hits,
+                                detected_kit_type
                             FROM phishing_sites
                             WHERE url IS NOT NULL
                               AND SPLIT_PART(SPLIT_PART(url, '://', 2), '/', 1) <> ''
                             GROUP BY domain, resolved_ip, registrar_name,
-                                     multi_api_threat_level
+                                     multi_api_threat_level, detected_kit_type
                             ORDER BY MAX(last_seen) DESC NULLS LAST
                             LIMIT :lim
                         """
@@ -1793,6 +1812,7 @@ class PhishingAPI:
                 domains: Dict[str, Dict[str, Any]] = {}
                 ips: Dict[str, Dict[str, Any]] = {}
                 registrars: Dict[str, Dict[str, Any]] = {}
+                kits: Dict[str, Dict[str, Any]] = {}
                 edge_keys = set()  # (source, target, relation)
 
                 for r in rows:
@@ -1805,6 +1825,7 @@ class PhishingAPI:
                     conf = round(float(r[4])) if r[4] is not None else None
                     cloud = bool(r[5])
                     first, last, hits = r[6], r[7], int(r[8] or 0)
+                    kit = (r[9] or "").strip() if r[9] else None
 
                     d = domains.setdefault(
                         domain,
@@ -1853,6 +1874,15 @@ class PhishingAPI:
                         if last and (rg["last"] is None or last > rg["last"]):
                             rg["last"] = last
                         edge_keys.add((f"domain:{domain}", f"registrar:{reg}", "registered_with"))
+
+                    if kit:
+                        kt = kits.setdefault(kit, {"sites": 0, "first": first, "last": last})
+                        kt["sites"] += hits
+                        if first and (kt["first"] is None or first < kt["first"]):
+                            kt["first"] = first
+                        if last and (kt["last"] is None or last > kt["last"]):
+                            kt["last"] = last
+                        edge_keys.add((f"domain:{domain}", f"kit:{kit}", "detected_as"))
 
                 node_list = []
                 for dom, m in domains.items():
@@ -1909,6 +1939,22 @@ class PhishingAPI:
                             ),
                         }
                     )
+                for kit, m in kits.items():
+                    node_list.append(
+                        {
+                            "id": f"kit:{kit}",
+                            "label": kit,
+                            "type": "kit",
+                            "severity": "critical",
+                            "meta": meta_without_none(
+                                [
+                                    ("Sites", m["sites"]),
+                                    ("First seen", m["first"]),
+                                    ("Last seen", m["last"]),
+                                ]
+                            ),
+                        }
+                    )
 
                 edge_list = [
                     {
@@ -1927,7 +1973,7 @@ class PhishingAPI:
                     ftype, fval = ftype.strip(), fval.strip()
                     fid = (
                         f"{ftype}:{fval}"
-                        if ftype in ("domain", "ip", "registrar") and fval
+                        if ftype in ("domain", "ip", "registrar", "kit") and fval
                         else None
                     )
                     if fid:
@@ -1945,6 +1991,7 @@ class PhishingAPI:
                     "domains": len(domains),
                     "ips": len(ips),
                     "registrars": len(registrars),
+                    "kits": len(kits),
                     "limited": len(rows) >= limit,
                 }
                 return (
@@ -1996,6 +2043,116 @@ class PhishingAPI:
                 return jsonify(results), 200
             except Exception as e:
                 logger.error(f"❌ API error in get_brands: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── POST /api/v1/intelligence/stix/validate ───────────────────────────
+        @self.app.route("/api/v1/intelligence/stix/validate", methods=["POST"])
+        @self.limiter.limit("20 per minute")
+        @require_api_key(scope="read")
+        def validate_stix():
+            from src.intelligence.stix_export import validate_stix_bundle
+
+            data = request.get_json(silent=True) or {}
+            bundle = data.get("bundle")
+            if not bundle:
+                return jsonify({"error": "bundle required"}), 400
+            try:
+                valid, errors = validate_stix_bundle(bundle)
+                return jsonify({"valid": valid, "errors": errors}), 200
+            except Exception as e:
+                logger.error(f"❌ API error in validate_stix: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── POST /api/v1/intelligence/taxii/push ──────────────────────────────
+        @self.app.route("/api/v1/intelligence/taxii/push", methods=["POST"])
+        @self.limiter.limit("10 per minute")
+        @require_api_key(scope="report")
+        def push_taxii():
+            if not getattr(settings, "TAXII_BASE_URL", None):
+                return jsonify({"error": "TAXII not configured"}), 503
+
+            from src.intelligence.stix_export import add_tlp_marking, validate_stix_bundle
+            from src.intelligence.taxii_client import TAXIIClient
+
+            data = request.get_json(silent=True) or {}
+            bundle = data.get("bundle")
+            if not bundle:
+                return jsonify({"error": "bundle required"}), 400
+            api_root = data.get("api_root") or getattr(settings, "TAXII_DEFAULT_API_ROOT", None)
+            collection_id = data.get("collection_id") or getattr(
+                settings, "TAXII_DEFAULT_COLLECTION_ID", None
+            )
+            if not api_root or not collection_id:
+                return jsonify({"error": "api_root and collection_id required"}), 400
+
+            try:
+                tlp = data.get("tlp")
+                if tlp:
+                    bundle = add_tlp_marking(bundle, tlp)
+                valid, errors = validate_stix_bundle(bundle)
+                if not valid:
+                    return jsonify({"error": "Invalid STIX bundle", "details": errors}), 400
+
+                client = TAXIIClient()
+                result = client.push_objects(api_root, collection_id, bundle["objects"])
+                return jsonify(result), 200
+            except ValueError as e:
+                return jsonify({"error": str(e)}), 400
+            except Exception as e:
+                logger.error(f"❌ API error in push_taxii: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── GET /api/v1/intelligence/taxii/pull ───────────────────────────────
+        @self.app.route("/api/v1/intelligence/taxii/pull", methods=["GET"])
+        @self.limiter.limit("20 per minute")
+        @require_api_key(scope="read")
+        def pull_taxii():
+            if not getattr(settings, "TAXII_BASE_URL", None):
+                return jsonify({"error": "TAXII not configured"}), 503
+
+            from src.intelligence.taxii_client import TAXIIClient
+
+            api_root = request.args.get("api_root") or getattr(
+                settings, "TAXII_DEFAULT_API_ROOT", None
+            )
+            collection_id = request.args.get("collection_id") or getattr(
+                settings, "TAXII_DEFAULT_COLLECTION_ID", None
+            )
+            if not api_root or not collection_id:
+                return jsonify({"error": "api_root and collection_id required"}), 400
+
+            try:
+                client = TAXIIClient()
+                objects = client.pull_objects(api_root, collection_id)
+                return jsonify({"objects": objects}), 200
+            except Exception as e:
+                logger.error(f"❌ API error in pull_taxii: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── POST /api/v1/intelligence/misp/push ───────────────────────────────
+        @self.app.route("/api/v1/intelligence/misp/push", methods=["POST"])
+        @self.limiter.limit("10 per minute")
+        @require_api_key(scope="report")
+        def push_misp():
+            if not getattr(settings, "MISP_URL", None):
+                return jsonify({"error": "MISP not configured"}), 503
+
+            from src.intelligence.misp_client import MISPClient
+
+            data = request.get_json(silent=True) or {}
+            indicators = data.get("indicators")
+            event_info = data.get("event_info")
+            if not indicators or not event_info:
+                return jsonify({"error": "indicators and event_info required"}), 400
+
+            try:
+                client = MISPClient()
+                result = client.push_indicators(indicators, event_info)
+                if result is None:
+                    return jsonify({"error": "MISP push failed"}), 502
+                return jsonify(result), 200
+            except Exception as e:
+                logger.error(f"❌ API error in push_misp: {e}")
                 return jsonify({"error": "Internal server error"}), 500
 
         # ── POST /api/v1/threads/image-tracking ───────────────────────────────

@@ -21,6 +21,7 @@ from src.observability.metrics import (
     METRIC_SCAN_DURATION_SECONDS,
     METRIC_DETECTIONS_TOTAL,
 )
+from src.dns.network_utils import safe_get_with_redirects
 
 # Import integrations
 from src.intelligence.virustotal import VirusTotalIntegration, VIRUSTOTAL_API_KEY
@@ -28,6 +29,7 @@ from src.intelligence.urlvoid import URLVoidIntegration, URLVOID_API_KEY
 from src.intelligence.phishtank import PhishTankIntegration, PHISHTANK_API_KEY
 from src.intelligence.google_safe_browsing import GoogleSafeBrowsingIntegration
 from src.detection.url_analyzer import URLAnalyzer
+from src.detection.kit_fingerprint import score_kit_indicators
 
 # Auto-Analysis Configuration
 AUTO_MULTI_API_SCAN = getattr(settings, "AUTO_MULTI_API_SCAN", False)
@@ -223,12 +225,40 @@ class MultiAPIValidator:
                 f"🚨 Google Safe Browsing threats found: {gsb_result.get('threat_count', 0)}"
             )
 
+        # Step 5.5: AiTM/Evilginx reverse-proxy kit fingerprinting -- fetches
+        # the candidate page itself (headers + HTML), the only step here
+        # that does, so failures must degrade to "no kit data" rather than
+        # ever failing the whole scan.
+        logger.info(f"📊 Step 5.5: Kit fingerprinting for {url}")
+        kit_result: Dict[str, Any] = {}
+        try:
+            brand_hint = url_analysis.get("typosquatting", {}).get(
+                "target_brand"
+            ) or url_analysis.get("combo_squatting", {}).get("target_brand")
+            response = safe_get_with_redirects(url, timeout=10)
+            kit_result = score_kit_indicators(url, response, brand_hint=brand_hint)
+            if kit_result.get("kit_type"):
+                logger.warning(
+                    f"🚨 Kit fingerprint: {kit_result['kit_type']} "
+                    f"(confidence={kit_result['confidence']}) for {url}"
+                )
+        except Exception as e:
+            # Broad by design, matching every other step in this method
+            # (VirusTotal/URLVoid/PhishTank/WHOIS all degrade the same way):
+            # this step reaches into arbitrary, attacker-controlled content
+            # over the network, so nothing it does may ever fail the scan.
+            logger.debug(f"Kit fingerprinting fetch failed for {url}: {e}")
+        results["kit_fingerprint"] = kit_result
+        results["detected_kit_type"] = kit_result.get("kit_type")
+        results["kit_confidence"] = kit_result.get("confidence")
+        results["kit_indicators"] = kit_result.get("indicators")
+
         # Step 6: Aggregate results and calculate threat level
         results["aggregated_threat_level"] = self._aggregate_threat_level(
-            vt_result, uv_result, pt_result, domain_age, url_analysis, gsb_result
+            vt_result, uv_result, pt_result, domain_age, url_analysis, gsb_result, kit_result
         )
         results["confidence_score"] = self._calculate_confidence_score(
-            vt_result, uv_result, pt_result, domain_age, url_analysis, gsb_result
+            vt_result, uv_result, pt_result, domain_age, url_analysis, gsb_result, kit_result
         )
 
         # If every external threat API errored, heuristics alone (domain age,
@@ -238,7 +268,7 @@ class MultiAPIValidator:
             results["confidence_score"] = 0
 
         results["recommendations"] = self._generate_recommendations(
-            vt_result, uv_result, pt_result, domain_age, url_analysis, gsb_result
+            vt_result, uv_result, pt_result, domain_age, url_analysis, gsb_result, kit_result
         )
 
         # Add registration info to top-level results for frontend (from WHOIS)
@@ -282,6 +312,7 @@ class MultiAPIValidator:
         domain_age_days: Optional[int] = None,
         url_analysis: Optional[Dict[str, Any]] = None,
         gsb_result: Optional[Dict[str, Any]] = None,
+        kit_result: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Aggregate threat levels from multiple APIs into single assessment.
@@ -293,11 +324,19 @@ class MultiAPIValidator:
             domain_age_days (Optional[int]): Domain age in days
             url_analysis (Optional[Dict]): URL lexical analysis result
             gsb_result (Optional[Dict]): Google Safe Browsing result
+            kit_result (Optional[Dict]): AiTM/Evilginx kit fingerprint result
 
         Returns:
             str: Aggregated threat level (critical, high, medium, low, clean)
         """
         threat_scores = []
+
+        # An active AiTM/reverse-proxy kit is the most severe possible
+        # finding -- it means live credential/session/MFA-token theft in
+        # progress, not just a static clone -- so it short-circuits to
+        # critical exactly like a verified PhishTank report does below.
+        if kit_result and kit_result.get("kit_type"):
+            return "critical"
 
         # PhishTank has the highest priority (verified community reports)
         if pt_result.get("is_phishing") and pt_result.get("verified"):
@@ -406,6 +445,7 @@ class MultiAPIValidator:
         domain_age_days: Optional[int] = None,
         url_analysis: Optional[Dict[str, Any]] = None,
         gsb_result: Optional[Dict[str, Any]] = None,
+        kit_result: Optional[Dict[str, Any]] = None,
     ) -> int:
         """
         Calculate confidence score based on API response quality and agreement.
@@ -415,6 +455,13 @@ class MultiAPIValidator:
         """
         confidence = 0
         factors = 0
+
+        # Kit fingerprint confidence -- its own score IS the confidence
+        # contribution (a header IoC or brand-domain-leak is concrete
+        # technical evidence, not a heuristic needing separate scaling).
+        if kit_result and kit_result.get("kit_type"):
+            factors += 1
+            confidence += kit_result.get("confidence", 0)
 
         # URL Analysis confidence (local analysis, always available)
         if url_analysis:
@@ -486,6 +533,7 @@ class MultiAPIValidator:
         domain_age_days: Optional[int] = None,
         url_analysis: Optional[Dict[str, Any]] = None,
         gsb_result: Optional[Dict[str, Any]] = None,
+        kit_result: Optional[Dict[str, Any]] = None,
     ) -> List[str]:
         """
         Generate actionable recommendations based on scan results.
@@ -494,6 +542,16 @@ class MultiAPIValidator:
             List[str]: List of recommendations
         """
         recommendations = []
+
+        # Kit fingerprint recommendations (highest priority -- active proxy)
+        if kit_result and kit_result.get("kit_type"):
+            recommendations.append(
+                f"🚨 CRITICAL: Active AiTM proxy detected ({kit_result['kit_type']}) - "
+                "this captures live sessions/MFA tokens, prioritize takedown"
+            )
+            indicators = kit_result.get("indicators", [])
+            if indicators:
+                recommendations.append(f"   Indicators: {', '.join(indicators)}")
 
         # URL Analysis recommendations (highest priority - local detection)
         if url_analysis:

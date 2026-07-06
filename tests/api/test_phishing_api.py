@@ -210,7 +210,7 @@ class TestGraphEndpoint:
     """Tests for GET /api/v1/graph — builds nodes/edges from real sites."""
 
     SAMPLE_ROWS = [
-        # domain, resolved_ip, registrar, threat, avg_conf, cloudflare, first, last, hits
+        # domain, resolved_ip, registrar, threat, avg_conf, cloudflare, first, last, hits, detected_kit_type
         (
             "brand-alpha.example",
             "203.0.113.10",
@@ -221,6 +221,7 @@ class TestGraphEndpoint:
             "2026-01-01",
             "2026-01-05",
             3,
+            "evilginx",
         ),
         (
             "brand-alpha.example",
@@ -232,6 +233,7 @@ class TestGraphEndpoint:
             "2026-01-02",
             "2026-01-06",
             1,
+            "evilginx",
         ),
         (
             "acme-bank.example",
@@ -243,8 +245,9 @@ class TestGraphEndpoint:
             "2026-01-03",
             "2026-01-07",
             2,
+            None,
         ),
-        ("solo.example", None, None, None, None, False, "2026-01-04", "2026-01-08", 1),
+        ("solo.example", None, None, None, None, False, "2026-01-04", "2026-01-08", 1, None),
     ]
 
     @pytest.fixture
@@ -281,13 +284,37 @@ class TestGraphEndpoint:
         assert data["meta"]["domains"] == 3
         assert data["meta"]["ips"] == 2
         assert data["meta"]["registrars"] == 1
-        assert len(data["nodes"]) == 6
-        assert len(data["edges"]) == 4
+        assert data["meta"]["kits"] == 1
+        assert len(data["nodes"]) == 7
+        assert len(data["edges"]) == 5
 
         ids = {n["id"] for n in data["nodes"]}
         assert "domain:brand-alpha.example" in ids
         assert "ip:203.0.113.10" in ids
         assert "registrar:Acme Registrar" in ids
+        assert "kit:evilginx" in ids
+
+    def test_graph_kit_node_and_edge(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, self.SAMPLE_ROWS)
+
+        data = json.loads(client.get("/api/v1/graph", headers=headers).data)
+        kit_node = next(n for n in data["nodes"] if n["id"] == "kit:evilginx")
+        assert kit_node["type"] == "kit"
+        assert kit_node["severity"] == "critical"
+
+        kit_edges = [e for e in data["edges"] if e["target"] == "kit:evilginx"]
+        assert len(kit_edges) == 1
+        assert kit_edges[0]["source"] == "domain:brand-alpha.example"
+        assert kit_edges[0]["relation"] == "detected_as"
+
+    def test_graph_focus_kit_one_hop(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, self.SAMPLE_ROWS)
+
+        data = json.loads(client.get("/api/v1/graph?focus=kit:evilginx", headers=headers).data)
+        ids = {n["id"] for n in data["nodes"]}
+        assert ids == {"kit:evilginx", "domain:brand-alpha.example"}
 
     def test_graph_picks_severest_threat(self, graph_setup):
         client, mock_db, headers = graph_setup
@@ -476,3 +503,157 @@ class TestThreadUpdateRoutes404:
 
         assert resp.status_code == 200
         assert json.loads(resp.data)["discarded"] == 1
+
+
+class TestIntelligenceSharingRoutes:
+    """The 4 STIX/TAXII/MISP routes -- no production TAXII/MISP server
+    exists yet (confirmed with the user), so taxii/misp are always
+    mocked here; stix_export.py uses the real stix2 library (validation
+    correctness is what it's for)."""
+
+    @pytest.fixture
+    def api_setup(self):
+        with (
+            patch("src.api.phishing_api.GrinderReportClient"),
+            patch("src.api.phishing_api.MultiAPIValidator"),
+        ):
+            from src.api.phishing_api import PhishingAPI
+
+            mock_db = MagicMock()
+            api = PhishingAPI(
+                mock_db, MagicMock(spec=EnhancedAbuseEmailDetector), api_key="test_key"
+            )
+            api.app.config["TESTING"] = True
+            client = api.app.test_client()
+            return client, {"Authorization": "Bearer test_key"}
+
+    def test_stix_validate_requires_bundle(self, api_setup):
+        client, headers = api_setup
+        resp = client.post("/api/v1/intelligence/stix/validate", json={}, headers=headers)
+        assert resp.status_code == 400
+
+    def test_stix_validate_valid_bundle(self, api_setup):
+        client, headers = api_setup
+        bundle = {
+            "type": "bundle",
+            "id": "bundle--e9e0b1a4-6a1e-4d1a-9e5b-2c8b2c2b2c2b",
+            "objects": [
+                {
+                    "type": "indicator",
+                    "spec_version": "2.1",
+                    "id": "indicator--c1b3b3b3-1111-4222-8333-444444444444",
+                    "created": "2026-01-01T00:00:00.000Z",
+                    "modified": "2026-01-01T00:00:00.000Z",
+                    "pattern": "[domain-name:value = 'evil.example.com']",
+                    "pattern_type": "stix",
+                    "labels": ["malicious-activity"],
+                    "valid_from": "2026-01-01T00:00:00.000Z",
+                }
+            ],
+        }
+        resp = client.post(
+            "/api/v1/intelligence/stix/validate", json={"bundle": bundle}, headers=headers
+        )
+        assert resp.status_code == 200
+        assert json.loads(resp.data)["valid"] is True
+
+    def test_taxii_push_returns_503_when_unconfigured(self, api_setup):
+        client, headers = api_setup
+        with patch("src.api.phishing_api.settings") as mock_settings:
+            mock_settings.TAXII_BASE_URL = None
+            resp = client.post(
+                "/api/v1/intelligence/taxii/push", json={"bundle": {}}, headers=headers
+            )
+        assert resp.status_code == 503
+
+    def test_taxii_pull_returns_503_when_unconfigured(self, api_setup):
+        client, headers = api_setup
+        with patch("src.api.phishing_api.settings") as mock_settings:
+            mock_settings.TAXII_BASE_URL = None
+            resp = client.get("/api/v1/intelligence/taxii/pull", headers=headers)
+        assert resp.status_code == 503
+
+    def test_taxii_pull_requires_api_root_and_collection_id(self, api_setup):
+        client, headers = api_setup
+        with patch("src.api.phishing_api.settings") as mock_settings:
+            mock_settings.TAXII_BASE_URL = "https://taxii.example.com"
+            mock_settings.TAXII_DEFAULT_API_ROOT = None
+            mock_settings.TAXII_DEFAULT_COLLECTION_ID = None
+            resp = client.get("/api/v1/intelligence/taxii/pull", headers=headers)
+        assert resp.status_code == 400
+
+    def test_taxii_pull_calls_client_with_configured_defaults(self, api_setup):
+        client, headers = api_setup
+        with (
+            patch("src.api.phishing_api.settings") as mock_settings,
+            patch("src.intelligence.taxii_client.TAXIIClient") as mock_client_cls,
+        ):
+            mock_settings.TAXII_BASE_URL = "https://taxii.example.com"
+            mock_settings.TAXII_DEFAULT_API_ROOT = "api1"
+            mock_settings.TAXII_DEFAULT_COLLECTION_ID = "col-1"
+            mock_client_cls.return_value.pull_objects.return_value = [{"type": "indicator"}]
+
+            resp = client.get("/api/v1/intelligence/taxii/pull", headers=headers)
+
+        assert resp.status_code == 200
+        assert json.loads(resp.data)["objects"] == [{"type": "indicator"}]
+
+    def test_misp_push_returns_503_when_unconfigured(self, api_setup):
+        client, headers = api_setup
+        with patch("src.api.phishing_api.settings") as mock_settings:
+            mock_settings.MISP_URL = None
+            resp = client.post(
+                "/api/v1/intelligence/misp/push",
+                json={"indicators": [], "event_info": "x"},
+                headers=headers,
+            )
+        assert resp.status_code == 503
+
+    def test_misp_push_requires_indicators_and_event_info(self, api_setup):
+        client, headers = api_setup
+        with patch("src.api.phishing_api.settings") as mock_settings:
+            mock_settings.MISP_URL = "https://misp.example.com"
+            resp = client.post("/api/v1/intelligence/misp/push", json={}, headers=headers)
+        assert resp.status_code == 400
+
+    def test_misp_push_success(self, api_setup):
+        client, headers = api_setup
+        with (
+            patch("src.api.phishing_api.settings") as mock_settings,
+            patch("src.intelligence.misp_client.MISPClient") as mock_client_cls,
+        ):
+            mock_settings.MISP_URL = "https://misp.example.com"
+            mock_client_cls.return_value.push_indicators.return_value = {"Event": {"id": "1"}}
+
+            resp = client.post(
+                "/api/v1/intelligence/misp/push",
+                json={"indicators": [{"type": "domain", "value": "x.com"}], "event_info": "x"},
+                headers=headers,
+            )
+
+        assert resp.status_code == 200
+        assert json.loads(resp.data) == {"Event": {"id": "1"}}
+
+    def test_misp_push_returns_502_when_push_fails(self, api_setup):
+        client, headers = api_setup
+        with (
+            patch("src.api.phishing_api.settings") as mock_settings,
+            patch("src.intelligence.misp_client.MISPClient") as mock_client_cls,
+        ):
+            mock_settings.MISP_URL = "https://misp.example.com"
+            mock_client_cls.return_value.push_indicators.return_value = None
+
+            resp = client.post(
+                "/api/v1/intelligence/misp/push",
+                json={"indicators": [{"type": "domain", "value": "x.com"}], "event_info": "x"},
+                headers=headers,
+            )
+
+        assert resp.status_code == 502
+
+    def test_requires_auth(self, api_setup):
+        client, _ = api_setup
+        assert client.post("/api/v1/intelligence/stix/validate").status_code == 401
+        assert client.post("/api/v1/intelligence/taxii/push").status_code == 401
+        assert client.get("/api/v1/intelligence/taxii/pull").status_code == 401
+        assert client.post("/api/v1/intelligence/misp/push").status_code == 401

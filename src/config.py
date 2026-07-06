@@ -60,6 +60,13 @@ class Settings(BaseSettings):
     FEED_INTEL_ENABLED: Optional[bool] = False
     URLHAUS_API_KEY: Optional[str] = None
     URLSCAN_API_KEY: Optional[str] = None
+    TAXII_BASE_URL: Optional[str] = None
+    TAXII_USERNAME: Optional[str] = None
+    TAXII_PASSWORD: Optional[str] = None
+    TAXII_DEFAULT_API_ROOT: Optional[str] = None
+    TAXII_DEFAULT_COLLECTION_ID: Optional[str] = None
+    MISP_URL: Optional[str] = None
+    MISP_API_KEY: Optional[str] = None
     SCREENSHOT_WORKER_SOCKET: Optional[str] = None
     TEST_EMAIL: Optional[str] = None
     SERPAPI_KEY: Optional[str] = None
