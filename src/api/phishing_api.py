@@ -39,18 +39,26 @@ from src.intelligence import (
 )
 from src.logger import logger
 from src.dns.network_utils import assess_url_target
-from src.screenshot_service import ScreenshotService, PLAYWRIGHT_AVAILABLE, SELENIUM_AVAILABLE
+from src.screenshot_service import PLAYWRIGHT_AVAILABLE, SELENIUM_AVAILABLE
+from src.screenshot_client import get_screenshot_service
 from src.monitoring.gsb_rescan import get_gsb_rescan_job, start_gsb_rescan_job
 
-# Initialize screenshot service
+# Initialize screenshot service (sandboxed client if SCREENSHOT_WORKER_SOCKET
+# is configured, otherwise the in-process ScreenshotService as before --
+# either way, the local PLAYWRIGHT_AVAILABLE/SELENIUM_AVAILABLE check only
+# matters for the in-process fallback; the client needs neither).
 SCREENSHOTS_DIR = (
     Path(settings.SCREENSHOTS_DIR)
     if getattr(settings, "SCREENSHOTS_DIR", None)
     else Path("/opt/anisakys/data/screenshots")
 )
 screenshot_service = (
-    ScreenshotService(str(SCREENSHOTS_DIR))
-    if (PLAYWRIGHT_AVAILABLE or SELENIUM_AVAILABLE)
+    get_screenshot_service(str(SCREENSHOTS_DIR))
+    if (
+        getattr(settings, "SCREENSHOT_WORKER_SOCKET", None)
+        or PLAYWRIGHT_AVAILABLE
+        or SELENIUM_AVAILABLE
+    )
     else None
 )
 

@@ -99,7 +99,7 @@ def manager(mock_db, mock_abuse_detector, mock_settings):
         patch("src.reporting.abuse_manager.MultiAPIValidator"),
         patch("src.reporting.abuse_manager.GrinderReportClient"),
         patch("src.reporting.abuse_manager.AbuseContactValidator"),
-        patch("src.reporting.abuse_manager.ScreenshotService"),
+        patch("src.reporting.abuse_manager.get_screenshot_service"),
         patch("src.reporting.abuse_manager.ReportTracker"),
     ):
         mgr = AbuseReportManager(
@@ -123,7 +123,7 @@ class TestAbuseReportManagerInit:
             patch("src.reporting.abuse_manager.MultiAPIValidator"),
             patch("src.reporting.abuse_manager.GrinderReportClient"),
             patch("src.reporting.abuse_manager.AbuseContactValidator"),
-            patch("src.reporting.abuse_manager.ScreenshotService"),
+            patch("src.reporting.abuse_manager.get_screenshot_service"),
             patch("src.reporting.abuse_manager.ReportTracker"),
         ):
             mgr = AbuseReportManager(
@@ -144,7 +144,7 @@ class TestAbuseReportManagerInit:
             patch("src.reporting.abuse_manager.MultiAPIValidator"),
             patch("src.reporting.abuse_manager.GrinderReportClient"),
             patch("src.reporting.abuse_manager.AbuseContactValidator"),
-            patch("src.reporting.abuse_manager.ScreenshotService"),
+            patch("src.reporting.abuse_manager.get_screenshot_service"),
             patch("src.reporting.abuse_manager.ReportTracker"),
         ):
             mgr = AbuseReportManager(
@@ -162,7 +162,7 @@ class TestAbuseReportManagerInit:
             patch("src.reporting.abuse_manager.MultiAPIValidator"),
             patch("src.reporting.abuse_manager.GrinderReportClient"),
             patch("src.reporting.abuse_manager.AbuseContactValidator"),
-            patch("src.reporting.abuse_manager.ScreenshotService"),
+            patch("src.reporting.abuse_manager.get_screenshot_service"),
             patch("src.reporting.abuse_manager.ReportTracker"),
         ):
             mgr = AbuseReportManager(

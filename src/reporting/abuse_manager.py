@@ -45,7 +45,7 @@ from src.observability.metrics import (
 from src.reporting.smtp_rate_limiter import SmtpRateLimiter
 from src.models import AttachmentConfig
 from src.reporting.abuse_contact_validator import AbuseContactValidator
-from src.screenshot_service import ScreenshotService
+from src.screenshot_client import get_screenshot_service
 from src.reporting.report_tracker import ReportTracker
 from src.shutdown import shutdown_requested
 
@@ -71,7 +71,7 @@ class AbuseReportManager:
 
         # Initialize ICANN compliance services
         self.abuse_contact_validator = AbuseContactValidator(timeout=timeout)
-        self.screenshot_service = ScreenshotService(
+        self.screenshot_service = get_screenshot_service(
             screenshots_dir=getattr(settings, "SCREENSHOTS_DIR", None), timeout=timeout
         )
         self.report_tracker = ReportTracker(db_manager.engine)

@@ -19,6 +19,7 @@ import argparse
 import requests
 from itertools import permutations
 import datetime
+from pathlib import Path
 from typing import List, Optional, Tuple, Dict, Any
 import threading
 import smtplib
@@ -107,7 +108,7 @@ from src.intelligence import (
 )
 from src.generators.query_generator import generate_queries_file
 from src.dns.network_utils import get_ip_info, is_cloudflare_ip
-from src.screenshot_service import ScreenshotService
+from src.screenshot_client import get_screenshot_service
 
 # Global testing mode detection - independent of test_mode (used for screenshots)
 IS_TESTING_MODE = False
@@ -248,7 +249,7 @@ class Engine:
         self.multi_api_validator = MultiAPIValidator()
 
         # Initialize ICANN compliance services
-        self.screenshot_service = ScreenshotService(
+        self.screenshot_service = get_screenshot_service(
             screenshots_dir=getattr(settings, "SCREENSHOTS_DIR", None), timeout=self.timeout
         )
         self.abuse_contact_validator = AbuseContactValidator(timeout=self.timeout)
@@ -553,6 +554,21 @@ class Engine:
                 self.abuse_email, attachment_paths=attachment_paths
             )
             logger.info("✅ Test report sent. Exiting.")
+            return
+
+        if getattr(self.args, "start_screenshot_worker", False):
+            from src.screenshot_worker import run_worker
+
+            socket_path = getattr(settings, "SCREENSHOT_WORKER_SOCKET", None) or (
+                "/run/anisakys/screenshot-worker.sock"
+            )
+            worker_screenshots_dir = (
+                Path(settings.SCREENSHOTS_DIR)
+                if getattr(settings, "SCREENSHOTS_DIR", None)
+                else Path("/opt/anisakys/data/screenshots")
+            )
+            logger.info(f"📸 Starting sandboxed screenshot worker on unix://{socket_path}")
+            run_worker(socket_path, str(worker_screenshots_dir), timeout=settings.TIMEOUT)
             return
 
         if getattr(self.args, "start_api", False):
@@ -876,6 +892,11 @@ def parse_arguments() -> argparse.Namespace:
         "--start-api",
         action="store_true",
         help="Start the REST API server for external reports and multi-API scanning.",
+    )
+    parser.add_argument(
+        "--start-screenshot-worker",
+        action="store_true",
+        help="Start the sandboxed screenshot-capture worker (loopback-only HTTP).",
     )
     parser.add_argument(
         "--api-port", type=int, default=8091, help="Port for the API server (default: 8091)"
