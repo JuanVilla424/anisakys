@@ -72,7 +72,7 @@ class AbuseReportManager:
         # Initialize ICANN compliance services
         self.abuse_contact_validator = AbuseContactValidator(timeout=timeout)
         self.screenshot_service = get_screenshot_service(
-            screenshots_dir=getattr(settings, "SCREENSHOTS_DIR", None), timeout=timeout
+            screenshots_dir=settings.SCREENSHOTS_DIR, timeout=timeout
         )
         self.report_tracker = ReportTracker(db_manager.engine)
         self._smtp_rate_limiter = SmtpRateLimiter(settings.SMTP_RATE_LIMIT_PER_HOUR)

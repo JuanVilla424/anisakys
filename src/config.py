@@ -1,9 +1,19 @@
 import sys
 import ipaddress
+import tempfile
 from pathlib import Path
 from pydantic_settings import BaseSettings
 from pydantic import Field
 from typing import Optional
+
+
+def _default_screenshots_dir() -> str:
+    """Portable fallback storage location, used only when SCREENSHOTS_DIR is
+    not set via env/.env -- matches the one already used by ScreenshotService
+    itself, so every call site agrees on where screenshots live instead of
+    each guessing its own (previously divergent) hardcoded default."""
+    return str(Path(tempfile.gettempdir()) / "anisakys_screenshots")
+
 
 if "pytest" in sys.modules:
     test_env = Path(".env.test")
@@ -45,7 +55,7 @@ class Settings(BaseSettings):
     GRINDER0X_API_KEY: Optional[str] = None
     MAX_ATTACHMENT_SIZE_MB: Optional[int] = None
     MAX_EMAIL_SIZE_MB: Optional[int] = None
-    SCREENSHOTS_DIR: Optional[str] = None
+    SCREENSHOTS_DIR: str = Field(default_factory=_default_screenshots_dir)
     SMTP_USER: Optional[str] = None
     SMTP_PASS: Optional[str] = None
     SMTP_RATE_LIMIT_PER_HOUR: int = 100
@@ -88,6 +98,14 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# Fallback bind path for the sandboxed screenshot worker's own unix socket,
+# used only when starting it without an explicit SCREENSHOT_WORKER_SOCKET
+# override -- portable (tempdir-based) rather than assuming a specific
+# deployment layout like /run/anisakys exists and is writable.
+DEFAULT_SCREENSHOT_WORKER_SOCKET = str(
+    Path(tempfile.gettempdir()) / "anisakys" / "screenshot-worker.sock"
+)
 
 CLOUDFLARE_IP_RANGES = [
     ipaddress.ip_network("173.245.48.0/20"),

@@ -47,11 +47,7 @@ from src.monitoring.gsb_rescan import get_gsb_rescan_job, start_gsb_rescan_job
 # is configured, otherwise the in-process ScreenshotService as before --
 # either way, the local PLAYWRIGHT_AVAILABLE/SELENIUM_AVAILABLE check only
 # matters for the in-process fallback; the client needs neither).
-SCREENSHOTS_DIR = (
-    Path(settings.SCREENSHOTS_DIR)
-    if getattr(settings, "SCREENSHOTS_DIR", None)
-    else Path("/opt/anisakys/data/screenshots")
-)
+SCREENSHOTS_DIR = Path(settings.SCREENSHOTS_DIR)
 screenshot_service = (
     get_screenshot_service(str(SCREENSHOTS_DIR))
     if (

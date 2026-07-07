@@ -58,6 +58,7 @@ from src.config import (
     FIREFOX_USER_AGENT,
     BROWSER_HEADERS,
     DNS_ERROR_KEY_PHRASES,
+    DEFAULT_SCREENSHOT_WORKER_SOCKET,
 )
 from src.logger import logger
 from src.observability.structured_logger import (
@@ -250,7 +251,7 @@ class Engine:
 
         # Initialize ICANN compliance services
         self.screenshot_service = get_screenshot_service(
-            screenshots_dir=getattr(settings, "SCREENSHOTS_DIR", None), timeout=self.timeout
+            screenshots_dir=settings.SCREENSHOTS_DIR, timeout=self.timeout
         )
         self.abuse_contact_validator = AbuseContactValidator(timeout=self.timeout)
         self.report_tracker = ReportTracker(self.db_manager.engine)
@@ -559,14 +560,11 @@ class Engine:
         if getattr(self.args, "start_screenshot_worker", False):
             from src.screenshot_worker import run_worker
 
-            socket_path = getattr(settings, "SCREENSHOT_WORKER_SOCKET", None) or (
-                "/run/anisakys/screenshot-worker.sock"
+            socket_path = (
+                getattr(settings, "SCREENSHOT_WORKER_SOCKET", None)
+                or DEFAULT_SCREENSHOT_WORKER_SOCKET
             )
-            worker_screenshots_dir = (
-                Path(settings.SCREENSHOTS_DIR)
-                if getattr(settings, "SCREENSHOTS_DIR", None)
-                else Path("/opt/anisakys/data/screenshots")
-            )
+            worker_screenshots_dir = Path(settings.SCREENSHOTS_DIR)
             logger.info(f"📸 Starting sandboxed screenshot worker on unix://{socket_path}")
             run_worker(socket_path, str(worker_screenshots_dir), timeout=settings.TIMEOUT)
             return
