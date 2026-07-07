@@ -123,6 +123,108 @@ class TestPhishingAPIEndpoints:
         assert response.status_code == 404
 
 
+class TestIntegrationsEndpoint:
+    """Tests for GET /api/v1/integrations -- real circuit-breaker latency surfacing."""
+
+    @pytest.fixture
+    def integrations_setup(self):
+        """API with a mocked validator whose sub-integrations we control directly."""
+        with (
+            patch("src.api.phishing_api.GrinderReportClient") as mock_grinder,
+            patch("src.api.phishing_api.MultiAPIValidator"),
+        ):
+            mock_grinder.return_value.test_connection.return_value = {"status": "success"}
+            from src.api.phishing_api import PhishingAPI
+
+            mock_db = MagicMock(spec=DatabaseManager)
+            mock_detector = MagicMock(spec=EnhancedAbuseEmailDetector)
+            api = PhishingAPI(mock_db, mock_detector, api_key="test_key")
+            api.app.config["TESTING"] = True
+            client = api.app.test_client()
+
+            # Every other integration stays a bare MagicMock, which would make
+            # _cb_info()'s "real circuit breaker" branch choke on non-numeric
+            # stats, and its raw `.api_key`/`.enabled` MagicMock attributes
+            # aren't JSON-serializable as the new `configured` field. Give them
+            # no circuit breaker plus real bool attributes so they take the
+            # clean-default branch, leaving only virustotal under direct test
+            # control -- with a real (fresh) CircuitBreaker of its own so
+            # _cb_info() can read real stats off it by default.
+            from src.circuit_breaker import CircuitBreaker
+
+            mv = api.multi_api_validator
+            mv.virustotal.api_key = "unused-in-these-tests"
+            mv.virustotal.circuit_breaker = CircuitBreaker("VirusTotal")
+            for name in ("urlvoid", "phishtank", "google_safe_browsing"):
+                integration = getattr(mv, name)
+                integration.circuit_breaker = None
+                integration.api_key = None
+                integration.enabled = False
+            api.grinder_client.circuit_breaker = None
+            api.grinder_client.enabled = False
+
+            return client, api, {"Authorization": "Bearer test_key"}
+
+    def test_last_call_ms_is_null_when_integration_never_called(self, integrations_setup):
+        """A fresh circuit breaker with no calls yet should report null latency."""
+        from src.circuit_breaker import CircuitBreaker
+
+        client, api, headers = integrations_setup
+        api.multi_api_validator.virustotal.circuit_breaker = CircuitBreaker("VirusTotal")
+
+        resp = client.get("/api/v1/integrations", headers=headers)
+        assert resp.status_code == 200
+        data = json.loads(resp.data)
+        vt = next(i for i in data if i["name"] == "virustotal")
+        assert vt["last_call_ms"] is None
+
+    def test_last_call_ms_reflects_real_circuit_breaker_latency(self, integrations_setup):
+        """Once the circuit breaker has made a call, the API should surface its real duration."""
+        from src.circuit_breaker import CircuitBreaker
+
+        client, api, headers = integrations_setup
+        cb = CircuitBreaker("VirusTotal")
+        cb.call(lambda: "ok")  # exercises the real timing path
+        api.multi_api_validator.virustotal.circuit_breaker = cb
+
+        resp = client.get("/api/v1/integrations", headers=headers)
+        data = json.loads(resp.data)
+        vt = next(i for i in data if i["name"] == "virustotal")
+        assert vt["last_call_ms"] == cb.stats.last_call_ms
+        assert vt["last_call_ms"] is not None
+
+    def test_phishtank_is_always_configured(self, integrations_setup):
+        """PhishTank's checkurl endpoint works unauthenticated, so it's never
+        blocked on a missing key -- unlike the other integrations."""
+        client, api, headers = integrations_setup
+
+        resp = client.get("/api/v1/integrations", headers=headers)
+        data = json.loads(resp.data)
+        pt = next(i for i in data if i["name"] == "phishtank")
+        assert pt["configured"] is True
+
+    def test_virustotal_reports_unconfigured_without_api_key(self, integrations_setup):
+        """An integration that requires a real key should say so explicitly,
+        instead of looking indistinguishable from 'not called yet'."""
+        client, api, headers = integrations_setup
+        api.multi_api_validator.virustotal.api_key = None
+
+        resp = client.get("/api/v1/integrations", headers=headers)
+        data = json.loads(resp.data)
+        vt = next(i for i in data if i["name"] == "virustotal")
+        assert vt["configured"] is False
+
+    def test_virustotal_reports_configured_with_api_key(self, integrations_setup):
+        """Once a real key is present, it should report itself as configured."""
+        client, api, headers = integrations_setup
+        api.multi_api_validator.virustotal.api_key = "real-key-value"
+
+        resp = client.get("/api/v1/integrations", headers=headers)
+        data = json.loads(resp.data)
+        vt = next(i for i in data if i["name"] == "virustotal")
+        assert vt["configured"] is True
+
+
 class TestPhishingAPIAuthentication:
     """Tests for API authentication behavior."""
 

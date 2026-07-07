@@ -66,6 +66,7 @@ class CircuitBreakerStats:
     rejected_requests: int = 0
     last_failure_time: Optional[datetime] = None
     last_state_change: Optional[datetime] = None
+    last_call_ms: Optional[float] = None
     state_changes: Dict[str, int] = field(
         default_factory=lambda: {"CLOSED": 0, "OPEN": 0, "HALF_OPEN": 0}
     )
@@ -252,10 +253,10 @@ class CircuitBreaker:
         for attempt in range(self.config.max_retries):
             try:
                 result = func(*args, **kwargs)
+                elapsed = time.time() - _call_start
                 self._record_success()
-                observe_histogram(
-                    METRIC_API_LATENCY_SECONDS, time.time() - _call_start, api_name=self.name
-                )
+                self._stats.last_call_ms = round(elapsed * 1000, 1)
+                observe_histogram(METRIC_API_LATENCY_SECONDS, elapsed, api_name=self.name)
                 increment_counter(METRIC_API_CALLS_TOTAL, api_name=self.name)
                 return result
 
@@ -264,6 +265,7 @@ class CircuitBreaker:
 
                 # Don't retry if we're in half-open (fail fast)
                 if self._state == CircuitState.HALF_OPEN:
+                    self._stats.last_call_ms = round((time.time() - _call_start) * 1000, 1)
                     self._record_failure(e)
                     raise
 
@@ -289,6 +291,7 @@ class CircuitBreaker:
 
         # All retries exhausted
         if last_exception:
+            self._stats.last_call_ms = round((time.time() - _call_start) * 1000, 1)
             self._record_failure(last_exception)
             raise last_exception
 

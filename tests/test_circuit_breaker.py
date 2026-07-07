@@ -296,6 +296,48 @@ class TestCircuitBreakerStatistics:
         circuit_breaker.call(lambda: "success")
         assert circuit_breaker.stats.state_changes["HALF_OPEN"] == 1
 
+    def test_last_call_ms_is_none_before_any_call(self, circuit_breaker):
+        """Should be unset until a call is actually made."""
+        assert circuit_breaker.stats.last_call_ms is None
+
+    def test_tracks_last_call_ms_on_success(self, circuit_breaker):
+        """A successful call should record its duration in milliseconds."""
+
+        def slow_success():
+            time.sleep(0.05)
+            return "success"
+
+        circuit_breaker.call(slow_success)
+        assert circuit_breaker.stats.last_call_ms is not None
+        assert circuit_breaker.stats.last_call_ms >= 50
+
+    def test_tracks_last_call_ms_on_failure(self, circuit_breaker):
+        """A failed call should also record its duration, not just successes."""
+
+        def slow_failure():
+            time.sleep(0.05)
+            raise Exception("API error")
+
+        with pytest.raises(Exception):
+            circuit_breaker.call(slow_failure)
+
+        assert circuit_breaker.stats.last_call_ms is not None
+        assert circuit_breaker.stats.last_call_ms >= 50
+
+    def test_last_call_ms_reflects_most_recent_call(self, circuit_breaker):
+        """Should update on every call, not just the first one."""
+        circuit_breaker.call(lambda: "success")
+        first_ms = circuit_breaker.stats.last_call_ms
+
+        def slower_success():
+            time.sleep(0.08)
+            return "success"
+
+        circuit_breaker.call(slower_success)
+        assert circuit_breaker.stats.last_call_ms is not None
+        assert circuit_breaker.stats.last_call_ms != first_ms
+        assert circuit_breaker.stats.last_call_ms >= 80
+
 
 class TestCircuitBreakerDecorator:
     """Test decorator functionality."""

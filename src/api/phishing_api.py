@@ -1103,7 +1103,7 @@ class PhishingAPI:
             """Return health and circuit-breaker state of all external integrations."""
             try:
 
-                def _cb_info(integration, name, display_name):
+                def _cb_info(integration, name, display_name, configured):
                     cb = getattr(integration, "circuit_breaker", None)
                     if cb is None:
                         return {
@@ -1114,6 +1114,7 @@ class PhishingAPI:
                             "last_call_ms": None,
                             "last_success": None,
                             "error_rate": None,
+                            "configured": configured,
                         }
                     state = cb.state.value  # 'closed' / 'open' / 'half_open'
                     stats = cb.stats
@@ -1135,25 +1136,38 @@ class PhishingAPI:
                         "display_name": display_name,
                         "status": status,
                         "circuit_breaker": state,
-                        "last_call_ms": None,
+                        "last_call_ms": stats.last_call_ms,
                         "last_success": last_success,
                         "error_rate": error_rate,
+                        "configured": configured,
                     }
 
                 mv = self.multi_api_validator
                 integrations = [
-                    _cb_info(mv.virustotal, "virustotal", "VirusTotal"),
-                    _cb_info(mv.urlvoid, "urlvoid", "URLVoid"),
-                    _cb_info(mv.phishtank, "phishtank", "PhishTank"),
-                    _cb_info(mv.google_safe_browsing, "gsb", "Google Safe Browsing"),
-                    _cb_info(self.grinder_client, "grinder", "Grinder"),
+                    # PhishTank's checkurl endpoint works unauthenticated (a key
+                    # only raises the rate limit), so it's always "configured".
+                    _cb_info(
+                        mv.virustotal, "virustotal", "VirusTotal", bool(mv.virustotal.api_key)
+                    ),
+                    _cb_info(mv.urlvoid, "urlvoid", "URLVoid", bool(mv.urlvoid.api_key)),
+                    _cb_info(mv.phishtank, "phishtank", "PhishTank", True),
+                    _cb_info(
+                        mv.google_safe_browsing,
+                        "gsb",
+                        "Google Safe Browsing",
+                        mv.google_safe_browsing.enabled,
+                    ),
+                    _cb_info(
+                        self.grinder_client, "grinder", "Grinder", self.grinder_client.enabled
+                    ),
                 ]
 
                 # SMTP is implicit: if grinder is off, use its config flag as proxy
                 smtp_status = "online"
+                smtp_configured = True
                 if self.report_manager is not None:
-                    smtp_ok = getattr(self.report_manager, "smtp_configured", True)
-                    smtp_status = "online" if smtp_ok else "offline"
+                    smtp_configured = getattr(self.report_manager, "smtp_configured", True)
+                    smtp_status = "online" if smtp_configured else "offline"
 
                 integrations.append(
                     {
@@ -1164,6 +1178,7 @@ class PhishingAPI:
                         "last_call_ms": None,
                         "last_success": None,
                         "error_rate": 0.0,
+                        "configured": smtp_configured,
                     }
                 )
 
