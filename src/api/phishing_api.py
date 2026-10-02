@@ -247,20 +247,20 @@ class PhishingAPI:
                 if abuse_email and not self.abuse_detector.validate_email(abuse_email):
                     return jsonify({"error": "Invalid abuse email format"}), 400
 
-                # Process the report
+                # Process the report (persists synchronously; abuse-contact lookup and the
+                # immediate abuse report continue in the background)
                 try:
                     result = self.process_phishing_report(
                         url, abuse_email, source, priority, description
                     )
-                except TimeoutError:
-                    logger.error(f"❌ Database timeout while processing report for {url}")
-                    return jsonify({"error": "Database operation timed out", "url": url}), 503
                 except Exception as e:
                     logger.error(f"❌ Error processing report: {e}")
                     return (
                         jsonify({"error": f"Failed to process report: {str(e)}", "url": url}),
                         500,
                     )
+                if result.get("status") == "error":
+                    return jsonify(result), 500
 
                 # If successful, also try to report the IP to Grinder
                 # IMPORTANT: Don't report back to Grinder if this report came from Grinder
@@ -2956,116 +2956,39 @@ class PhishingAPI:
         except Exception as e:
             logger.error(f"❌ _trigger_email_scan thread {thread_id}: {e}")
 
-    @timeout(10)  # 10 second timeout for API database operations
     def process_phishing_report(
         self, url: str, abuse_email: Optional[str], source: str, priority: str, description: str
     ) -> Dict[str, Any]:
-        """Process a phishing report from the API."""
+        """Persist a phishing report from the API and return right away.
+
+        Abuse-contact resolution (WHOIS) and the immediate abuse report (SMTP) can take
+        well over 10 s for domains that don't resolve, so they run afterwards in a
+        background thread (_resolve_and_send_report). If the process restarts first, the
+        anisakys-threads reporting loop still picks the site up (manual_flag=1, reported=0).
+        """
         try:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            abuse_emails = []
-            all_abuse_emails = None
-            is_new = False
+            stored_emails: List[str] = []
 
-            # TRANSACTION 1: Check and update/insert record
+            # Short transaction with no network I/O inside
             with self.db_manager.engine.begin() as conn:
-                # Check if URL already exists
                 existing = conn.execute(
-                    text("SELECT id, manual_flag FROM phishing_sites WHERE url = :url"),
+                    text(
+                        "SELECT abuse_email, all_abuse_emails FROM phishing_sites WHERE url = :url"
+                    ),
                     {"url": url},
                 ).fetchone()
+                is_new = existing is None
 
-                if existing:
-                    # Check if existing record has abuse_email and all_abuse_emails
-                    existing_abuse = conn.execute(
-                        text(
-                            "SELECT abuse_email, all_abuse_emails FROM phishing_sites WHERE url = :url"
-                        ),
-                        {"url": url},
-                    ).fetchone()
-
-                    # Resolve abuse emails if needed
-                    needs_resolution = (
-                        not abuse_email and (not existing_abuse or not existing_abuse[0])
-                    ) or (not existing_abuse or not existing_abuse[1])
-
-                    if needs_resolution:
-                        try:
-                            domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
-                            whois_info = self.abuse_detector.get_enhanced_whois_info(domain)
-                            registrar = self.abuse_detector.extract_registrar(whois_info)
-                            abuse_emails = self.abuse_detector.get_enhanced_abuse_email(
-                                domain, whois_info, registrar
-                            )
-                            if abuse_emails:
-                                abuse_email = abuse_emails[0]
-                                all_abuse_emails = ", ".join(abuse_emails)
-                                logger.info(
-                                    f"🔍 Resolved {len(abuse_emails)} abuse emails for {url}: {all_abuse_emails}"
-                                )
-                        except Exception as e:
-                            logger.warning(f"⚠️  Failed to auto-detect abuse email for {url}: {e}")
-
-                    # Update existing record
-                    conn.execute(
-                        text(
-                            """
-                            UPDATE phishing_sites
-                            SET manual_flag = 1, last_seen = :timestamp,
-                                abuse_email = COALESCE(:abuse_email, abuse_email),
-                                all_abuse_emails = COALESCE(:all_abuse_emails, all_abuse_emails),
-                                source = :source, priority = :priority, description = :description
-                            WHERE url = :url
-                        """
-                        ),
-                        {
-                            "timestamp": timestamp,
-                            "abuse_email": abuse_email,
-                            "all_abuse_emails": all_abuse_emails,
-                            "source": source,
-                            "priority": priority,
-                            "description": description,
-                            "url": url,
-                        },
-                    )
-                    logger.info(f"✅ Updated existing phishing report for {url}")
-
-                    # Get abuse_emails from existing record if not resolved
-                    if not abuse_emails and existing_abuse:
-                        if existing_abuse[1]:
-                            abuse_emails = [
-                                e.strip() for e in existing_abuse[1].split(",") if e.strip()
-                            ]
-                        elif existing_abuse[0]:
-                            abuse_emails = [existing_abuse[0]]
-                else:
-                    is_new = True
-                    # Resolve abuse emails for new record
-                    if not abuse_email:
-                        try:
-                            domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
-                            whois_info = self.abuse_detector.get_enhanced_whois_info(domain)
-                            registrar = self.abuse_detector.extract_registrar(whois_info)
-                            abuse_emails = self.abuse_detector.get_enhanced_abuse_email(
-                                domain, whois_info, registrar
-                            )
-                            if abuse_emails:
-                                abuse_email = abuse_emails[0]
-                                all_abuse_emails = ", ".join(abuse_emails)
-                                logger.info(
-                                    f"🔍 Resolved {len(abuse_emails)} abuse emails for {url}: {all_abuse_emails}"
-                                )
-                        except Exception as e:
-                            logger.warning(f"⚠️  Failed to auto-detect abuse email for {url}: {e}")
-
-                    # Create new record
+                if is_new:
+                    needs_resolution = not abuse_email
                     conn.execute(
                         text(
                             """
                             INSERT INTO phishing_sites
                             (url, manual_flag, first_seen, last_seen, abuse_email, all_abuse_emails,
                              reported, abuse_report_sent, source, priority, description)
-                            VALUES (:url, 1, :timestamp, :timestamp, :abuse_email, :all_abuse_emails,
+                            VALUES (:url, 1, :timestamp, :timestamp, :abuse_email, NULL,
                                     0, 0, :source, :priority, :description)
                         """
                         ),
@@ -3073,77 +2996,132 @@ class PhishingAPI:
                             "url": url,
                             "timestamp": timestamp,
                             "abuse_email": abuse_email,
-                            "all_abuse_emails": all_abuse_emails,
                             "source": source,
                             "priority": priority,
                             "description": description,
                         },
                     )
                     logger.info(f"✅ Created new phishing report for {url}")
-
-            # TRANSACTION 1 CLOSED - Now send report OUTSIDE transaction
-            report_sent = False
-            report_recipients = []
-            last_report_sent = None
-
-            if self.report_manager and abuse_emails:
-                try:
-                    logger.info(
-                        f"📧 Sending immediate abuse report for {url} to {len(abuse_emails)} recipients"
+                else:
+                    needs_resolution = (not abuse_email and not existing[0]) or not existing[1]
+                    conn.execute(
+                        text(
+                            """
+                            UPDATE phishing_sites
+                            SET manual_flag = 1, last_seen = :timestamp,
+                                abuse_email = COALESCE(:abuse_email, abuse_email),
+                                source = :source, priority = :priority, description = :description
+                            WHERE url = :url
+                        """
+                        ),
+                        {
+                            "timestamp": timestamp,
+                            "abuse_email": abuse_email,
+                            "source": source,
+                            "priority": priority,
+                            "description": description,
+                            "url": url,
+                        },
                     )
-                    domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
-                    whois_info = self.abuse_detector.get_enhanced_whois_info(domain)
-                    whois_str = str(whois_info)
-                    report_sent = self.report_manager.send_abuse_report(
-                        abuse_emails, url, whois_str
-                    )
-                    if report_sent:
-                        report_recipients = abuse_emails
-                        last_report_sent = timestamp
-                        # TRANSACTION 2: Update report status
-                        with self.db_manager.engine.begin() as conn2:
-                            conn2.execute(
-                                text(
-                                    """
-                                    UPDATE phishing_sites
-                                    SET abuse_report_sent = 1, last_report_sent = :timestamp, reported = 1
-                                    WHERE url = :url
-                                    """
-                                ),
-                                {"timestamp": timestamp, "url": url},
-                            )
-                        logger.info(f"✅ Immediate abuse report sent for {url}")
-                except Exception as e:
-                    logger.error(f"❌ Failed to send immediate abuse report: {e}")
+                    logger.info(f"✅ Updated existing phishing report for {url}")
+                    if existing[1]:
+                        stored_emails = [e.strip() for e in existing[1].split(",") if e.strip()]
+                    elif existing[0]:
+                        stored_emails = [existing[0]]
 
+            queued = needs_resolution or bool(self.report_manager and stored_emails)
+            if queued:
+                threading.Thread(
+                    target=self._resolve_and_send_report,
+                    args=(url, needs_resolution, stored_emails, timestamp),
+                    daemon=True,
+                ).start()
+
+            result = {
+                "status": "created" if is_new else "updated",
+                "message": f"{'Created new' if is_new else 'Updated existing'} report for {url}",
+                "url": url,
+                "timestamp": timestamp,
+                "abuse_emails_count": len(stored_emails),
+                "report_sent": False,
+                "report_recipients": [],
+                "last_report_sent": None,
+                "processing": "queued" if queued else "done",
+            }
             if is_new:
-                return {
-                    "status": "created",
-                    "message": f"Created new report for {url}",
-                    "url": url,
-                    "abuse_email": abuse_email,
-                    "abuse_emails_count": len(abuse_emails) if abuse_emails else 0,
-                    "timestamp": timestamp,
-                    "report_sent": report_sent,
-                    "report_recipients": report_recipients,
-                    "last_report_sent": last_report_sent,
-                }
+                result["abuse_email"] = abuse_email
             else:
-                return {
-                    "status": "updated",
-                    "message": f"Updated existing report for {url}",
-                    "url": url,
-                    "timestamp": timestamp,
-                    "abuse_email_resolved": abuse_email is not None,
-                    "abuse_emails_count": len(abuse_emails) if abuse_emails else 0,
-                    "report_sent": report_sent,
-                    "report_recipients": report_recipients,
-                    "last_report_sent": last_report_sent,
-                }
+                result["abuse_email_resolved"] = bool(abuse_email or stored_emails)
+            return result
 
         except Exception as e:
             logger.error(f"❌ Failed to process phishing report for {url}: {e}")
             return {"status": "error", "message": f"Failed to process report: {str(e)}", "url": url}
+
+    def _resolve_and_send_report(
+        self, url: str, needs_resolution: bool, stored_emails: List[str], timestamp: str
+    ) -> None:
+        """Background half of process_phishing_report: resolve abuse contacts and send the
+        immediate abuse report, with the same rules the request path used to apply inline."""
+        domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+        whois_info = None
+        abuse_emails: List[str] = []
+        try:
+            if needs_resolution:
+                try:
+                    whois_info = self.abuse_detector.get_enhanced_whois_info(domain)
+                    registrar = self.abuse_detector.extract_registrar(whois_info)
+                    abuse_emails = (
+                        self.abuse_detector.get_enhanced_abuse_email(domain, whois_info, registrar)
+                        or []
+                    )
+                except Exception as e:
+                    logger.warning(f"⚠️  Failed to auto-detect abuse email for {url}: {e}")
+
+                if abuse_emails:
+                    all_abuse_emails = ", ".join(abuse_emails)
+                    with self.db_manager.engine.begin() as conn:
+                        conn.execute(
+                            text(
+                                """
+                                UPDATE phishing_sites
+                                SET abuse_email = COALESCE(:abuse_email, abuse_email),
+                                    all_abuse_emails = COALESCE(:all_abuse_emails, all_abuse_emails)
+                                WHERE url = :url
+                                """
+                            ),
+                            {
+                                "abuse_email": abuse_emails[0],
+                                "all_abuse_emails": all_abuse_emails,
+                                "url": url,
+                            },
+                        )
+                    logger.info(
+                        f"🔍 Resolved {len(abuse_emails)} abuse emails for {url}: {all_abuse_emails}"
+                    )
+
+            recipients = abuse_emails or stored_emails
+            if self.report_manager and recipients:
+                logger.info(
+                    f"📧 Sending immediate abuse report for {url} to {len(recipients)} recipients"
+                )
+                if whois_info is None:
+                    whois_info = self.abuse_detector.get_enhanced_whois_info(domain)
+                if self.report_manager.send_abuse_report(recipients, url, str(whois_info)):
+                    with self.db_manager.engine.begin() as conn:
+                        conn.execute(
+                            text(
+                                """
+                                UPDATE phishing_sites
+                                SET abuse_report_sent = 1, last_report_sent = :timestamp, reported = 1
+                                WHERE url = :url
+                                """
+                            ),
+                            {"timestamp": timestamp, "url": url},
+                        )
+                    logger.info(f"✅ Immediate abuse report sent for {url}")
+        except Exception as e:
+            logger.error(f"❌ Failed to send immediate abuse report for {url}: {e}")
 
     def run(self, host: str = "0.0.0.0", port: int = 8091, debug: bool = False):
         """Run the API server."""
