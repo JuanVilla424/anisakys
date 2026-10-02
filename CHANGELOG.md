@@ -1,3 +1,87 @@
+## [1.1.2] - 2026-10-02
+
+### Features
+
+- **core**: add google alerts, domain scan and blocklist endpoints (`patch candidate`)
+- **core**: add RDAP-first abuse contacts, MISP/TAXII sharing, and AiTM kit fingerprinting
+- **core**: add openphish/urlhaus corroboration and urlscan.io brand discovery feeds
+- **core**: sandbox screenshot capture in a low-privilege worker process
+- **core**: expose app version in health endpoint
+- **core**: add certificate transparency log monitoring for proactive phishing detection
+- **core**: close remaining ssrf sinks and add api-key rate limiting
+- **core**: add ssrf guard for url scanner and tighten report scope
+- **core**: add graph api endpoint with real data and fix latent runtime bugs
+- **core**: add email threat enrichment, discard, own-domain whitelist and backfill script
+- **core**: add smtp send rate limiting
+- **core**: add multi-tenant api keys with scopes
+- **core**: add grafana monitoring dashboard with prometheus and loki stack
+- **core**: add alembic migrations with baseline schema
+- **core**: instrument business logic with application metrics
+- **core**: add prometheus metrics endpoint
+- **core**: add observability modules and update architecture doc
+- **core**: add abuse email resolution and registrar form database
+- **core**: add thread executions tracking and image search scheduling tables
+- **core**: add minimum threat level for suspicious tlds and incident columns
+- **core**: modularize main.py and add url lexical analysis
+
+### Bug Fixes
+
+- **core**: unify divergent screenshots dir/socket fallbacks and add pyright venv config
+- **core**: track real per-call latency in circuit breaker and expose api key configuration state
+- **core**: return 404 on nonexistent thread/result ids instead of a silent no-op success
+- **core**: use https url for database submodule
+- **deps**: Update requests requirement from ~2.32.3 to >=2.32.3,<2.35.0 (#197)
+- **deps**: Update cryptography requirement from ~=46.0.5 to ~=48.0.0 (#198)
+- **deps**: Update beautifulsoup4 requirement from >=4.12.0 to >=4.14.3 (#199)
+- **deps**: Update alembic requirement from ~=1.14 to ~=1.18 (#201)
+- **deps**: Update google-api-python-client requirement from >=2.100.0 to >=2.197.0 (#202)
+- **core**: align pylint ignore with .venv and comment suggestion-mode
+- **core**: anchor bumpversion search so deps stay fixed
+- **core**: exempt health and metrics endpoints from rate limiting
+- **core**: fix email attachments, browser sandboxing and missing imports
+- **deps**: Update cryptography requirement from ~=45.0.5 to ~=46.0.5 (#187)
+- **deps**: Update flask requirement from ~=3.1.1 to ~=3.1.3 (#188)
+- **deps**: Update setuptools requirement from ^80.10.2 to ^82.0.0 (#189)
+- **deps**: Update pylint requirement from ^3.3.0 to ^4.0.5 (#190)
+- **deps**: Update sqlalchemy requirement from ~=2.0.46 to ~=2.0.48 (#191)
+- **deps**: Update sqlalchemy requirement from ~=2.0.46 to ~=2.0.48
+- **deps**: Update pylint requirement from ^3.3.0 to ^4.0.5
+- **deps**: Update setuptools requirement from ^80.10.2 to ^82.0.0
+- **deps**: Update flask requirement from ~=3.1.1 to ~=3.1.3
+- **deps**: Update cryptography requirement from ~=45.0.5 to ~=46.0.5
+- **security**: use constant-time comparison and parameterized SQL queries
+- **deps**: Update pytest requirement from ^8.3.1 to ^9.0.2 (#182)
+- **deps**: Update flask-limiter requirement from ~=3.12 to ~=4.1 (#183)
+- **deps**: Update certifi requirement from ^2025.1.31 to ^2026.1.4 (#184)
+- **deps**: Update setuptools requirement from ^75.2.0 to ^80.10.2 (#185)
+- **deps**: Update sqlalchemy requirement from ~=2.0.43 to ~=2.0.46 (#186)
+- **deps**: Update sqlalchemy requirement from ~=2.0.43 to ~=2.0.46
+- **deps**: Update setuptools requirement from ^75.2.0 to ^80.10.2
+- **deps**: Update certifi requirement from ^2025.1.31 to ^2026.1.4
+- **deps**: Update flask-limiter requirement from ~=3.12 to ~=4.1
+- **deps**: Update pytest requirement from ^8.3.1 to ^9.0.2
+
+### Documentation
+
+- **core**: update epic documentation for redirect detection and logging
+- **core**: update readme with gsb and threat level rules
+
+### Refactors
+
+- **core**: relocate legacy modules and restore ads detector
+
+### Tests
+
+- **core**: add test coverage for reporting and monitoring modules
+
+### Chores
+
+- **core**: add docker compose stack and backend entrypoint
+- **core**: remove database submodule
+- **core**: track scripts submodule on main
+- **core**: bump scripts submodule to v1.1.23
+- **core**: exclude docs directory from git tracking
+
 ## [1.1.1] - 2025-11-22
 
 ### Features
