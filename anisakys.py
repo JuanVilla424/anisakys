@@ -1,9 +1,12 @@
 #!/usr/bin/env python
 import sys
-from src import main
-from src import repopulate
 
-if sys.argv[1:] == ["repopulate"]:
-    repopulate.populate_provider_email()
+if "--start-screenshot-worker" in sys.argv[1:]:
+    # Sandboxed worker: start without the app bootstrap (Settings/.env, DB, SMTP)
+    from src.screenshot_worker import main as screenshot_worker_main
+
+    screenshot_worker_main()
 else:
+    from src import main
+
     main.main()

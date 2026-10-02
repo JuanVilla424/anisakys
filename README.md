@@ -165,6 +165,7 @@ Anisakys integrates multiple threat intelligence services to provide comprehensi
 - **🦠 VirusTotal** - Queries 70+ antivirus engines for malware detection and URL reputation
 - **🔍 URLVoid** - Verifies against 30+ reputation sources and blacklist services
 - **🎣 PhishTank** - Community database of verified phishing sites
+- **🛡️ Google Safe Browsing** - Real-time malware and social engineering detection (API v4)
 - **🔗 Grinder** - Optional malicious IP reporting to threat intelligence system (configurable)
 
 #### 📈 **Confidence System**
@@ -175,6 +176,18 @@ The system automatically calculates:
 - **Threat Level** - Aggregated classification (low/medium/high/critical)
 - **Detection Keywords** - Specific terms that triggered detection
 - **API Response Consensus** - Percentage of APIs confirming the threat
+
+#### 🎯 **Threat Level Rules**
+
+| Level      | Triggers                                                   |
+| ---------- | ---------------------------------------------------------- |
+| `critical` | Homoglyphs, PhishTank verified, GSB malware                |
+| `high`     | Typosquatting, combo-squatting, GSB social engineering     |
+| `medium`   | Suspicious TLD (forced minimum), keywords, domain <30 days |
+| `low`      | Low risk indicators                                        |
+| `clean`    | No threats detected                                        |
+
+> **Note:** Suspicious TLDs (.shop, .top, .buzz, etc.) force a minimum threat level of `medium`
 
 ### Enhanced Abuse Reporting
 
@@ -555,6 +568,6 @@ For any inquiries or support, please open an issue or contact [r6ty5r296it6tl4eg
 
 <div align="center">
 
-2025 — This project is licensed under the [GNU General Public License v3.0](https://www.gnu.org/licenses/gpl-3.0.en.html). You are free to use, modify, and distribute this software under the terms of the GPL-3.0 license. For more details, please refer to the [LICENSE](LICENSE) file included in this repository.
+2026 — This project is licensed under the [GNU General Public License v3.0](https://www.gnu.org/licenses/gpl-3.0.en.html). You are free to use, modify, and distribute this software under the terms of the GPL-3.0 license. For more details, please refer to the [LICENSE](LICENSE) file included in this repository.
 
 </div>

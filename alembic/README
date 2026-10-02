@@ -1,0 +1,19 @@
+Anisakys — Alembic Migrations
+==============================
+
+Apply all pending migrations:
+    alembic upgrade head
+
+Rollback one migration:
+    alembic downgrade -1
+
+Show current revision:
+    alembic current
+
+Show migration history:
+    alembic history
+
+Generate a new migration (after schema change):
+    alembic revision -m "describe the change"
+
+Requires DATABASE_URL to be set in the .env file or as an environment variable.

@@ -37,6 +37,10 @@ class TestMultiAPIEngine:
             log_level="INFO",
             multi_api_scan=False,
             url=None,
+            abuse_email=None,
+            attachment=None,
+            cc=None,
+            regen_queries=False,
         )
         return Engine(args)
 
