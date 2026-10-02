@@ -15,7 +15,7 @@ from urllib.parse import urlparse, urljoin
 import requests
 from ipwhois import IPWhois
 
-from src.config import CLOUDFLARE_IP_RANGES
+from src.dns.cloudflare_ranges import CLOUDFLARE_IP_RANGES
 
 logger = logging.getLogger(__name__)
 

@@ -921,15 +921,22 @@ class PhishingAPI:
             """Scan a suspicious domain: DNS + WHOIS + threat classification."""
             try:
                 body = request.get_json(silent=True) or {}
-                domain = (body.get("domain") or "").strip().lower().lstrip("www.")
+                domain = (body.get("domain") or "").strip().lower().removeprefix("www.")
                 if not domain:
                     return jsonify({"error": "domain is required"}), 400
 
+                from src.intelligence.domain_scanner import full_scan, is_valid_domain
+
+                # domain goes into dig/whois argv and victim_domain is echoed back:
+                # accept plain hostnames only
+                if not is_valid_domain(domain):
+                    return jsonify({"error": "invalid domain"}), 400
+
                 victim = (body.get("victim_domain") or "").strip().lower()
+                if victim and not is_valid_domain(victim):
+                    return jsonify({"error": "invalid victim_domain"}), 400
                 if not victim and settings.DOMAINS:
                     victim = settings.DOMAINS.split(",")[0].strip()
-
-                from src.intelligence.domain_scanner import full_scan
 
                 result = full_scan(domain, victim_domain=victim or None)
                 return jsonify(result), 200

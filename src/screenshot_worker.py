@@ -23,6 +23,7 @@ existing SSRF guards run exactly as before; this module only changes WHERE
 import base64
 import logging
 import os
+import tempfile
 from pathlib import Path
 
 from flask import Flask, jsonify, request
@@ -80,4 +81,27 @@ def run_worker(socket_path: str, screenshots_dir: str, timeout: int = 30):
     if os.path.exists(socket_path):
         os.unlink(socket_path)
     app = create_worker_app(screenshots_dir, timeout=timeout)
+    # The unit runs with UMask=0077, which would create the socket as 0700 and lock
+    # out the API process, which reaches it through the worker's group.
+    os.umask(0o007)
     run_simple(f"unix://{socket_path}", 0, app)
+
+
+def main():
+    """Entry point for the sandboxed worker process (anisakys.py --start-screenshot-worker).
+
+    Configuration comes only from the unit's environment, never from the app
+    Settings/.env, so the worker holds no DB/SMTP/API-key secrets. Defaults match
+    the ones src.config uses for SCREENSHOT_WORKER_SOCKET, SCREENSHOTS_DIR and TIMEOUT.
+    """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+    tmp_dir = Path(tempfile.gettempdir())
+    socket_path = os.environ.get("SCREENSHOT_WORKER_SOCKET") or str(
+        tmp_dir / "anisakys" / "screenshot-worker.sock"
+    )
+    screenshots_dir = os.environ.get("SCREENSHOTS_DIR") or str(tmp_dir / "anisakys_screenshots")
+    timeout = int(os.environ.get("TIMEOUT", "50"))
+
+    Path(socket_path).parent.mkdir(parents=True, exist_ok=True)
+    logger.info("Starting sandboxed screenshot worker on unix://%s", socket_path)
+    run_worker(socket_path, screenshots_dir, timeout=timeout)

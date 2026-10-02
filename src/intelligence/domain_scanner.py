@@ -11,11 +11,25 @@ import subprocess
 from datetime import datetime, timezone
 from typing import Optional
 
+import validators
+
+
+def is_valid_domain(domain: str) -> bool:
+    """True only for a syntactically valid hostname -- anything placed in dig/whois
+    argv must pass this, so a value like "-f/etc/passwd" is never parsed as an option."""
+    return bool(domain) and bool(validators.domain(domain))
+
+
+def _require_valid_domain(domain: str) -> None:
+    if not is_valid_domain(domain):
+        raise ValueError(f"invalid domain: {domain!r}")
+
 
 # ── DNS ───────────────────────────────────────────────────────────────────────
 
 
 def _dig(domain: str, record_type: str) -> list[str]:
+    _require_valid_domain(domain)
     try:
         out = subprocess.check_output(
             ["dig", "+short", record_type, domain],
@@ -55,9 +69,10 @@ def get_whois_data(domain: str) -> dict:
         "name_servers": [],
         "raw": "",
     }
+    _require_valid_domain(domain)
     try:
         raw = subprocess.check_output(
-            ["whois", domain],
+            ["whois", "--", domain],
             stderr=subprocess.DEVNULL,
             timeout=15,
             text=True,
