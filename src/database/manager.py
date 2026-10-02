@@ -843,6 +843,27 @@ class DatabaseManager:
             )
         self._init_email_reputation_db()
 
+    def init_blocklist_db(self):
+        """Initialize blocklist table for Google Workspace blocked senders."""
+        with self.engine.connect() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TABLE IF NOT EXISTS blocklist (
+                        id SERIAL PRIMARY KEY,
+                        entry TEXT NOT NULL,
+                        entry_type TEXT NOT NULL CHECK (entry_type IN ('email', 'domain')),
+                        policy_name TEXT,
+                        alert_id TEXT,
+                        created_at TIMESTAMP DEFAULT NOW(),
+                        UNIQUE(entry)
+                    )
+                    """
+                )
+            )
+            conn.commit()
+            logger.info("🗄️  Initialized blocklist table.")
+
     def _init_email_reputation_db(self):
         """Initialize email sender and domain reputation tables."""
         with self.engine.connect() as conn:

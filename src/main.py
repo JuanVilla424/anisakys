@@ -235,6 +235,7 @@ class Engine:
         self.db_manager.init_registrar_abuse_db()
         self.db_manager.init_hosting_abuse_db()
         self.db_manager.init_threads_db()
+        self.db_manager.init_blocklist_db()
 
         # Ensure all initialization connections are closed
         logger.info("🔒 Disposing initialization connections")

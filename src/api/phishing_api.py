@@ -833,6 +833,111 @@ class PhishingAPI:
                 logger.error(f"❌ API error in gsb_report_url: {e}")
                 return jsonify({"error": "Internal server error"}), 500
 
+        # ── GET /api/v1/alerts/google ──────────────────────────────────────────
+        @self.app.route("/api/v1/alerts/google", methods=["GET"])
+        @self.limiter.limit("10 per minute")
+        @require_api_key(scope="read")
+        def google_alerts():
+            """List Google Workspace Alert Center alerts."""
+            try:
+                sa_file = getattr(settings, "GOOGLE_SERVICE_ACCOUNT_FILE", None)
+                admin_email = getattr(settings, "GOOGLE_ADMIN_EMAIL", None)
+                domain = getattr(settings, "GOOGLE_WORKSPACE_DOMAIN", None)
+
+                if not sa_file or not domain:
+                    return jsonify({"error": "Google Workspace not configured"}), 503
+
+                if not admin_email:
+                    admin_email = f"admin@{domain}"
+
+                from src.intelligence.alert_center_client import get_alert_center_client
+
+                client = get_alert_center_client(sa_file, admin_email)
+
+                alerts = client.list_alerts()
+
+                # Strip raw data to keep response lean
+                cleaned = []
+                for a in alerts:
+                    data = a.get("data", {})
+                    if isinstance(data, dict):
+                        data = {
+                            k: v for k, v in data.items() if k not in ("rawData", "raw", "headers")
+                        }
+                    cleaned.append(
+                        {
+                            "alertId": a.get("alertId"),
+                            "type": a.get("type"),
+                            "source": a.get("source"),
+                            "createTime": a.get("createTime"),
+                            "updateTime": a.get("updateTime"),
+                            "endTime": a.get("endTime"),
+                            "deleted": a.get("deleted", False),
+                            "severity": a.get("metadata", {}).get("severity"),
+                            "status": a.get("metadata", {}).get("status"),
+                            "data": data,
+                        }
+                    )
+
+                return jsonify({"alerts": cleaned, "total": len(cleaned)}), 200
+
+            except Exception as e:
+                logger.error(f"❌ google_alerts error: {e}")
+                return jsonify({"error": str(e)}), 500
+
+        # ── GET /api/v1/alerts/google/<id> ─────────────────────────────────────
+        @self.app.route("/api/v1/alerts/google/<alert_id>", methods=["GET"])
+        @self.limiter.limit("20 per minute")
+        @require_api_key(scope="read")
+        def google_alert_detail(alert_id: str):
+            """Get a single Google Workspace Alert Center alert."""
+            try:
+                sa_file = getattr(settings, "GOOGLE_SERVICE_ACCOUNT_FILE", None)
+                admin_email = getattr(settings, "GOOGLE_ADMIN_EMAIL", None)
+                domain = getattr(settings, "GOOGLE_WORKSPACE_DOMAIN", None)
+
+                if not sa_file or not domain:
+                    return jsonify({"error": "Google Workspace not configured"}), 503
+
+                if not admin_email:
+                    admin_email = f"admin@{domain}"
+
+                from src.intelligence.alert_center_client import get_alert_center_client
+
+                client = get_alert_center_client(sa_file, admin_email)
+                alert = client.get_alert(alert_id)
+                feedback = client.list_feedback(alert_id)
+                return jsonify({"alert": alert, "feedback": feedback}), 200
+
+            except Exception as e:
+                logger.error(f"❌ google_alert_detail error: {e}")
+                return jsonify({"error": str(e)}), 500
+
+        # ── POST /api/v1/scan/domain ───────────────────────────────────────────
+        @self.app.route("/api/v1/scan/domain", methods=["POST"])
+        @self.limiter.limit("10 per minute")
+        @require_api_key(scope="scan")
+        def scan_domain():
+            """Scan a suspicious domain: DNS + WHOIS + threat classification."""
+            try:
+                body = request.get_json(silent=True) or {}
+                domain = (body.get("domain") or "").strip().lower().lstrip("www.")
+                if not domain:
+                    return jsonify({"error": "domain is required"}), 400
+
+                victim = (body.get("victim_domain") or "").strip().lower()
+                if not victim and settings.DOMAINS:
+                    victim = settings.DOMAINS.split(",")[0].strip()
+
+                from src.intelligence.domain_scanner import full_scan
+
+                result = full_scan(domain, victim_domain=victim or None)
+                return jsonify(result), 200
+
+            except Exception as e:
+                logger.error(f"❌ scan_domain error: {e}")
+                return jsonify({"error": str(e)}), 500
+
         # ── GET /api/v1/sites ──────────────────────────────────────────────────
         @self.app.route("/api/v1/sites", methods=["GET"])
         @self.limiter.limit("30 per minute")
@@ -2730,6 +2835,67 @@ class PhishingAPI:
                 return jsonify({"items": items, "total": total}), 200
             except Exception as e:
                 logger.error(f"❌ list_email_domains: {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── POST /api/v1/blocklist ────────────────────────────────────────────
+        @self.app.route("/api/v1/blocklist", methods=["POST"])
+        @self.limiter.limit("30 per minute")
+        @require_api_key(scope="write")
+        def add_blocklist_entry():
+            data = request.get_json(silent=True) or {}
+            entry = (data.get("entry") or "").lower().strip()
+            entry_type = (data.get("type") or "").lower().strip()
+            alert_id = data.get("alert_id")
+
+            if not entry:
+                return jsonify({"error": "entry is required"}), 400
+            if entry_type not in ("email", "domain"):
+                return jsonify({"error": "type must be 'email' or 'domain'"}), 400
+
+            try:
+                with self.db_manager.engine.begin() as conn:
+                    existing = conn.execute(
+                        text("SELECT id FROM blocklist WHERE entry = :entry"),
+                        {"entry": entry},
+                    ).fetchone()
+                    if existing:
+                        return jsonify({"status": "already_blocked", "entry": entry}), 200
+                    conn.execute(
+                        text(
+                            "INSERT INTO blocklist (entry, entry_type, alert_id) VALUES (:entry, :entry_type, :alert_id)"
+                        ),
+                        {"entry": entry, "entry_type": entry_type, "alert_id": alert_id},
+                    )
+                logger.info(f"blocklist: added {entry} ({entry_type})")
+                return jsonify({"status": "blocked", "entry": entry, "type": entry_type}), 201
+            except Exception as e:
+                logger.error(f"❌ add_blocklist_entry({entry}): {e}")
+                return jsonify({"error": "Internal server error"}), 500
+
+        # ── GET /api/v1/blocklist ─────────────────────────────────────────────
+        @self.app.route("/api/v1/blocklist", methods=["GET"])
+        @self.limiter.limit("30 per minute")
+        @require_api_key(scope="read")
+        def get_blocklist():
+            try:
+                with self.db_manager.engine.connect() as conn:
+                    rows = conn.execute(
+                        text(
+                            "SELECT entry, entry_type, alert_id, created_at FROM blocklist ORDER BY created_at DESC"
+                        )
+                    ).fetchall()
+                items = [
+                    {
+                        "entry": r[0],
+                        "type": r[1],
+                        "alert_id": r[2],
+                        "created_at": r[3].isoformat() if r[3] else None,
+                    }
+                    for r in rows
+                ]
+                return jsonify({"items": items, "total": len(items)}), 200
+            except Exception as e:
+                logger.error(f"❌ get_blocklist: {e}")
                 return jsonify({"error": "Internal server error"}), 500
 
         @self.app.route("/api/v1/health", methods=["GET"])
