@@ -32,7 +32,7 @@ jobs:
       - name: Get Current Version
         id: get_version
         run: |
-          VERSION=$(python -c "import toml; print(toml.load('pyproject.toml')['tool']['poetry']['version'])")
+          VERSION=$(python -c "import toml; print(toml.load('pyproject.toml')['project']['version'])")
           echo "current_version=$VERSION" >> $GITHUB_OUTPUT
       - name: Get Latest Commit Message
         id: get_commit

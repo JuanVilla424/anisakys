@@ -93,7 +93,9 @@ def _load_app_version() -> str:
     try:
         pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
         with open(pyproject_path, "rb") as f:
-            return tomllib.load(f)["tool"]["poetry"]["version"]
+            pyproject = tomllib.load(f)
+        # PEP 621 metadata; [tool.poetry] kept as a fallback for older checkouts.
+        return pyproject.get("project", {}).get("version") or pyproject["tool"]["poetry"]["version"]
     except Exception:
         return "unknown"
 

@@ -327,19 +327,19 @@ pip install -r requirements.txt
 **🔹 Using Poetry (Alternative)**
 
 ```bash
-# Install Poetry
-pip install poetry
+# Install Poetry (>= 2.2)
+pipx install poetry
 
-# Setup project
-poetry lock
-poetry install
+# Install the locked dependencies (incl. dev tools)
+poetry install --with dev
 
 # Activate environment
-poetry shell
-
-# When done
-deactivate
+eval $(poetry env activate)
 ```
+
+> 📦 `pyproject.toml` is the single source of truth for dependencies and
+> `poetry.lock` pins them. `requirements*.txt` are generated from the lock:
+> after changing dependencies run `poetry lock` and `tools/sync-requirements.sh`.
 
 </td>
 </tr>
