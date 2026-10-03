@@ -6,13 +6,14 @@ callers never confuse "the provider said nothing" with "the provider said the
 URL is clean":
 
 - ``listed``: the provider positively flags the URL/domain;
-- ``not_listed``: the provider answered authoritatively and does not flag it;
+- ``not_listed``: the provider answered authoritatively and does not flag it
+  (for list-only databases such as PhishTank this is the absence of a
+  listing, which is not evidence that the URL is clean);
 - ``error``: the lookup failed (HTTP error, timeout, unparseable body...);
-- ``no_data``: the provider is disabled/unconfigured, has no usable verdict
-  (e.g. a VirusTotal analysis that is pending, empty or stale), or the item
-  is simply unknown to a database that only lists bad things.
+- ``no_data``: the provider is disabled/unconfigured or has no usable verdict
+  (e.g. a VirusTotal analysis that is pending, empty or stale).
 
-Only ``listed`` and ``not_listed`` are evidence; ``error`` and ``no_data`` must
+Only ``listed`` and ``not_listed`` are answers; ``error`` and ``no_data`` must
 never be counted as a clean vote.
 """
 
