@@ -78,3 +78,34 @@ def test_requirements_files_are_generated_from_the_lock():
         header = (ROOT / name).read_text().splitlines()[0]
         assert "Generated from poetry.lock" in header
     assert (ROOT / "poetry.lock").exists()
+
+
+DOCKERIGNORE = {
+    line.strip()
+    for line in (ROOT / ".dockerignore").read_text().splitlines()
+    if line.strip() and not line.startswith("#")
+}
+DOCKERFILE = (ROOT / "Dockerfile").read_text()
+
+
+@pytest.mark.parametrize(
+    "pattern", [".env", ".env.*", "screenshots/", "attachments/", "logs/", ".git"]
+)
+def test_docker_context_excludes_secrets_and_runtime_data(pattern):
+    """Regression: `COPY . .` used to bake .env and collected data into the image."""
+    assert pattern in DOCKERIGNORE
+
+
+def test_docker_image_runs_unprivileged():
+    users = [line.split()[1] for line in DOCKERFILE.splitlines() if line.startswith("USER ")]
+    assert users, "the image must switch to an unprivileged user"
+    assert users[-1].split(":")[0] not in ("root", "0")
+
+
+def test_docker_image_has_the_tools_the_code_shells_out_to():
+    """The abuse-contact lookup runs the `whois` binary (and DNS tools)."""
+    assert "whois" in DOCKERFILE and "dnsutils" in DOCKERFILE
+
+
+def test_docker_image_has_a_healthcheck_on_the_health_endpoint():
+    assert "HEALTHCHECK" in DOCKERFILE and "/api/v1/health" in DOCKERFILE
