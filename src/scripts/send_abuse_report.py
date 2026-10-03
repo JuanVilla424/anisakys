@@ -17,7 +17,6 @@ Options:
 """
 
 import argparse
-import json
 import re
 import smtplib
 import subprocess
@@ -27,7 +26,6 @@ import types
 from datetime import datetime, timezone
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Optional
 
 # ── Bootstrap package stubs to avoid circular imports ────────────────────────
 _base = os.path.join(os.path.dirname(__file__), "..", "..")
@@ -142,8 +140,8 @@ def classify_threat(suspect_domain: str, dns: dict) -> dict:
 
     has_mx = bool(dns["MX"])
     has_web_a = bool(dns["A"] or dns["www_A"] or dns["www_CNAME"])
-    has_txt = bool(dns["TXT"])
-    has_cname = bool(dns["CNAME"])
+    bool(dns["TXT"])
+    bool(dns["CNAME"])
     has_ns = bool(dns["NS"])
 
     # BEC profile: active MX + parked/no web
@@ -430,18 +428,18 @@ def run() -> None:
 
     print(f"[*] Suspect domain : {suspect}")
     print(f"[*] Victim domain  : {victim}")
-    print(f"[*] Resolving DNS  ...")
+    print("[*] Resolving DNS  ...")
 
     dns = resolve_dns(suspect)
     print(f"    A={dns['A']}, MX={len(dns['MX'])} records, NS={dns['NS'][:2]}")
 
-    print(f"[*] Running WHOIS  ...")
+    print("[*] Running WHOIS  ...")
     whois = get_whois_data(suspect)
     print(f"    Registrar: {whois['registrar'] or '(unknown)'}")
     print(f"    Abuse:     {whois['abuse_email'] or '(not found)'}")
     print(f"    Created:   {whois['creation_date'] or '(unknown)'}")
 
-    print(f"[*] Classifying threat ...")
+    print("[*] Classifying threat ...")
     threat = classify_threat(suspect, dns)
     print(f"    Type: {threat['type']}  Severity: {threat['severity']}")
     for ind in threat["indicators"]:

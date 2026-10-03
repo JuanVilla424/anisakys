@@ -13,7 +13,6 @@ Date: 2026-01-25
 import logging
 import requests
 import json
-import base64
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 

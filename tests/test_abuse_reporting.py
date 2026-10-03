@@ -3,9 +3,8 @@ Tests for abuse reporting functionality
 """
 
 import pytest
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import MagicMock
 import smtplib
-from email.mime.multipart import MIMEMultipart
 from src import main
 
 # Import needed classes
@@ -155,7 +154,6 @@ class TestAbuseReporting:
     def test_email_error_handling(self):
         """Test email sending error handling"""
         # Test that we can simulate SMTP errors
-        import smtplib
 
         # Verify exception exists
         assert hasattr(smtplib, "SMTPException")

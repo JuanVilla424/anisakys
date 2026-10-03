@@ -3,10 +3,9 @@ Tests for database upgrade functionality
 """
 
 import pytest
-from sqlalchemy import create_engine, text, MetaData
+from sqlalchemy import create_engine, text
 from pathlib import Path
 import importlib.util
-import sys
 
 # Load main module
 module_path = Path(__file__).parent.parent / "src" / "main.py"

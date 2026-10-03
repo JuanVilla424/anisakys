@@ -5,15 +5,10 @@ Utility functions for URL processing and phishing detection.
 """
 
 import datetime
-import re
-import socket
-from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from typing import List, Optional, Tuple
 
-import requests
 from sqlalchemy import create_engine, text
 
-from src.config import settings
 from src.database import DATABASE_URL, db_engine
 from src.dns.network_utils import safe_get_with_redirects, SSRFRedirectError
 from src.logger import logger

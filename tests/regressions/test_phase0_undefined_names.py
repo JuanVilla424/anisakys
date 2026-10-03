@@ -176,9 +176,7 @@ class TestAutoReportDecision:
         report_manager.send_abuse_report.return_value = True
         with patch("src.detection.analyzer.MultiAPIValidator"):
             analyzer = AutoPhishingAnalyzer(db_manager, detector)
-        with patch(
-            "src.detection.analyzer.AttachmentConfig.get_all_attachments", return_value=[]
-        ):
+        with patch("src.detection.analyzer.AttachmentConfig.get_all_attachments", return_value=[]):
             processed = analyzer.process_auto_reports(report_manager)
 
         assert processed == 1

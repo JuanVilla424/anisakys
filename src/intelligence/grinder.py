@@ -6,15 +6,12 @@ bidirectional threat intelligence integration.
 """
 
 import datetime
-import hmac
 import ipaddress
 import logging
 import time
-from functools import wraps
 from typing import Any, Dict, List
 
 import requests
-from flask import current_app, jsonify, request
 
 from src.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, CircuitBreakerOpenError
 from src.config import settings
@@ -343,7 +340,7 @@ class GrinderReportClient:
         api_confidence = detection_context.get("api_confidence", 0)
 
         comment_parts = [
-            f"Phishing infrastructure detected by Anisakys threat intelligence system.",
+            "Phishing infrastructure detected by Anisakys threat intelligence system.",
             f"Threat Level: {threat_level}",
         ]
 

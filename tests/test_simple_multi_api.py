@@ -3,7 +3,7 @@ Simple test for multi-API functionality in Engine class
 """
 
 import pytest
-from unittest.mock import patch, MagicMock, Mock
+from unittest.mock import patch, Mock
 from pathlib import Path
 import importlib.util
 import argparse

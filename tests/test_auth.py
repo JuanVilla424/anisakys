@@ -3,8 +3,7 @@ Tests for src/auth.py — multi-tenant API key authentication with scopes.
 """
 
 import hashlib
-import hmac
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from flask import Flask

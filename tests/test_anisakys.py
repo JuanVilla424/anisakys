@@ -1,12 +1,7 @@
 import argparse
 import ipaddress
-import time
-from itertools import permutations, islice
-from typing import List, Optional
-import sys
 import pytest
 from sqlalchemy import text
-from pathlib import Path
 
 # Import main module
 from src import main

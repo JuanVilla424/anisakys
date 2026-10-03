@@ -2,7 +2,6 @@ import sys
 import os
 import pytest
 import uuid
-from pathlib import Path
 from urllib.parse import urlparse
 import psycopg2
 from sqlalchemy import create_engine, text

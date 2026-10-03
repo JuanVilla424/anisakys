@@ -13,8 +13,6 @@ Scores an email 0-100 based on indicators of phishing/spam/APT:
 import re
 from typing import Optional
 
-from src.logger import logger
-
 # ── Static lists ─────────────────────────────────────────────────────────────
 
 URGENCY_KEYWORDS_ES = [
@@ -250,7 +248,7 @@ class EmailAnalyzer:
         from_email = parsed_email.get("from_email", "").lower()
         from_name = parsed_email.get("from_name", "").lower()
         reply_to_raw = parsed_email.get("reply_to") or ""
-        to = parsed_email.get("to", "").lower()
+        parsed_email.get("to", "").lower()
 
         from_domain = from_email.split("@")[-1] if "@" in from_email else ""
 

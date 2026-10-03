@@ -58,6 +58,22 @@ exclude = '''
 )/
 '''
 
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = ["scripts", "smtp-relay", "alembic/versions"]
+
+[tool.ruff.lint]
+# Pyflakes (F) is the blocking gate in CI. The wider rule set below is the
+# target for new and modified code (see docs/ROADMAP-v2.md, phase 6).
+select = ["F"]
+extend-select = []
+
+[tool.ruff.lint.per-file-ignores]
+# src.main is a backwards-compatible facade: tests and scripts import many
+# names through it, so its re-exports are intentional.
+"src/main.py" = ["F401"]
+
 [tool.pytest.ini_options]
 minversion = "6.0"
 addopts = "--cov=app --cov-report=xml:coverage.xml --cov-report=term"

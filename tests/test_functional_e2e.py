@@ -8,7 +8,6 @@ from pathlib import Path
 import importlib.util
 import time
 import threading
-import json
 
 # Load main module
 module_path = Path(__file__).parent.parent / "src" / "main.py"
@@ -117,7 +116,7 @@ class TestFunctionalE2E:
             ]
 
             for url in test_urls:
-                result = engine.scanner.scan_site(url)
+                engine.scanner.scan_site(url)
 
             assert len(detected_sites) == 2
             assert "https://paypal-verify.com" in detected_sites
@@ -257,7 +256,6 @@ class TestFunctionalE2E:
         """Test REST API endpoints"""
         import argparse
         from flask import Flask
-        from flask.testing import FlaskClient
 
         args = argparse.Namespace(
             start_api=True,
@@ -276,7 +274,7 @@ class TestFunctionalE2E:
         )
 
         # Create Flask app for testing
-        app = Flask(__name__)
+        Flask(__name__)
 
         # Mock the API setup
         with patch("flask.Flask") as mock_flask:
@@ -284,14 +282,9 @@ class TestFunctionalE2E:
             mock_flask.return_value = mock_app
 
             # Initialize API endpoints
-            engine = Engine(args)
+            Engine(args)
 
             # Test report endpoint
-            report_data = {
-                "url": "https://phishing-test.com",
-                "priority": "high",
-                "description": "Confirmed phishing site",
-            }
 
             # Mock the route decorator and handler
             @mock_app.route("/api/v1/report", methods=["POST"])
@@ -441,7 +434,7 @@ class TestFunctionalE2E:
 
             # Should handle error gracefully
             try:
-                with engine.db_manager.engine.connect() as conn:
+                with engine.db_manager.engine.connect():
                     pass
             except Exception as e:
                 assert "Database connection failed" in str(e)

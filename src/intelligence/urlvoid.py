@@ -165,7 +165,6 @@ class URLVoidIntegration:
             str: Threat level (high, medium, low, clean)
         """
         safety_score = details.get("safety_score", 100)
-        detections = details.get("detections", {})
         blacklists = details.get("blacklists", [])
 
         if safety_score <= 30 or len(blacklists) >= 5:

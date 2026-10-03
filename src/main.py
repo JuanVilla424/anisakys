@@ -432,7 +432,7 @@ class Engine:
                     if pt_result.get("target"):
                         print(f"   🎯 Target: {pt_result['target']}")
                 else:
-                    print(f"   ✅ Status: Not in phishing database")
+                    print("   ✅ Status: Not in phishing database")
 
             # Recommendations
             print("\n📋 RECOMMENDATIONS:")
@@ -478,7 +478,7 @@ class Engine:
                                 "priority": "high" if threat_level == "critical" else "medium",
                             },
                         )
-                        print(f"🔄 URL flagged in database for further processing")
+                        print("🔄 URL flagged in database for further processing")
 
         except Exception as e:
             logger.error(f"❌ Multi-API scan failed for {url}: {e}")
@@ -572,9 +572,7 @@ class Engine:
             logger.info("📡 Takedown monitoring thread started")
 
             # Start GSB rescan background job
-            gsb_job = start_gsb_rescan_job(
-                rescan_interval_hours=12, batch_size=50, max_age_hours=24
-            )
+            start_gsb_rescan_job(rescan_interval_hours=12, batch_size=50, max_age_hours=24)
             logger.info("🔄 GSB rescan job started (12h interval)")
 
             # Start image tracking / ads scheduler if SERPAPI_KEY is configured
@@ -682,7 +680,7 @@ class Engine:
             )
 
         # Start GSB rescan background job (re-verifies existing sites periodically)
-        gsb_job = start_gsb_rescan_job(rescan_interval_hours=12, batch_size=50, max_age_hours=24)
+        start_gsb_rescan_job(rescan_interval_hours=12, batch_size=50, max_age_hours=24)
         logger.info("🔄 GSB rescan job started (12h interval, re-checks existing sites)")
 
         if self.args.threads_only:
@@ -1001,7 +999,7 @@ def show_auto_status():
                     ORDER BY count DESC
                 """)).fetchall()
 
-            print(f"📊 DETECTION STATISTICS:")
+            print("📊 DETECTION STATISTICS:")
             print(f"   🎯 Total Auto-Detected Sites: {total_auto_detected}")
             print(f"   📋 Pending Analysis: {pending_analysis}")
             print(f"   ✅ Analysis Completed: {analysis_completed}")
@@ -1009,11 +1007,11 @@ def show_auto_status():
             print(f"   👀 Manual Review Required: {manual_review}")
             print(f"   📤 Auto-Reports Sent: {auto_reports_sent}")
 
-            print(f"\n⏰ RECENT ACTIVITY (Last 24 Hours):")
+            print("\n⏰ RECENT ACTIVITY (Last 24 Hours):")
             print(f"   🔍 New Detections: {recent_detections}")
             print(f"   🤖 Sites Analyzed: {recent_analysis}")
 
-            print(f"\n🎯 THREAT LEVEL BREAKDOWN:")
+            print("\n🎯 THREAT LEVEL BREAKDOWN:")
             if threat_breakdown:
                 for threat_level, count in threat_breakdown:
                     if threat_level:
@@ -1022,7 +1020,7 @@ def show_auto_status():
                 print("   No completed analyses yet")
 
             # Configuration status
-            print(f"\n⚙️  CONFIGURATION STATUS:")
+            print("\n⚙️  CONFIGURATION STATUS:")
             print(
                 f"   🤖 Auto-Analysis: {'✅ Enabled' if AUTO_ANALYSIS_ENABLED else '❌ Disabled'}"
             )
@@ -1036,10 +1034,10 @@ def show_auto_status():
                 print(f"   🎯 Auto-Report Threat Levels: {["critical", "high"]}")
                 print(f"   ⏱️  Analysis Delay: {AUTO_ANALYSIS_DELAY_SECONDS} seconds")
             else:
-                print(f"   ❌ Reason: No API keys configured or AUTO_MULTI_API_SCAN disabled")
+                print("   ❌ Reason: No API keys configured or AUTO_MULTI_API_SCAN disabled")
 
             # API status
-            print(f"\n🔧 API INTEGRATION STATUS:")
+            print("\n🔧 API INTEGRATION STATUS:")
             api_configs = []
             if VIRUSTOTAL_API_KEY:
                 api_configs.append("✅ VirusTotal")
@@ -1060,17 +1058,17 @@ def show_auto_status():
                 print(f"   {config}")
 
             # Grinder integration status
-            print(f"\n🔗 GRINDER INTEGRATION STATUS:")
+            print("\n🔗 GRINDER INTEGRATION STATUS:")
             if GRINDER_INTEGRATION_ENABLED:
                 print(f"   ✅ Enabled: {GRINDER0X_API_URL}")
-                print(f"   🔄 Automatic IP reporting: Active")
+                print("   🔄 Automatic IP reporting: Active")
             else:
-                print(f"   ❌ Disabled: Missing configuration")
-                print(f"   ⚙️  Configure GRINDER0X_API_URL and GRINDER0X_API_KEY to enable")
+                print("   ❌ Disabled: Missing configuration")
+                print("   ⚙️  Configure GRINDER0X_API_URL and GRINDER0X_API_KEY to enable")
 
             # Recent pending sites for analysis
             if pending_analysis > 0:
-                print(f"\n🔍 NEXT SITES FOR ANALYSIS:")
+                print("\n🔍 NEXT SITES FOR ANALYSIS:")
                 recent_pending = conn.execute(text("""
                         SELECT url, detection_keywords, first_seen, priority
                         FROM phishing_sites
@@ -1091,7 +1089,7 @@ def show_auto_status():
 
             # Recent auto-report eligible sites
             if auto_eligible > 0:
-                print(f"\n🚨 SITES READY FOR AUTO-REPORTING:")
+                print("\n🚨 SITES READY FOR AUTO-REPORTING:")
                 recent_eligible = conn.execute(text("""
                         SELECT url, multi_api_threat_level, api_confidence_score
                         FROM phishing_sites
@@ -1116,7 +1114,7 @@ def test_grinder_integration():
     print("=" * 80)
 
     # Test configuration
-    print(f"📋 Configuration:")
+    print("📋 Configuration:")
     print(f"   API URL: {GRINDER0X_API_URL or 'Not configured'}")
     print(f"   API Key: {'Configured' if GRINDER0X_API_KEY else 'Not configured'}")
     print(f"   Integration Enabled: {GRINDER_INTEGRATION_ENABLED}")
@@ -1127,18 +1125,18 @@ def test_grinder_integration():
         return
 
     # Test connection
-    print(f"\n🔗 Testing connection to Grinder API...")
+    print("\n🔗 Testing connection to Grinder API...")
     grinder_client = GrinderReportClient()
     connection_result = grinder_client.test_connection()
 
     if connection_result["status"] == "success":
-        print(f"✅ Connection successful!")
+        print("✅ Connection successful!")
     else:
         print(f"❌ Connection failed: {connection_result['message']}")
         return
 
     # Test IP reporting (with test data)
-    print(f"\n📤 Testing IP reporting functionality...")
+    print("\n📤 Testing IP reporting functionality...")
     test_ip = "192.0.2.1"  # RFC 5737 test IP
     test_context = {
         "method": "test_integration",
@@ -1152,11 +1150,11 @@ def test_grinder_integration():
     report_result = grinder_client.report_malicious_ip(test_ip, test_context, confidence=95)
 
     if report_result["status"] == "success":
-        print(f"✅ Test IP report sent successfully!")
+        print("✅ Test IP report sent successfully!")
         print(f"   Categories: {report_result.get('categories', [])}")
         print(f"   Confidence: {report_result.get('confidence', 0)}%")
     elif report_result["status"] == "rate_limited":
-        print(f"⏰ Rate limited - this is normal for testing")
+        print("⏰ Rate limited - this is normal for testing")
     else:
         print(f"❌ Test report failed: {report_result['message']}")
 

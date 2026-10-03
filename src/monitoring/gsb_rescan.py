@@ -13,7 +13,7 @@ Date: 2026-01-25
 import logging
 import time
 import threading
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any, Optional
 from datetime import datetime
 
 from src.database.manager import DatabaseManager

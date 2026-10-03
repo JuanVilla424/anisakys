@@ -8,10 +8,9 @@ import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.screenshot_service import ScreenshotService, capture_phishing_screenshot
+from src.screenshot_service import ScreenshotService
 import tempfile
 from pathlib import Path
-import time
 
 
 def test_real_screenshot():
@@ -43,7 +42,7 @@ def test_real_screenshot():
                 if result and result.get("success"):
                     screenshot_path = Path(result["screenshot_path"])
 
-                    print(f"✅ Successful screenshot:")
+                    print("✅ Successful screenshot:")
                     print(f"   - File: {result['filename']}")
                     print(f"   - Size: {result['size_bytes']} bytes")
                     print(f"   - Engine: {result['engine']}")
@@ -65,13 +64,13 @@ def test_real_screenshot():
                 print(f"❌ Error during screenshot: {e}")
                 continue
 
-        print(f"\n❌ Could not capture screenshot of any site")
+        print("\n❌ Could not capture screenshot of any site")
         return False, None
 
 
 def test_screenshot_with_abuse_report_integration():
     """Test screenshot integration with abuse report"""
-    print(f"\n🧪 INTEGRATION TEST WITH REPORT")
+    print("\n🧪 INTEGRATION TEST WITH REPORT")
     print("=" * 45)
 
     # Use httpbin which is reliable for testing - CLEANUP REQUIRED: Remove any generated screenshots
@@ -83,7 +82,7 @@ def test_screenshot_with_abuse_report_integration():
         print("❌ Could not capture screenshot, skipping integration test")
         return False
 
-    print(f"\n📋 Simulating integration with abuse report...")
+    print("\n📋 Simulating integration with abuse report...")
 
     # Simulate template with real data
     template_data = {
@@ -96,7 +95,7 @@ def test_screenshot_with_abuse_report_integration():
         "sla_deadline": "2025-01-31 17:00:00",
     }
 
-    print(f"✅ Template data:")
+    print("✅ Template data:")
     for key, value in template_data.items():
         print(f"   - {key}: {value}")
 
@@ -107,13 +106,13 @@ def test_screenshot_with_abuse_report_integration():
         print(f"   - Size: {screenshot_path.stat().st_size} bytes")
         return True
     else:
-        print(f"❌ Invalid screenshot for attachment")
+        print("❌ Invalid screenshot for attachment")
         return False
 
 
 def test_attachment_selection():
     """Test that only the first attachment is shown in template"""
-    print(f"\n🧪 ATTACHMENT SELECTION TEST")
+    print("\n🧪 ATTACHMENT SELECTION TEST")
     print("=" * 45)
 
     # Simulate multiple attachments - CLEANUP REQUIRED: Test data only, no actual files created
@@ -131,7 +130,7 @@ def test_attachment_selection():
     for i, filename in enumerate(attachment_filenames):
         print(f"   {i+1}. {filename}")
 
-    print(f"\n📄 Will be shown in template:")
+    print("\n📄 Will be shown in template:")
     print(f"   - Displayed attachment: {first_attachment}")
     print(f"   - Total attached attachments: {len(attachment_filenames)}")
 
@@ -139,7 +138,7 @@ def test_attachment_selection():
     is_pdf = first_attachment.lower().endswith(".pdf")
     is_image = first_attachment.lower().endswith((".png", ".jpg", ".jpeg"))
 
-    print(f"✅ Detected file type:")
+    print("✅ Detected file type:")
     print(f"   - Is PDF: {'✅' if is_pdf else '❌'}")
     print(f"   - Is image: {'✅' if is_image else '❌'}")
 
@@ -161,21 +160,21 @@ def main():
         # Test 3: Attachment selection
         attachment_ok = test_attachment_selection()
 
-        print(f"\n🏁 TEST SUMMARY")
+        print("\n🏁 TEST SUMMARY")
         print("=" * 25)
         print(f"📸 Real screenshot: {'✅ OK' if screenshot_ok else '❌ FAILED'}")
         print(f"📋 Integration: {'✅ OK' if integration_ok else '❌ FAILED'}")
         print(f"📎 Attachments: {'✅ OK' if attachment_ok else '❌ FAILED'}")
 
         if screenshot_ok:
-            print(f"\n🎉 SCREENSHOTS WORKING!")
-            print(f"✅ System can capture visual evidence")
-            print(f"✅ Screenshots ready to attach in reports")
-            print(f"✅ Meets ICANN visual evidence requirements")
+            print("\n🎉 SCREENSHOTS WORKING!")
+            print("✅ System can capture visual evidence")
+            print("✅ Screenshots ready to attach in reports")
+            print("✅ Meets ICANN visual evidence requirements")
         else:
-            print(f"\n⚠️  Screenshots not available")
-            print(f"💡 Install drivers: apt-get install chromium-browser")
-            print(f"💡 Or install: pip install selenium playwright")
+            print("\n⚠️  Screenshots not available")
+            print("💡 Install drivers: apt-get install chromium-browser")
+            print("💡 Or install: pip install selenium playwright")
 
         return screenshot_ok and integration_ok and attachment_ok
 

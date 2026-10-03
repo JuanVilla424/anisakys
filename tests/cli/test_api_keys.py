@@ -3,7 +3,7 @@ Tests for src/cli/api_keys.py — API key management CLI.
 """
 
 import hashlib
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -79,7 +79,7 @@ class TestCmdCreate:
     def test_create_invalid_scope_exits(self):
         conn = _make_conn_mock()
         engine = _make_engine(conn)
-        import argparse, sys
+        import argparse
 
         with (
             patch("src.cli.api_keys._get_engine", return_value=engine),

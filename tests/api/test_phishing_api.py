@@ -67,7 +67,7 @@ class TestPhishingAPIEndpoints:
         """Create test client for API with mocked dependencies."""
         with (
             patch("src.api.phishing_api.GrinderReportClient") as mock_grinder,
-            patch("src.api.phishing_api.MultiAPIValidator") as mock_validator,
+            patch("src.api.phishing_api.MultiAPIValidator"),
         ):
             mock_grinder.return_value.test_connection.return_value = {"status": "success"}
             from src.api.phishing_api import PhishingAPI

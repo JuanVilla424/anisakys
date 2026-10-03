@@ -2,7 +2,7 @@
 Tests for src/database/manager.py - DatabaseManager
 """
 
-from unittest.mock import patch, MagicMock, PropertyMock
+from unittest.mock import patch, MagicMock
 
 import pytest
 from sqlalchemy import text
@@ -107,7 +107,6 @@ class TestDatabaseManagerOperations:
     @patch.object(DatabaseManager, "init_registrar_abuse_db")
     def test_get_registrar_abuse_emails_queries_database(self, mock_init):
         """get_registrar_abuse_emails should query the database."""
-        from unittest.mock import MagicMock
 
         manager = DatabaseManager()
 
@@ -164,7 +163,7 @@ class TestDatabaseManagerInitTables:
         # This method has complex migration logic, just verify it doesn't crash
         try:
             manager.init_registrar_abuse_db()
-        except Exception as e:
+        except Exception:
             # Some databases may have issues with migration, that's ok for unit test
             pass
         # No assertion needed - test passes if no unhandled exception

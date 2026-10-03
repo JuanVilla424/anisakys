@@ -5,7 +5,7 @@ Checks URLs against Google's threat database
 
 import logging
 import requests
-from typing import Dict, List, Optional
+from typing import Dict, List
 from datetime import datetime
 from src.config import settings
 

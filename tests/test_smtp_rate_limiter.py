@@ -8,8 +8,6 @@ import time
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 # Import directly by file path to avoid triggering src/reporting/__init__.py
 # which has a pre-existing circular import via src.intelligence ↔ src.detection.
 _spec = importlib.util.spec_from_file_location(

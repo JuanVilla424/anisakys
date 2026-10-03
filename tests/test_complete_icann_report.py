@@ -9,10 +9,7 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from src.main import AbuseReportManager, Engine, set_testing_mode
-from src.config import settings
 import argparse
-from unittest.mock import patch, MagicMock
-import tempfile
 
 # Test user email
 TEST_USER_EMAIL = "r6ty5r296it6tl4eg5m.constant214@passinbox.com"
@@ -90,10 +87,10 @@ def test_complete_icann_report_with_screenshot():
             test_mode=False,  # Real mode for screenshot
         )
 
-        print(f"\n📊 TEST RESULT:")
+        print("\n📊 TEST RESULT:")
         print(f"   - Send successful: {'✅' if result else '❌'}")
-        print(f"   - Real SMTP used: ✅")
-        print(f"   - CCs blocked by IS_TESTING_MODE: ✅")
+        print("   - Real SMTP used: ✅")
+        print("   - CCs blocked by IS_TESTING_MODE: ✅")
         print(f"   - Only sent to: {TEST_USER_EMAIL}")
 
         return result
@@ -113,18 +110,18 @@ def main():
     try:
         success = test_complete_icann_report_with_screenshot()
 
-        print(f"\n🏁 FINAL RESULT")
+        print("\n🏁 FINAL RESULT")
         print("=" * 25)
 
         if success:
-            print(f"🎉 TEST SUCCESSFUL!")
-            print(f"✅ Screenshot captured automatically")
+            print("🎉 TEST SUCCESSFUL!")
+            print("✅ Screenshot captured automatically")
             print(f"✅ Real email sent to {TEST_USER_EMAIL}")
-            print(f"✅ ICANN compliance report complete")
-            print(f"✅ System meets ICANN guidelines")
-            print(f"✅ CCs properly blocked in testing mode")
+            print("✅ ICANN compliance report complete")
+            print("✅ System meets ICANN guidelines")
+            print("✅ CCs properly blocked in testing mode")
         else:
-            print(f"❌ Test failed - check logs above")
+            print("❌ Test failed - check logs above")
 
         return success
 

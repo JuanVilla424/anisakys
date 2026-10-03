@@ -11,18 +11,14 @@ import gc
 import json
 import logging
 import os
-import re
-import socket
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List
 
 import requests
 from sqlalchemy import text
 
 from src.config import (
     settings,
-    CLOUDFLARE_IP_RANGES,
     ALLOWED_HEAD_STATUS,
     BROWSER_HEADERS,
     DNS_ERROR_KEY_PHRASES,
@@ -31,7 +27,6 @@ from src.data import ASN_ABUSE_EMAIL_DB, PROVIDER_ABUSE_EMAIL_DB
 from src.database import DatabaseManager, DATABASE_URL
 from src.detection.redirect_analyzer import RedirectAnalyzer
 from src.detection.utils import PhishingUtils
-from src.dns.network_utils import get_ip_info, is_cloudflare_ip
 from src.generators.query_generator import generate_queries_file
 from src.intelligence import MultiAPIValidator, AUTO_ANALYSIS_ENABLED, AbuseContactResolver
 from src.logger import logger

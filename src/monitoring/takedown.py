@@ -8,12 +8,8 @@ from __future__ import annotations
 
 import datetime
 import re
-import socket
 import threading
-import time
-from typing import Any, Dict, List, Optional
 
-import requests
 from sqlalchemy import text
 
 from src.config import settings

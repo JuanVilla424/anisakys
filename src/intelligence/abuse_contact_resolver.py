@@ -13,7 +13,6 @@ EPIC-005: Multi-Abuse Contact Handling
 import logging
 import re
 from typing import List, Optional, Set
-from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 

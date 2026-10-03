@@ -11,7 +11,6 @@ Tests cover:
 """
 
 import unittest
-from unittest.mock import Mock
 from src.intelligence.abuse_contact_resolver import AbuseContactResolver
 
 

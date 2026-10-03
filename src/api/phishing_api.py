@@ -12,10 +12,7 @@ import json
 import re
 import socket
 import threading
-import time
 import tomllib
-import traceback
-from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -27,13 +24,10 @@ import logging as flask_logging
 
 from src.config import settings
 from sqlalchemy import text
-from src.database import db_engine, DATABASE_URL
+from src.database import db_engine
 from src.auth import require_api_key, _hash_key
 from src.intelligence import (
     MultiAPIValidator,
-    VIRUSTOTAL_API_KEY,
-    URLVOID_API_KEY,
-    PHISHTANK_API_KEY,
     GrinderReportClient,
     GRINDER0X_API_URL,
     GRINDER_INTEGRATION_ENABLED,
@@ -42,7 +36,7 @@ from src.logger import logger
 from src.dns.network_utils import assess_url_target
 from src.screenshot_service import PLAYWRIGHT_AVAILABLE, SELENIUM_AVAILABLE
 from src.screenshot_client import get_screenshot_service
-from src.monitoring.gsb_rescan import get_gsb_rescan_job, start_gsb_rescan_job
+from src.monitoring.gsb_rescan import get_gsb_rescan_job
 
 # Initialize screenshot service (sandboxed client if SCREENSHOT_WORKER_SOCKET
 # is configured, otherwise the in-process ScreenshotService as before --
@@ -1398,7 +1392,7 @@ class PhishingAPI:
                 items = []
                 for r in rows:
                     db_status = r[3]
-                    has_running_exec = r[12] is not None
+                    r[12] is not None
                     if db_status == "error":
                         effective_status = "error"
                     elif db_status in ("idle", "completed", "paused"):

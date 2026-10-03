@@ -4,7 +4,6 @@ Tests for ICANN compliance features: screenshots, contact validation, report tra
 
 import pytest
 import tempfile
-import json
 from unittest.mock import patch, MagicMock
 from pathlib import Path
 import importlib.util
@@ -17,8 +16,8 @@ main = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(main)
 
 # Import services
-from src.screenshot_service import ScreenshotService, capture_phishing_screenshot
-from src.reporting.abuse_contact_validator import AbuseContactValidator, validate_abuse_email
+from src.screenshot_service import ScreenshotService
+from src.reporting.abuse_contact_validator import AbuseContactValidator
 from src.reporting.report_tracker import ReportTracker, create_report_record, ReportStatus
 
 # User's test email

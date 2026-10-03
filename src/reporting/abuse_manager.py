@@ -14,12 +14,10 @@ import re
 import smtplib
 import socket
 import threading
-import time
-import traceback
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlalchemy import text
@@ -27,7 +25,6 @@ from sqlalchemy import text
 from src.config import settings
 from src.dns.network_utils import get_ip_info, is_cloudflare_ip
 from src.detection.utils import PhishingUtils
-from src.data import ASN_ABUSE_EMAIL_DB, PROVIDER_ABUSE_EMAIL_DB
 from src.intelligence import (
     GrinderReportClient,
     GRINDER_INTEGRATION_ENABLED,
@@ -283,7 +280,7 @@ class AbuseReportManager:
 
             if is_development:
                 # In development: only send to test email
-                logger.warning(f"🧪 DEVELOPMENT MODE: Redirecting all emails to test address")
+                logger.warning("🧪 DEVELOPMENT MODE: Redirecting all emails to test address")
                 abuse_emails = [TEST_EMAIL]
             else:
                 # In production: SKIP ICANN validation to avoid hanging
@@ -411,7 +408,7 @@ class AbuseReportManager:
             if is_development:
                 # In development: no CC emails to avoid sending to production contacts
                 logger.warning(
-                    f"🧪 DEVELOPMENT MODE: Clearing CC list to avoid sending to production"
+                    "🧪 DEVELOPMENT MODE: Clearing CC list to avoid sending to production"
                 )
                 final_cc = []
             else:
@@ -454,7 +451,7 @@ class AbuseReportManager:
             confidence_score = multi_api_results.get("confidence_score", 0)
 
             # Create human-readable API summary
-            api_summary += f"🤖 **Multi-API Threat Assessment**\n"
+            api_summary += "🤖 **Multi-API Threat Assessment**\n"
             api_summary += f"📊 **Threat Level**: {threat_level.upper()}\n"
             api_summary += f"🎯 **Confidence Score**: {confidence_score}%\n\n"
 
@@ -487,12 +484,12 @@ class AbuseReportManager:
                     )
                     api_summary += f"🚨 **PhishTank**: {status}\n"
                 else:
-                    api_summary += f"✅ **PhishTank**: Not in phishing database\n"
+                    api_summary += "✅ **PhishTank**: Not in phishing database\n"
 
             # Recommendations
             recommendations = multi_api_results.get("recommendations", [])
             if recommendations:
-                api_summary += f"\n📋 **Recommendations**:\n"
+                api_summary += "\n📋 **Recommendations**:\n"
                 for rec in recommendations[:5]:  # Limit to top 5 recommendations
                     api_summary += f"• {rec}\n"
 
@@ -500,14 +497,14 @@ class AbuseReportManager:
 
         # Add Grinder integration information to API summary
         if grinder_report_result and GRINDER_INTEGRATION_ENABLED:
-            api_summary += f"🔗 **Threat Intelligence Integration**\n"
+            api_summary += "🔗 **Threat Intelligence Integration**\n"
             if grinder_report_result.get("status") == "success":
                 categories = grinder_report_result.get("categories", [])
-                api_summary += f"✅ **IP reported to threat intelligence system**\n"
+                api_summary += "✅ **IP reported to threat intelligence system**\n"
                 api_summary += f"📊 **Categories**: {', '.join(map(str, categories))}\n"
                 api_summary += f"🎯 **Confidence**: {grinder_report_result.get('confidence', 0)}%\n"
             elif grinder_report_result.get("status") == "rate_limited":
-                api_summary += f"⏰ **Rate limited** - IP will be reported later\n"
+                api_summary += "⏰ **Rate limited** - IP will be reported later\n"
             else:
                 api_summary += f"⚠️ **IP reporting failed**: {grinder_report_result.get('message', 'Unknown error')}\n"
             api_summary += "\n"
@@ -677,7 +674,7 @@ class AbuseReportManager:
                 logger.info(f"🌐 CONNECTING TO SMTP {smtp_host}:{smtp_port}")
                 with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
                     if smtp_user and smtp_pass:
-                        logger.info(f"🔐 LOGGING IN TO SMTP SERVER")
+                        logger.info("🔐 LOGGING IN TO SMTP SERVER")
                         server.login(smtp_user, smtp_pass)
                     logger.info(f"📬 SENDING EMAIL MESSAGE to {primary}")
                     server.sendmail(sender_email, recipients, msg.as_string())
@@ -777,7 +774,7 @@ class AbuseReportManager:
 
                 # Try to track the report - if this fails, continue anyway since emails were sent
                 try:
-                    logger.info(f"📋 Creating report record for tracking")
+                    logger.info("📋 Creating report record for tracking")
                     report_record = create_report_record(
                         site_url=site_url,
                         recipients=abuse_emails,
@@ -1283,7 +1280,7 @@ Phishing Detection Team
                                     if auto_detected and api_data[5]:  # Has detection keywords
                                         multi_api_results["recommendations"].extend(
                                             [
-                                                f"🤖 AUTO-DETECTED: Site flagged by automated scanning system",
+                                                "🤖 AUTO-DETECTED: Site flagged by automated scanning system",
                                                 f"🎯 DETECTION KEYWORDS: {api_data[5]}",
                                                 f"📊 THREAT ASSESSMENT: {api_data[3] or 'unknown'} ({api_data[4] or 0}% confidence)",
                                             ]
@@ -1554,8 +1551,6 @@ Phishing Detection Team
         logger.info("🔍 STARTING process_manual_reports method")
 
         # Import required modules at the top to avoid UnboundLocalError
-        import subprocess
-        import os
 
         # Close all existing database connections to avoid blocking
         logger.info("🔒 Disposing all existing database connections")
@@ -1648,7 +1643,7 @@ Phishing Detection Team
                         # Parse DATABASE_URL
                         parsed = urlparse(settings.DATABASE_URL)
 
-                        logger.info(f"🔧 Creating direct psycopg2 connection")
+                        logger.info("🔧 Creating direct psycopg2 connection")
                         conn_api = psycopg2.connect(
                             host=parsed.hostname,
                             port=parsed.port,
@@ -1661,7 +1656,7 @@ Phishing Detection Team
                         conn_api.autocommit = True  # Enable autocommit
 
                         cursor = conn_api.cursor()
-                        logger.info(f"✅ Direct connection established, executing API UPDATE")
+                        logger.info("✅ Direct connection established, executing API UPDATE")
 
                         try:
                             cursor.execute(
@@ -1828,7 +1823,7 @@ Phishing Detection Team
                         if abuse_list and abuse_report_sent == 0:
                             logger.info(f"📧 SENDING ABUSE REPORT for {url} to {abuse_list}")
                             logger.info(
-                                f"🏁 ABOUT TO CALL send_abuse_report - THIS IS WHERE IT MIGHT HANG!"
+                                "🏁 ABOUT TO CALL send_abuse_report - THIS IS WHERE IT MIGHT HANG!"
                             )
 
                             report_result = self.send_abuse_report(

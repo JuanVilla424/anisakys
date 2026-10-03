@@ -9,10 +9,8 @@ import smtplib
 import dns.resolver
 import dns.exception
 from typing import Optional, Dict, List, Tuple
-import requests
 import logging
 from urllib.parse import urlparse
-import validators
 
 logger = logging.getLogger(__name__)
 

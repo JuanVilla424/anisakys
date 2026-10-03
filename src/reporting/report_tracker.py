@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from sqlalchemy import create_engine, text
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from enum import Enum
 
 logger = logging.getLogger(__name__)

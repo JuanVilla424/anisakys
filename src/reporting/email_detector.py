@@ -17,7 +17,6 @@ import validators
 import whois
 from ipwhois import IPWhois
 
-from src.config import settings
 from src.data import (
     ASN_ABUSE_EMAIL_DB,
     PROVIDER_ABUSE_EMAIL_DB,
@@ -284,7 +283,7 @@ class EnhancedAbuseEmailDetector:
                             f"❌ Provider abuse email rejected (same domain): {provider_abuse}"
                         )
                     else:
-                        logger.warning(f"⚠️  No provider abuse email found in WHOIS data")
+                        logger.warning("⚠️  No provider abuse email found in WHOIS data")
 
                 # Add ASN abuse emails (handle both string and list)
                 asn_emails_added = False
@@ -570,7 +569,7 @@ class EnhancedAbuseEmailDetector:
             )
 
             # For backward compatibility, extract first email for legacy fields
-            asn_abuse_email = all_abuse_emails[0] if all_abuse_emails else None
+            all_abuse_emails[0] if all_abuse_emails else None
             provider_abuse_email = all_abuse_emails[0] if all_abuse_emails else None
 
             logger.info(

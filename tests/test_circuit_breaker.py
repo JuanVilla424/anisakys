@@ -9,7 +9,7 @@ Version: 1.1.0
 
 import pytest
 import time
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 import logging
 
 from src.circuit_breaker import (
@@ -280,7 +280,7 @@ class TestCircuitBreakerStatistics:
 
     def test_tracks_state_changes(self, circuit_breaker):
         """Should track number of state transitions."""
-        initial_closed = circuit_breaker.stats.state_changes["CLOSED"]
+        circuit_breaker.stats.state_changes["CLOSED"]
 
         # Open circuit
         for _ in range(3):

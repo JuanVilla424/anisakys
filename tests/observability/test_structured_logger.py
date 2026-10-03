@@ -17,7 +17,6 @@ import sys
 from datetime import datetime
 from io import StringIO
 
-import pytest
 
 from src.observability.structured_logger import (
     StructuredFormatter,

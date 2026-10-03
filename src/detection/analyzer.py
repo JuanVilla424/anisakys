@@ -11,7 +11,7 @@ import json
 import re
 import time
 import threading
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, TYPE_CHECKING
 
 from sqlalchemy import text
 
@@ -408,7 +408,7 @@ class AutoPhishingAnalyzer:
                             "urlvoid": json.loads(api_results[1]) if api_results[1] else {},
                             "phishtank": json.loads(api_results[2]) if api_results[2] else {},
                             "recommendations": [
-                                f"🤖 AUTO-DETECTED: Site flagged by automated system",
+                                "🤖 AUTO-DETECTED: Site flagged by automated system",
                                 f"🎯 DETECTION KEYWORDS: {keywords}",
                                 f"📊 THREAT ASSESSMENT: {threat_level.upper()} ({confidence}% confidence)",
                             ],
