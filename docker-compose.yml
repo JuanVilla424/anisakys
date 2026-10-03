@@ -48,6 +48,24 @@ services:
       start_period: 20s
     networks: [anisakys-net]
 
+  # Background jobs (abuse reporting, outbox delivery, follow-ups, takedown
+  # monitor, GSB rescan, schedulers). The API container only serves HTTP, so
+  # without this service nothing is reported or verified. Starts after the
+  # backend is healthy, i.e. after migrations ran.
+  scheduler:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      LOG_DIR: ""
+      PROCESS_ROLE: scheduler
+    command: ["python", "anisakys.py", "--role", "scheduler"]
+    depends_on:
+      backend: { condition: service_healthy }
+    networks: [anisakys-net]
+
   frontend:
     build:
       context: ../anisakys-frontend
