@@ -16,6 +16,7 @@ import socket
 import threading
 import tomllib
 from pathlib import Path
+from urllib.parse import urlsplit
 from typing import Any, Dict, List, Optional, Tuple
 
 import validators
@@ -252,6 +253,32 @@ def campaign_id(kind: str, key: str) -> str:
     return f"CAMP-{digest[:10].upper()}"
 
 
+MEMORY_STORAGE_URI = "memory://"
+
+
+def rate_limit_storage_uri() -> str:
+    """Return the rate-limit storage URI configured in ``RATELIMIT_STORAGE_URL``.
+
+    Without it, counters are kept in process memory: every gunicorn worker then
+    enforces its own copy of each limit, so the effective limit is multiplied by
+    the number of workers. That is logged as a warning at startup. The URI is
+    never logged because it may embed a Redis password.
+
+    Returns:
+        The configured storage URI, or ``"memory://"`` when unset.
+    """
+    uri = (settings.RATELIMIT_STORAGE_URL or "").strip()
+    if not uri or uri.startswith(MEMORY_STORAGE_URI):
+        logger.warning(
+            "⚠️  RATELIMIT_STORAGE_URL is not set: rate limits are kept in memory and "
+            "enforced per process (each gunicorn worker counts separately); use a "
+            "redis:// URI in production"
+        )
+        return MEMORY_STORAGE_URI
+    logger.info(f"🚦 Rate-limit counters stored in {urlsplit(uri).scheme} storage")
+    return uri
+
+
 class PhishingAPI:
     """REST API for external phishing reports with multi-API integration and Grinder integration."""
 
@@ -304,15 +331,17 @@ class PhishingAPI:
             logger.info(f"🔁 Trusting {proxy_hops} reverse-proxy hop(s) for client IP/scheme")
 
         # Rate limiting — bucketed by API key (falls back to IP when no
-        # Bearer header is present). Storage defaults to the in-memory
-        # backend (today's behavior, single-process only); set
-        # RATELIMIT_STORAGE_URL to a redis:// URI for multi-worker deployments
-        # where counters must be shared across processes.
+        # Bearer header is present). Counters live in RATELIMIT_STORAGE_URL
+        # (Redis in production, shared by every gunicorn worker); if that store
+        # becomes unreachable the limiter degrades to per-process memory
+        # instead of failing every request.
+        storage_uri = rate_limit_storage_uri()
         self.limiter = Limiter(
             app=self.app,
             key_func=rate_limit_key,
             default_limits=["200 per day", "50 per hour", "10 per minute"],
-            storage_uri=(getattr(settings, "RATELIMIT_STORAGE_URL", None) or "memory://"),
+            storage_uri=storage_uri,
+            in_memory_fallback_enabled=storage_uri != MEMORY_STORAGE_URI,
         )
 
         install_request_ids(self.app)
