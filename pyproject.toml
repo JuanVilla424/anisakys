@@ -42,6 +42,7 @@ dependencies = [
     "sqlalchemy>=2.0.48,<2.1",
     "stix2>=3.0,<4",
     "tldextract>=5.1,<6",
+    "urllib3>=2.2,<3",
     "validators>=0.35,<0.36",
     "websocket-client>=1.8,<2",
     "werkzeug>=3.1,<4",
