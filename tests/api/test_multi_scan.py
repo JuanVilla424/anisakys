@@ -1,7 +1,7 @@
 """Tests for POST /api/v1/multi-scan persistence and report-status read-back."""
 
 from contextlib import contextmanager
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator, Optional, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -78,7 +78,8 @@ def scan_api():
         detector.get_enhanced_abuse_email.return_value = ["abuse@registrar.example"]
         api = PhishingAPI(db_manager, detector, api_key="test_key")
         api.app.config["TESTING"] = True
-        api.multi_api_validator.comprehensive_scan.return_value = {
+        validator = cast(MagicMock, api.multi_api_validator)  # the class is patched
+        validator.comprehensive_scan.return_value = {
             "domain": "phish.example",
             "aggregated_threat_level": "high",
             "confidence_score": 90,

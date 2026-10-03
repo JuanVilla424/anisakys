@@ -157,7 +157,7 @@ class TestBundleContents:
         bundle = _bundle({"indicators": [{"type": "email-addr", "value": "x@evil.example"}]})
 
         parsed = stix2.parse(bundle)
-        assert parsed.type == "bundle"
+        assert isinstance(parsed, stix2.Bundle)
 
 
 class TestValidation:

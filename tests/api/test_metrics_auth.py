@@ -1,6 +1,7 @@
 """/metrics requires the METRICS_TOKEN or an API key with metrics/read scope."""
 
 import hashlib
+from typing import Optional
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -28,7 +29,7 @@ def _db_key(scopes):
     return {"scopes": scopes, "allowed_ips": None, "key_hash": hashlib.sha256(b"k").hexdigest()}
 
 
-def _get(client, token=None, key_row=None, metrics_token=METRICS_TOKEN):
+def _get(client, token=None, key_row=None, metrics_token: Optional[str] = METRICS_TOKEN):
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     with (
         patch(

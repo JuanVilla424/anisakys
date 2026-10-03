@@ -28,7 +28,7 @@ class TestCreateApp:
         app = wsgi_module.create_app(api_key="wsgi-key")
 
         assert isinstance(app, Flask)
-        assert app.api_key == "wsgi-key"
+        assert getattr(app, "api_key") == "wsgi-key"
         assert "/api/v1/health" in {rule.rule for rule in app.url_map.iter_rules()}
 
     def test_api_role_gets_no_report_manager_and_no_schedulers(self, wsgi_module):
@@ -54,7 +54,7 @@ class TestCreateApp:
         with patch.object(wsgi_module.settings, "ANISAKYS_API_KEY", "from-settings"):
             app = wsgi_module.create_app()
 
-        assert app.api_key == "from-settings"
+        assert getattr(app, "api_key") == "from-settings"
 
     def test_module_level_app_is_created_lazily_once(self, wsgi_module):
         sentinel = MagicMock()

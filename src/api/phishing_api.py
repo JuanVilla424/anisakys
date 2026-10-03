@@ -18,7 +18,7 @@ import time
 import tomllib
 from pathlib import Path
 from urllib.parse import urlsplit
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import validators
 from flask import Flask, Response, current_app, jsonify, request
@@ -65,6 +65,10 @@ from src.dns.network_utils import assess_url_target, is_cloudflare_ip
 from src.screenshot_service import PLAYWRIGHT_AVAILABLE, SELENIUM_AVAILABLE
 from src.screenshot_client import get_screenshot_service
 from src.monitoring.gsb_rescan import get_gsb_rescan_job
+
+if TYPE_CHECKING:
+    from src.monitoring.email_scheduler import EmailMonitorScheduler
+    from src.monitoring.scheduler import ImageTrackingScheduler
 
 # Initialize screenshot service (sandboxed client if SCREENSHOT_WORKER_SOCKET
 # is configured, otherwise the in-process ScreenshotService as before --
@@ -351,10 +355,10 @@ class PhishingAPI:
         self,
         db_manager,
         abuse_detector,
-        api_key: str = None,
+        api_key: Optional[str] = None,
         report_manager=None,
-        scheduler=None,
-        email_scheduler=None,
+        scheduler: Optional["ImageTrackingScheduler"] = None,
+        email_scheduler: Optional["EmailMonitorScheduler"] = None,
     ):
         """
         Initialize the Phishing API with authentication support and Grinder integration.
@@ -379,7 +383,7 @@ class PhishingAPI:
         # Initialize Flask app
         self.app = Flask(__name__)
         self.app.config["JSON_SORT_KEYS"] = False
-        self.app.api_key = api_key  # Store API key in-app config
+        self.app.api_key = api_key  # type: ignore[attr-defined]  # read by src.auth
 
         # Configure Flask logging to be less verbose
         flask_logging.getLogger("werkzeug").setLevel(flask_logging.WARNING)
@@ -1719,7 +1723,6 @@ class PhishingAPI:
                 items = []
                 for r in rows:
                     db_status = r[3]
-                    r[12] is not None
                     if db_status == "error":
                         effective_status = "error"
                     elif db_status in ("idle", "completed", "paused"):
@@ -2806,7 +2809,8 @@ class PhishingAPI:
             """
             data = request.get_json(silent=True) or {}
             allowed = {"label": str, "status": str, "search_interval_hours": int}
-            updates, params = [], {"id": thread_id}
+            updates: List[str] = []
+            params: Dict[str, Any] = {"id": thread_id}
             for field, cast in allowed.items():
                 if field in data:
                     updates.append(f"{field} = :{field}")
@@ -2846,7 +2850,8 @@ class PhishingAPI:
         def update_thread_result(thread_id: int, result_id: int):
             data = request.get_json(silent=True) or {}
             allowed = {"status": str, "assigned_to": str}
-            updates, params = [], {"id": result_id, "tid": thread_id}
+            updates: List[str] = []
+            params: Dict[str, Any] = {"id": result_id, "tid": thread_id}
             for field, cast in allowed.items():
                 if field in data:
                     updates.append(f"{field} = :{field}")
@@ -3374,24 +3379,33 @@ class PhishingAPI:
 
     def _trigger_image_search(self, thread_id: int, s3_key: str):
         """Run an image tracking search in a fresh DB connection (for background threads)."""
+        scheduler = self.scheduler
+        if scheduler is None:
+            return
         try:
             with self.db_manager.engine.begin() as conn:
-                self.scheduler._run_image_tracking(conn, thread_id, s3_key)
+                scheduler._run_image_tracking(conn, thread_id, s3_key)
         except Exception as e:
             logger.error(f"❌ _trigger_image_search thread {thread_id}: {e}")
 
     def _trigger_ads_search(self, thread_id: int, details):
         """Run a google_ads search in a fresh DB connection (for background threads)."""
+        scheduler = self.scheduler
+        if scheduler is None:
+            return
         try:
             with self.db_manager.engine.begin() as conn:
-                self.scheduler._run_google_ads(conn, thread_id, details)
+                scheduler._run_google_ads(conn, thread_id, details)
         except Exception as e:
             logger.error(f"❌ _trigger_ads_search thread {thread_id}: {e}")
 
     def _trigger_email_scan(self, thread_id: int, details):
         """Run an email_monitor scan — manages its own transactions internally."""
+        email_scheduler = self.email_scheduler
+        if email_scheduler is None:
+            return
         try:
-            self.email_scheduler._run_email_monitor(thread_id, details)
+            email_scheduler._run_email_monitor(thread_id, details)
         except Exception as e:
             logger.error(f"❌ _trigger_email_scan thread {thread_id}: {e}")
 
