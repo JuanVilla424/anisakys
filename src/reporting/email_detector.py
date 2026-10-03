@@ -67,6 +67,9 @@ class AbuseContactResolution:
     is_cloudflare: bool = False
     hosting_provider: Optional[str] = None
     asn: Optional[str] = None
+    # Non-Cloudflare IP of an origin-style sub-domain. Informational only: the
+    # phishing operator controls that DNS, so it never selects recipients.
+    origin_ip_candidate: Optional[str] = None
 
 
 @dataclass
@@ -322,8 +325,18 @@ class EnhancedAbuseEmailDetector:
         lookup_ip = resolution.resolved_ip
         if lookup_ip and is_cloudflare_ip(lookup_ip):
             resolution.is_cloudflare = True
-            lookup_ip = self.get_real_ip_behind_cloudflare(domain)
-            if not lookup_ip:
+            # Origin-style sub-domains (direct., origin., ...) are resolved by the
+            # attacker's own DNS, which can point them at any third party's IP.
+            # Keep the candidate for the analyst; never derive recipients from it.
+            # Cloudflare itself is reached through its own channel (web form).
+            resolution.origin_ip_candidate = self.get_real_ip_behind_cloudflare(domain)
+            lookup_ip = None
+            if resolution.origin_ip_candidate:
+                logger.info(
+                    f"{domain} is behind Cloudflare; origin candidate "
+                    f"{resolution.origin_ip_candidate} needs analyst confirmation"
+                )
+            else:
                 logger.info(f"{domain} is behind Cloudflare and no origin IP is known")
 
         if lookup_ip:
@@ -487,7 +500,11 @@ class EnhancedAbuseEmailDetector:
 
     def get_real_ip_behind_cloudflare(self, domain: str) -> Optional[str]:
         """
-        Look for the origin IP of a Cloudflare-proxied site.
+        Look for a candidate origin IP of a Cloudflare-proxied site.
+
+        The result is informational: the site's operator controls these DNS
+        names, so callers must not send complaints to the network it points at
+        without an analyst confirming it.
 
         Only origin-style sub-domains of the site itself are probed. MX records
         are deliberately not used: the mail host of a domain says nothing about

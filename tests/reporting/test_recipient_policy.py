@@ -131,6 +131,31 @@ class TestCloudflareOrigin:
         assert "MX" not in queried
 
 
+class TestCloudflareOriginIsNotTrusted:
+    """origin./direct. sub-domains of a phishing site are attacker-controlled DNS:
+    pointing them at a third party's IP must not route complaints there."""
+
+    def test_origin_candidate_never_selects_hosting_contacts(self, detector):
+        cloudflare_ip, victim_ip = "104.16.0.1", "198.51.100.7"
+
+        def resolve(name):
+            return victim_ip if name.startswith("origin.") else cloudflare_ip
+
+        with (
+            patch("src.reporting.email_detector.socket.gethostbyname", side_effect=resolve),
+            patch(
+                "src.reporting.email_detector.is_cloudflare_ip",
+                side_effect=lambda ip: ip == cloudflare_ip,
+            ),
+            patch.object(detector, "_lookup_network") as lookup_network,
+        ):
+            resolution = detector.resolve_abuse_contacts("evil.example")
+
+        assert resolution.is_cloudflare is True
+        assert resolution.origin_ip_candidate == victim_ip
+        lookup_network.assert_not_called()
+
+
 class TestTrustOrdering:
     """AbuseContactResolver merges sources through a set and truncates the
     result, so the order (and which contacts survive) was arbitrary."""
