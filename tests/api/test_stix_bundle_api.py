@@ -74,8 +74,42 @@ def test_invalid_indicators_get_400_listing_indexes(client):
 
     assert resp.status_code == 400
     data = resp.get_json()
-    assert data["error"] == "Invalid indicators"
+    assert data["error"].startswith("Invalid indicators: 1 indicator is invalid; first problem")
+    assert f"index 1: {data['details'][0]['error']}" in data["error"]
     assert [d["index"] for d in data["details"]] == [1]
+
+
+def test_several_invalid_indicators_are_counted_in_the_error(client):
+    body = {"indicators": [{"type": "hash", "value": "x"}, {"type": "domain", "value": ""}]}
+
+    data = client.post(PATH, json=body, headers=MASTER).get_json()
+
+    assert data["error"].startswith("Invalid indicators: 2 indicators are invalid")
+    assert "index 0" in data["error"]
+    assert [d["index"] for d in data["details"]] == [0, 1]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        None,
+        [],
+        {"indicators": []},
+        {"indicators": [{"type": "domain", "value": "a.example"}], "tlp": "pink"},
+        {"indicators": [{"type": "domain", "value": "a.example"}], "confidence": 101},
+        {"indicators": [{"type": "domain", "value": "a.example"}], "name": ""},
+    ],
+)
+def test_every_400_carries_a_human_readable_error(client, body):
+    """The console shows ``error`` to the analyst; it must always be a sentence."""
+    if body is None:
+        resp = client.post(PATH, data="nope", headers=MASTER, content_type="text/plain")
+    else:
+        resp = client.post(PATH, json=body, headers=MASTER)
+
+    assert resp.status_code == 400
+    error = resp.get_json()["error"]
+    assert isinstance(error, str) and len(error.split()) >= 3
 
 
 def test_non_json_body_is_400(client):

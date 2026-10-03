@@ -319,6 +319,35 @@ def _thread_access_denied(thread_type: Any, details: Any) -> Optional[Tuple[Resp
 STIX_BUNDLE_MAX_BODY_BYTES = 8 * 1024 * 1024
 STIX_BUNDLE_MAX_ERRORS = 100
 
+
+def stix_request_error_message(exc: Any) -> str:
+    """Build the client-facing ``error`` text of a rejected STIX bundle request.
+
+    Clients show ``error`` to the analyst and may ignore ``details``; a bare
+    "Invalid indicators" does not say which indicator to fix, so the count and
+    the first offending indicator are spelled out.
+
+    Args:
+        exc: The ``BundleRequestError`` raised by ``validate_bundle_request``
+            (``message`` plus per-indicator ``details``).
+
+    Returns:
+        A human-readable sentence; ``exc.message`` itself when there are no
+        per-indicator details.
+    """
+    details = getattr(exc, "details", None) or []
+    message = str(getattr(exc, "message", "") or "Invalid STIX bundle request")
+    if not details:
+        return message
+    first = details[0]
+    count = len(details)
+    noun = "indicator is" if count == 1 else "indicators are"
+    return (
+        f"{message}: {count} {noun} invalid; first problem at index "
+        f"{first.get('index')}: {first.get('error')}"
+    )
+
+
 MEMORY_STORAGE_URI = "memory://"
 
 # Health probe tuning: max wait for the DB ping, and how long a result is reused.
@@ -2473,7 +2502,7 @@ class PhishingAPI:
             try:
                 spec = validate_bundle_request(request.get_json(silent=True))
             except BundleRequestError as exc:
-                body: Dict[str, Any] = {"error": exc.message}
+                body: Dict[str, Any] = {"error": stix_request_error_message(exc)}
                 if exc.details:
                     body["details"] = exc.details[:STIX_BUNDLE_MAX_ERRORS]
                 return jsonify(body), 400
