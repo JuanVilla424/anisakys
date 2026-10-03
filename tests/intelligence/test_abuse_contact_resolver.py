@@ -380,3 +380,69 @@ class TestEdgeCases(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestPriorityOrdering(unittest.TestCase):
+    """Results are de-duplicated and ordered RDAP > provider DB > ASN."""
+
+    def setUp(self):
+        self.asn_db = {"16509": ["asn1@amazon.com", "shared@amazon.com"]}
+        self.provider_db = {"AMAZON": ["provider@amazon.com", "SHARED@amazon.com"]}
+        self.whois = {
+            "objects": {
+                "ABUSE-1": {"contact": {"role": "abuse", "email": "rdap@amazon.com"}},
+            },
+            "abuse_contacts": ["shared@amazon.com"],
+        }
+
+    def test_priority_order_rdap_provider_asn(self):
+        resolver = AbuseContactResolver(self.asn_db, self.provider_db, validate_domains=False)
+        result = resolver.resolve(asn="16509", provider_name="AMAZON", whois_data=self.whois)
+        self.assertEqual(
+            result,
+            ["rdap@amazon.com", "shared@amazon.com", "provider@amazon.com", "asn1@amazon.com"],
+        )
+
+    def test_truncation_keeps_highest_priority(self):
+        resolver = AbuseContactResolver(
+            self.asn_db, self.provider_db, validate_domains=False, max_contacts=2
+        )
+        for _ in range(20):
+            result = resolver.resolve(asn="16509", provider_name="AMAZON", whois_data=self.whois)
+            self.assertEqual(result, ["rdap@amazon.com", "shared@amazon.com"])
+
+    def test_case_insensitive_dedupe_keeps_first_form(self):
+        resolver = AbuseContactResolver({}, {"X": ["Abuse@Example.com", "abuse@example.com"]})
+        self.assertEqual(resolver.resolve(provider_name="X"), ["Abuse@Example.com"])
+
+
+class TestDeterministicProviderMatch(unittest.TestCase):
+    """Partial provider matching picks the most specific key."""
+
+    def test_longest_contained_key_wins_regardless_of_order(self):
+        for db in (
+            {"GOOGLE": ["g@google.com"], "GOOGLE CLOUD": ["cloud@google.com"]},
+            {"GOOGLE CLOUD": ["cloud@google.com"], "GOOGLE": ["g@google.com"]},
+        ):
+            resolver = AbuseContactResolver({}, db, validate_domains=False)
+            self.assertEqual(
+                resolver.resolve(provider_name="Google Cloud Europe"), ["cloud@google.com"]
+            )
+
+    def test_closest_containing_key_wins(self):
+        db = {
+            "HOSTINGER-HOSTING-INTERNATIONAL": ["long@hostinger.com"],
+            "HOSTINGER-HOSTING": ["short@hostinger.com"],
+        }
+        resolver = AbuseContactResolver({}, db, validate_domains=False)
+        self.assertEqual(resolver.resolve(provider_name="HOSTINGER"), ["short@hostinger.com"])
+
+    def test_contained_key_beats_containing_key(self):
+        db = {"OVHCLOUD-EU": ["eu@ovh.net"], "OVH": ["abuse@ovh.net"]}
+        resolver = AbuseContactResolver({}, db, validate_domains=False)
+        self.assertEqual(resolver.resolve(provider_name="OVH SAS"), ["abuse@ovh.net"])
+
+    def test_skips_candidates_without_valid_emails(self):
+        db = {"ACME HOSTING": ["invalid"], "ACME": ["abuse@acme.example"]}
+        resolver = AbuseContactResolver({}, db, validate_domains=False)
+        self.assertEqual(resolver.resolve(provider_name="ACME HOSTING LTD"), ["abuse@acme.example"])

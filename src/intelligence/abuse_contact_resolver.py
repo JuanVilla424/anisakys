@@ -12,7 +12,7 @@ EPIC-005: Multi-Abuse Contact Handling
 
 import logging
 import re
-from typing import List, Optional, Set
+from typing import Iterable, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,9 @@ class AbuseContactResolver:
     - Multi-source resolution (ASN, Provider, WHOIS)
     - Email validation (format and domain filtering)
     - Automatic deduplication
-    - Priority-based ordering
+    - Priority-based ordering: RDAP/WHOIS abuse contacts first, then the
+      curated provider database, then the ASN database; first-seen order is
+      kept inside each source, so the result is deterministic
     """
 
     def __init__(
@@ -67,47 +69,71 @@ class AbuseContactResolver:
             target_domain: Target domain for validation (exclude same-domain emails)
 
         Returns:
-            List[str]: Deduplicated list of valid abuse email addresses
+            List[str]: Valid abuse addresses, de-duplicated case-insensitively
+            and ordered by priority (RDAP/WHOIS abuse contacts, then the
+            curated provider database, then the ASN database), truncated to
+            ``max_contacts``.
         """
-        all_emails: Set[str] = set()
+        ordered: List[str] = []
 
-        # 1. ASN database lookup
-        if asn:
-            asn_emails = self._resolve_from_asn(asn)
-            if asn_emails:
-                all_emails.update(asn_emails)
-                self.logger.info(
-                    f"📋 ASN lookup: {len(asn_emails)} contacts from AS{self._clean_asn(asn)}"
-                )
+        # 1. WHOIS/RDAP abuse contacts (published by the responsible network)
+        if whois_data:
+            whois_emails = self._resolve_from_whois(whois_data)
+            if whois_emails:
+                ordered.extend(whois_emails)
+                self.logger.info(f"📜 WHOIS lookup: {len(whois_emails)} contacts from WHOIS data")
 
-        # 2. Provider database lookup
+        # 2. Curated provider database
         if provider_name:
             provider_emails = self._resolve_from_provider(provider_name)
             if provider_emails:
-                all_emails.update(provider_emails)
+                ordered.extend(provider_emails)
                 self.logger.info(
                     f"🏢 Provider lookup: {len(provider_emails)} contacts from {provider_name}"
                 )
 
-        # 3. WHOIS/RDAP data parsing
-        if whois_data:
-            whois_emails = self._resolve_from_whois(whois_data)
-            if whois_emails:
-                all_emails.update(whois_emails)
-                self.logger.info(f"📜 WHOIS lookup: {len(whois_emails)} contacts from WHOIS data")
+        # 3. ASN database
+        if asn:
+            asn_emails = self._resolve_from_asn(asn)
+            if asn_emails:
+                ordered.extend(asn_emails)
+                self.logger.info(
+                    f"📋 ASN lookup: {len(asn_emails)} contacts from AS{self._clean_asn(asn)}"
+                )
 
-        # 4. Validate and filter emails
-        valid_emails = self._validate_emails(all_emails, target_domain)
-
-        # 5. Deduplicate and limit
-        final_emails = list(valid_emails)[: self.max_contacts]
+        # 4. Validate, de-duplicate (first occurrence wins) and limit
+        unique = self._dedupe(ordered)
+        valid_emails = [e for e in unique if self._is_acceptable(e, target_domain)]
+        final_emails = valid_emails[: self.max_contacts]
 
         self.logger.info(
             f"✅ Resolved {len(final_emails)} unique abuse contacts "
-            f"(from {len(all_emails)} total found)"
+            f"(from {len(unique)} total found)"
         )
 
         return final_emails
+
+    @staticmethod
+    def _dedupe(emails: Iterable[str]) -> List[str]:
+        """De-duplicate addresses case-insensitively, keeping first-seen order.
+
+        Args:
+            emails: Addresses in priority order (non-strings are dropped).
+
+        Returns:
+            Stripped addresses, each kept at its first position.
+        """
+        seen: Set[str] = set()
+        result: List[str] = []
+        for email in emails:
+            if not isinstance(email, str):
+                continue
+            cleaned = email.strip()
+            key = cleaned.lower()
+            if cleaned and key not in seen:
+                seen.add(key)
+                result.append(cleaned)
+        return result
 
     def _resolve_from_asn(self, asn: str) -> List[str]:
         """
@@ -162,19 +188,48 @@ class AbuseContactResolver:
                 )
                 return valid_emails
 
-        # Try partial matching for providers with variable suffixes
-        for provider_key, email_list in self.provider_db.items():
-            if provider_key in provider_clean or provider_clean in provider_key:
-                valid_emails = self._filter_invalid_emails(email_list)
-                if valid_emails:
-                    self.logger.debug(
-                        f"Found {len(valid_emails)} provider contacts via partial match "
-                        f"({provider_clean} -> {provider_key})"
-                    )
-                    return valid_emails
+        # Try partial matching for providers with variable suffixes, most
+        # specific candidate first (see _partial_match_candidates)
+        for provider_key in self._partial_match_candidates(provider_clean):
+            valid_emails = self._filter_invalid_emails(self.provider_db[provider_key])
+            if valid_emails:
+                self.logger.debug(
+                    f"Found {len(valid_emails)} provider contacts via partial match "
+                    f"({provider_clean} -> {provider_key})"
+                )
+                return valid_emails
 
         self.logger.debug(f"No provider contacts found for {provider_clean}")
         return []
+
+    def _partial_match_candidates(self, provider_clean: str) -> List[str]:
+        """Order partial provider matches from most to least specific.
+
+        Keys contained in the provider name come first, longest key first
+        (``"GOOGLE CLOUD"`` beats ``"GOOGLE"`` for ``"GOOGLE CLOUD EUROPE"``);
+        then keys that contain the provider name, closest length first.
+        Ties are broken alphabetically, so the result never depends on the
+        database's iteration order.
+
+        Args:
+            provider_clean: Upper-cased, stripped provider name.
+
+        Returns:
+            Matching provider keys in priority order.
+        """
+        if not provider_clean:
+            return []
+        ranked: List[Tuple[int, int, str]] = []
+        for key in self.provider_db:
+            key_clean = str(key).upper().strip()
+            if not key_clean or key_clean == provider_clean:
+                continue
+            if key_clean in provider_clean:
+                ranked.append((0, -len(key_clean), key))
+            elif provider_clean in key_clean:
+                ranked.append((1, len(key_clean) - len(provider_clean), key))
+        ranked.sort(key=lambda item: (item[0], item[1], str(item[2])))
+        return [key for _, _, key in ranked]
 
     def _resolve_from_whois(self, whois_data: dict) -> List[str]:
         """
@@ -184,9 +239,10 @@ class AbuseContactResolver:
             whois_data: WHOIS/RDAP data dictionary
 
         Returns:
-            List[str]: List of abuse emails found in WHOIS data
+            List[str]: Abuse emails found in WHOIS data, in document order:
+            RDAP abuse-role contacts, then ``abuse_contacts``, then raw text.
         """
-        emails: Set[str] = set()
+        emails: List[str] = []
 
         # Check RDAP objects for abuse contacts
         objects = whois_data.get("objects", {})
@@ -201,17 +257,17 @@ class AbuseContactResolver:
                             email = contact_info.get("email")
                             if email:
                                 if isinstance(email, list):
-                                    emails.update(email)
+                                    emails.extend(email)
                                 else:
-                                    emails.add(email)
+                                    emails.append(email)
 
         # Check direct abuse_contacts field
         abuse_contacts = whois_data.get("abuse_contacts")
         if abuse_contacts:
             if isinstance(abuse_contacts, list):
-                emails.update(abuse_contacts)
+                emails.extend(abuse_contacts)
             else:
-                emails.add(abuse_contacts)
+                emails.append(abuse_contacts)
 
         # Parse raw WHOIS text for abuse emails
         raw_whois = whois_data.get("raw_whois", "")
@@ -223,38 +279,31 @@ class AbuseContactResolver:
             )
             matches = abuse_email_pattern.findall(raw_whois)
             if matches:
-                emails.update(matches)
+                emails.extend(matches)
 
-        return list(emails)
+        return self._dedupe(emails)
 
-    def _validate_emails(self, emails: Set[str], target_domain: Optional[str]) -> Set[str]:
-        """
-        Validate and filter email addresses.
+    def _is_acceptable(self, email: str, target_domain: Optional[str]) -> bool:
+        """Check one address for format and (optionally) same-domain rejection.
 
         Args:
-            emails: Set of email addresses to validate
-            target_domain: Target domain to exclude (if validate_domains is True)
+            email: Address to check.
+            target_domain: Target domain to exclude (if validate_domains is True).
 
         Returns:
-            Set[str]: Set of valid email addresses
+            bool: True if the address may be used.
         """
-        valid_emails: Set[str] = set()
-
-        for email in emails:
-            # Basic format validation
-            if not self._is_valid_email_format(email):
-                self.logger.debug(f"❌ Invalid email format: {email}")
-                continue
-
-            # Domain validation (exclude same domain as target)
-            if self.validate_domains and target_domain:
-                if not self._is_valid_domain(email, target_domain):
-                    self.logger.debug(f"❌ Same-domain email rejected: {email}")
-                    continue
-
-            valid_emails.add(email)
-
-        return valid_emails
+        if not self._is_valid_email_format(email):
+            self.logger.debug(f"❌ Invalid email format: {email}")
+            return False
+        if (
+            self.validate_domains
+            and target_domain
+            and not self._is_valid_domain(email, target_domain)
+        ):
+            self.logger.debug(f"❌ Same-domain email rejected: {email}")
+            return False
+        return True
 
     @staticmethod
     def _is_valid_email_format(email: str) -> bool:
