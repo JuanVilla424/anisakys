@@ -159,6 +159,9 @@ class Settings(BaseSettings):
     # The URLVoid client's endpoint and response schema could not be matched
     # to the vendor's documented API, so it stays off unless explicitly enabled.
     URLVOID_ENABLED: bool = False
+    # Workspace customer whose Gmail blocked-senders policy is managed;
+    # "my_customer" is the documented alias for the caller's own customer.
+    GOOGLE_WORKSPACE_CUSTOMER_ID: str = "my_customer"
 
     # --- v2 phase 0: platform, logging & operations ----------------------------
     # Logging (src/observability/structured_logger.py); LOG_LEVEL above sets the
