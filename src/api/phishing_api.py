@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import math
 import re
 import socket
 import threading
@@ -21,8 +22,8 @@ from urllib.parse import urlsplit
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import validators
-from flask import Flask, Response, current_app, jsonify, request
-from flask_limiter import Limiter
+from flask import Flask, Response, current_app, g, jsonify, request
+from flask_limiter import Limiter, RateLimitExceeded
 from flask_limiter.util import get_remote_address
 from werkzeug.middleware.proxy_fix import ProxyFix
 import logging as flask_logging
@@ -129,6 +130,39 @@ def rate_limit_key() -> str:
             return "apikey:master"
         return f"apikey:{_hash_key(token)}"
     return get_remote_address()
+
+
+def thread_rate_limit_key() -> str:
+    """Rate-limit bucket key for per-thread endpoints (API key + thread id).
+
+    The console polls ``/threads/<id>/results`` once per visible thread, so a
+    single bucket per key would let a busy threads view starve itself; each
+    thread gets its own bucket and a per-key limit caps the total.
+
+    Returns:
+        ``rate_limit_key()`` suffixed with the request's ``thread_id``.
+    """
+    thread_id = (request.view_args or {}).get("thread_id")
+    return f"{rate_limit_key()}:thread:{thread_id}"
+
+
+def _pin_retry_after(response: Response) -> Response:
+    """Make a 429's ``Retry-After`` header equal the ``retry_after`` in its body.
+
+    flask-limiter rewrites ``Retry-After`` from the window reset time and
+    truncates to whole seconds, which can come out one second below (or at 0)
+    the value :meth:`PhishingAPI._rate_limited` put in the JSON body.
+
+    Args:
+        response: The outgoing response.
+
+    Returns:
+        The response, with ``Retry-After`` pinned on rate-limited responses.
+    """
+    retry_after = g.get("rate_limit_retry_after")
+    if response.status_code == 429 and retry_after is not None:
+        response.headers["Retry-After"] = str(retry_after)
+    return response
 
 
 def parse_recipients(raw: Optional[str]) -> List[str]:
@@ -677,14 +711,22 @@ class PhishingAPI:
         # (Redis in production, shared by every gunicorn worker); if that store
         # becomes unreachable the limiter degrades to per-process memory
         # instead of failing every request.
+        # Responses carry X-RateLimit-Limit/-Remaining/-Reset and Retry-After;
+        # a 429 is JSON {"error", "retry_after"} (see _rate_limited). Flask runs
+        # after_request hooks in reverse registration order, so _pin_retry_after
+        # is registered before the limiter's own header hook to run after it.
         storage_uri = rate_limit_storage_uri()
+        self._rate_limit_storage_uri = storage_uri
+        self.app.after_request(_pin_retry_after)
         self.limiter = Limiter(
             app=self.app,
             key_func=rate_limit_key,
             default_limits=["200 per day", "50 per hour", "10 per minute"],
             storage_uri=storage_uri,
             in_memory_fallback_enabled=storage_uri != MEMORY_STORAGE_URI,
+            headers_enabled=True,
         )
+        self.app.register_error_handler(RateLimitExceeded, self._rate_limited)
 
         install_request_ids(self.app)
 
@@ -1157,7 +1199,7 @@ class PhishingAPI:
                 return internal_error("test_grinder_integration", e)
 
         @self.app.route("/api/v1/stats", methods=["GET"])
-        @self.limiter.limit("20 per minute")
+        @self.limiter.limit("120 per minute")
         @require_api_key(scope="read")
         def get_stats():
             """Get statistics about phishing reports with authentication."""
@@ -2080,7 +2122,8 @@ class PhishingAPI:
 
         # ── GET /api/v1/threads/<id>/results ──────────────────────────────────
         @self.app.route("/api/v1/threads/<int:thread_id>/results", methods=["GET"])
-        @self.limiter.limit("20 per minute")
+        @self.limiter.limit("30 per minute", key_func=thread_rate_limit_key)
+        @self.limiter.limit("120 per minute")
         @require_api_key(scope="read")
         def get_thread_results(thread_id: int):
             limit = int_arg(request.args, "limit", default=50, maximum=1000)
@@ -3432,6 +3475,29 @@ class PhishingAPI:
                 generate_latest(),
                 mimetype=CONTENT_TYPE_LATEST,
             )
+
+    def _rate_limited(self, exc: RateLimitExceeded) -> Tuple[Response, int]:
+        """Render a rate-limit breach as JSON with the seconds to wait.
+
+        Args:
+            exc: The breach raised by flask-limiter (its description names the
+                limit, e.g. ``"5 per 1 minute"``).
+
+        Returns:
+            ``({"error": str, "retry_after": int}, 429)``; ``Retry-After`` is
+            set to the same number of seconds (see :func:`_pin_retry_after`).
+        """
+        current = self.limiter.current_limit
+        reset_at = current.reset_at if current is not None else time.time() + 60
+        retry_after = max(1, math.ceil(reset_at - time.time()))
+        g.rate_limit_retry_after = retry_after
+        body = {
+            "error": f"Rate limit exceeded ({exc.description}); retry in {retry_after} s",
+            "retry_after": retry_after,
+        }
+        response = jsonify(body)
+        response.headers["Retry-After"] = str(retry_after)
+        return response, 429
 
     def _check_database(self) -> Dict[str, Any]:
         """Ping the database with a bounded wait.

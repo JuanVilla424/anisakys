@@ -212,3 +212,118 @@ class TestRateLimitStorage:
                 )
 
         assert statuses == [401] * 6
+
+
+def _mocked_api():
+    """A PhishingAPI on a mocked database whose queries return empty results."""
+    with (
+        patch("src.api.phishing_api.GrinderReportClient"),
+        patch("src.api.phishing_api.MultiAPIValidator"),
+    ):
+        from src.api.phishing_api import PhishingAPI
+        from src.reporting.email_detector import EnhancedAbuseEmailDetector
+
+        db = MagicMock()
+        conn = db.engine.begin.return_value.__enter__.return_value
+        conn.execute.return_value.scalar.return_value = 0
+        conn.execute.return_value.fetchall.return_value = []
+        api = PhishingAPI(db, MagicMock(spec=EnhancedAbuseEmailDetector), api_key="test_key")
+        api.app.config["TESTING"] = True
+        return api
+
+
+HEADERS = {"Authorization": "Bearer test_key"}
+
+
+class TestRateLimitResponses:
+    """429s are JSON with the seconds to wait; every limited response has headers."""
+
+    def test_429_is_json_with_retry_after_matching_the_header(self):
+        client = _mocked_api().app.test_client()
+        body = {"url": "http://127.0.0.1/"}
+
+        responses = [
+            client.post("/api/v1/multi-scan", json=body, headers=HEADERS) for _ in range(4)
+        ]
+
+        limited = responses[3]
+        assert limited.status_code == 429
+        assert limited.is_json
+        data = limited.get_json()
+        assert set(data) == {"error", "retry_after"}
+        assert "Rate limit exceeded" in data["error"]
+        # flask-limiter rounds the window reset up to the next whole second.
+        assert isinstance(data["retry_after"], int) and 1 <= data["retry_after"] <= 61
+        assert limited.headers["Retry-After"] == str(data["retry_after"])
+
+    def test_successful_responses_carry_rate_limit_headers(self):
+        client = _mocked_api().app.test_client()
+
+        resp = client.get("/api/v1/stats", headers=HEADERS)
+
+        assert resp.status_code == 200
+        assert resp.headers["X-RateLimit-Limit"] == "120"
+        assert resp.headers["X-RateLimit-Remaining"] == "119"
+        assert "X-RateLimit-Reset" in resp.headers
+        assert "Retry-After" in resp.headers
+
+
+class TestConsolePollingLimits:
+    """Read endpoints the analyst console polls must not starve a normal session."""
+
+    def test_stats_allows_120_requests_per_minute(self):
+        client = _mocked_api().app.test_client()
+
+        statuses = [client.get("/api/v1/stats", headers=HEADERS).status_code for _ in range(121)]
+
+        assert statuses[:120] == [200] * 120
+        assert statuses[120] == 429
+
+    def test_thread_results_are_bucketed_per_thread(self):
+        client = _mocked_api().app.test_client()
+
+        first = [
+            client.get("/api/v1/threads/1/results", headers=HEADERS).status_code for _ in range(31)
+        ]
+        other = client.get("/api/v1/threads/2/results", headers=HEADERS)
+
+        assert first[:30] == [200] * 30
+        assert first[30] == 429
+        # Polling one busy thread does not lock the other threads out.
+        assert other.status_code == 200
+
+    def test_thread_results_are_capped_per_key_across_threads(self):
+        client = _mocked_api().app.test_client()
+
+        statuses = [
+            client.get(f"/api/v1/threads/{i % 6}/results", headers=HEADERS).status_code
+            for i in range(121)
+        ]
+
+        assert statuses[:120] == [200] * 120
+        assert statuses[120] == 429
+
+    def test_thread_results_buckets_are_per_api_key(self):
+        api = _mocked_api()
+        client = api.app.test_client()
+        for _ in range(30):
+            client.get("/api/v1/threads/1/results", headers=HEADERS)
+
+        row = {"scopes": "read", "allowed_ips": None, "key_hash": "h"}
+        with (
+            patch("src.auth._lookup_db_key", return_value=row),
+            patch("src.auth._update_last_used"),
+        ):
+            resp = client.get("/api/v1/threads/1/results", headers={"Authorization": "Bearer k2"})
+
+        assert resp.status_code == 200
+
+    def test_report_submission_stays_strict(self):
+        client = _mocked_api().app.test_client()
+
+        statuses = [
+            client.post("/api/v1/report", json={}, headers=HEADERS).status_code for _ in range(6)
+        ]
+
+        assert statuses[5] == 429
+        assert 429 not in statuses[:5]
