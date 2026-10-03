@@ -92,6 +92,9 @@ class Settings(BaseSettings):
     EMAIL_POLL_INTERVAL_MINUTES: Optional[int] = 15
 
     # --- v2 phase 0: API, auth & HTTP serving ---------------------------------
+    # Interface the Flask development server (--start-api) binds to. Loopback by
+    # default; containers serving through gunicorn bind explicitly instead.
+    API_BIND_HOST: str = "127.0.0.1"
 
     # --- v2 phase 0: reporting pipeline & process roles ------------------------
 

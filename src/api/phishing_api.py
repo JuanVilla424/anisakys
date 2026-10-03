@@ -3196,8 +3196,19 @@ class PhishingAPI:
         except Exception as e:
             logger.error(f"❌ Failed to send immediate abuse report for {url}: {e}")
 
-    def run(self, host: str = "0.0.0.0", port: int = 8091, debug: bool = False):
-        """Run the API server."""
+    def run(self, host: Optional[str] = None, port: int = 8091) -> None:
+        """Serve the API with Flask's built-in server, for local development only.
+
+        Production deployments serve ``src.api.wsgi`` with gunicorn. The Werkzeug
+        interactive debugger is never enabled: it allows arbitrary code execution
+        for anyone who can reach the port.
+
+        Args:
+            host: Interface to bind; defaults to ``settings.API_BIND_HOST``
+                (``127.0.0.1``), so the dev server is not exposed by accident.
+            port: TCP port to listen on.
+        """
+        host = host or settings.API_BIND_HOST
         auth_status = "with API key authentication" if self.api_key else "without authentication"
         grinder_status = (
             "with Grinder integration"
@@ -3206,6 +3217,7 @@ class PhishingAPI:
         )
 
         logger.info(f"🚀 Starting Enhanced Phishing API server on {host}:{port}")
+        logger.warning("⚠️  Flask development server: use gunicorn with src.api.wsgi in production")
         logger.info(f"🔐 API Security: {auth_status}")
         logger.info(f"🔗 Threat Intelligence: {grinder_status}")
 
@@ -3216,7 +3228,7 @@ class PhishingAPI:
                 "⚠️  API running without authentication - not recommended for production"
             )
 
-        self.app.run(host=host, port=port, debug=debug)
+        self.app.run(host=host, port=port, debug=False, use_reloader=False)
 
 
 # Global variable to store flask app for decorator access

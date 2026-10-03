@@ -642,10 +642,11 @@ class Engine:
                 settings, "ANISAKYS_API_PORT", 8091
             )
             logger.info("🚀 Starting API server with background reporting enabled...")
+            # Development server only (production: gunicorn + src.api.wsgi). Never
+            # run with debug=True: the Werkzeug debugger allows remote code execution.
             api.run(
-                host=getattr(self.args, "api_host", "0.0.0.0"),
+                host=getattr(self.args, "api_host", None) or settings.API_BIND_HOST,
                 port=int(api_port),
-                debug=(self.args.log_level == "DEBUG"),
             )
             return
 
@@ -889,7 +890,13 @@ def parse_arguments() -> argparse.Namespace:
         "--api-port", type=int, default=8091, help="Port for the API server (default: 8091)"
     )
     parser.add_argument(
-        "--api-host", type=str, default="0.0.0.0", help="Host for the API server (default: 0.0.0.0)"
+        "--api-host",
+        type=str,
+        default=None,
+        help=(
+            "Interface for the development API server (default: API_BIND_HOST, "
+            "127.0.0.1). Production deployments use gunicorn with src.api.wsgi."
+        ),
     )
     parser.add_argument(
         "--api-key", type=str, help="API key for authentication when starting API server"
