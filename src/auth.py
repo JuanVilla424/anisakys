@@ -9,7 +9,9 @@ Supports two authentication methods:
 Scopes (see SCOPE_DESCRIPTIONS; "admin" is a wildcard):
   read     — GET endpoints: status, stats, lists, graph, IOCs
   scan     — POST scan endpoints: multi-scan, gsb/check, scan/domain
-  report   — POST report endpoints: report, gsb/report; update report status
+  report   — POST /report (recorded for analyst approval); update report status
+  report_send — /report sends abuse reports without approval; gsb/report
+               (implies report)
   write    — create/update threads, thread results, sender reputation, blocklist
   email_admin — create/update e-mail monitor threads, read per-mailbox results
   metrics  — scrape the Prometheus /metrics endpoint
@@ -48,7 +50,11 @@ logger = logging.getLogger(__name__)
 SCOPE_DESCRIPTIONS: Dict[str, str] = {
     "read": "GET endpoints: status, stats, sites, reports, graph, IOCs, campaigns",
     "scan": "on-demand scans: multi-scan, gsb/check, scan/domain",
-    "report": "submit URLs (/report, gsb/report) and update abuse-report status",
+    "report": ("submit URLs to /report for analyst approval and update abuse-report status"),
+    "report_send": (
+        "submitted URLs are reported to abuse contacts without approval; "
+        "gsb/report (implies report)"
+    ),
     "write": "create/update threads and results, sender reputation and blocklist",
     "email_admin": (
         "create/update e-mail monitor threads and read per-mailbox results "
@@ -58,6 +64,9 @@ SCOPE_DESCRIPTIONS: Dict[str, str] = {
     "admin": "every endpoint (wildcard)",
 }
 VALID_SCOPES = frozenset(SCOPE_DESCRIPTIONS)
+
+# Scopes that include others: holding the key scope grants the listed ones too.
+IMPLIED_SCOPES: Dict[str, FrozenSet[str]] = {"report_send": frozenset({"report"})}
 
 ScopeRequirement = Union[None, str, Iterable[str]]
 
@@ -110,6 +119,21 @@ def parse_scopes(raw: Union[str, Iterable[str], None]) -> FrozenSet[str]:
     return frozenset(s.strip() for s in items if s and s.strip())
 
 
+def expand_scopes(scopes: Iterable[str]) -> FrozenSet[str]:
+    """Add the scopes implied by the given ones (see ``IMPLIED_SCOPES``).
+
+    Args:
+        scopes: Scopes held by a key.
+
+    Returns:
+        The scopes plus every scope they imply.
+    """
+    expanded = set(scopes)
+    for scope in list(expanded):
+        expanded |= IMPLIED_SCOPES.get(scope, frozenset())
+    return frozenset(expanded)
+
+
 def _required_scopes(required_scope: ScopeRequirement) -> FrozenSet[str]:
     """Normalise a scope requirement (one scope or any-of alternatives).
 
@@ -140,7 +164,7 @@ def _scope_allowed(key_scopes: Union[str, Iterable[str]], required_scope: ScopeR
     required = _required_scopes(required_scope)
     if not required:
         return True
-    scopes = parse_scopes(key_scopes)
+    scopes = expand_scopes(parse_scopes(key_scopes))
     return "admin" in scopes or bool(scopes & required)
 
 

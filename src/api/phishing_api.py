@@ -29,6 +29,7 @@ import logging as flask_logging
 
 from src.config import settings
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from src.database import db_engine
 from src.auth import has_scope, require_api_key, require_metrics_access, _hash_key
 from src.api.mailbox_policy import is_domain_allowed, is_mailbox_allowed
@@ -428,11 +429,25 @@ class PhishingAPI:
         @self.limiter.limit("5 per minute")
         @require_api_key(scope="report")
         def report_phishing():
-            """Report a phishing site via API with authentication."""
-            try:
-                data = request.get_json()
+            """Submit a phishing URL.
 
-                if not data:
+            Keys with the ``report_send`` scope (or the master key) flag the
+            site for reporting: abuse contacts are resolved and the abuse report
+            is sent without further review. Keys with only ``report`` record the
+            submission as pending analyst approval (202): it is never reported
+            or made auto-report-eligible until an analyst approves it, e.g. by
+            re-submitting it with a ``report_send`` key.
+
+            Every URL passes the SSRF guard before anything is stored or queued.
+
+            Returns:
+                200 (flagged for reporting), 202 (pending approval), 400 on
+                invalid input, 403 when the URL targets a non-public address.
+            """
+            try:
+                data = request.get_json(silent=True)
+
+                if not data or not isinstance(data, dict):
                     return jsonify({"error": "No JSON data provided"}), 400
 
                 url = data.get("url")
@@ -440,13 +455,35 @@ class PhishingAPI:
                     return jsonify({"error": "URL is required"}), 400
 
                 # Validate URL
-                if not validators.url(url):
+                if not isinstance(url, str) or not validators.url(url):
                     return jsonify({"error": "Invalid URL format"}), 400
 
                 abuse_email = data.get("abuse_email")
                 source = data.get("source", "external_api")
                 priority = data.get("priority", "medium")
                 description = data.get("description", "")
+                if not isinstance(source, str) or not 0 < len(source) <= 64:
+                    return jsonify({"error": "source must be a string of 1-64 characters"}), 400
+                if priority not in PRIORITIES:
+                    return (
+                        jsonify(
+                            {"error": f"priority must be one of: {', '.join(sorted(PRIORITIES))}"}
+                        ),
+                        400,
+                    )
+                if not isinstance(description, str) or len(description) > 5000:
+                    return jsonify({"error": "description must be a string (max 5000)"}), 400
+                if abuse_email is not None and not isinstance(abuse_email, str):
+                    return jsonify({"error": "Invalid abuse email format"}), 400
+
+                # SSRF guard before anything is persisted or queued: the URL is
+                # later fetched/resolved server-side (WHOIS, scans, screenshots).
+                target_class = assess_url_target(url)
+                if target_class == "invalid":
+                    return jsonify({"error": "Invalid URL format"}), 400
+                if target_class == "blocked":
+                    logger.warning(f"🛑 Refusing report of non-public target: {url}")
+                    return jsonify({"error": "URL resolves to a non-public address"}), 403
 
                 # Log all API requests with source information
                 logger.info(
@@ -460,6 +497,20 @@ class PhishingAPI:
                 # Validate abuse_email if provided
                 if abuse_email and not self.abuse_detector.validate_email(abuse_email):
                     return jsonify({"error": "Invalid abuse email format"}), 400
+
+                if not has_scope("report_send"):
+                    try:
+                        pending = self.record_pending_submission(
+                            url, abuse_email, source, priority, description
+                        )
+                    except SQLAlchemyError as e:
+                        return internal_error(
+                            "report_phishing",
+                            e,
+                            message="Failed to record submission",
+                            extra={"url": url},
+                        )
+                    return jsonify(pending), 202
 
                 # Process the report (persists synchronously; abuse-contact lookup and the
                 # immediate abuse report continue in the background)
@@ -1011,7 +1062,7 @@ class PhishingAPI:
 
         @self.app.route("/api/v1/gsb/report", methods=["POST"])
         @self.limiter.limit("10 per minute")
-        @require_api_key(scope="report")
+        @require_api_key(scope="report_send")
         def gsb_report_url():
             """
             Report a phishing URL to Google Safe Browsing.
@@ -3295,6 +3346,82 @@ class PhishingAPI:
             self.email_scheduler._run_email_monitor(thread_id, details)
         except Exception as e:
             logger.error(f"❌ _trigger_email_scan thread {thread_id}: {e}")
+
+    def record_pending_submission(
+        self, url: str, abuse_email: Optional[str], source: str, priority: str, description: str
+    ) -> Dict[str, Any]:
+        """Store a submission from a key without ``report_send`` for analyst review.
+
+        The row is kept out of every automatic path: ``manual_flag`` stays 0 and
+        ``auto_report_eligible`` 0 (the reporting loop needs one of them),
+        ``requires_manual_review`` is set, and ``auto_analysis_status`` is
+        ``awaiting_approval`` so the auto-analyzer (which could otherwise mark
+        an ``external_api`` site auto-report-eligible) never selects it. An
+        existing row only gets ``last_seen`` refreshed (and is flagged for
+        review unless already approved or reported); analyst-curated fields
+        are not overwritten.
+
+        Args:
+            url: Submitted URL (already validated and SSRF-checked).
+            abuse_email: Abuse contact suggested by the submitter, if any.
+            source: Submitter-provided source label.
+            priority: Submitter-provided priority.
+            description: Free-text description.
+
+        Returns:
+            The response body for the 202 answer.
+
+        Raises:
+            SQLAlchemyError: If the submission cannot be stored.
+        """
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self.db_manager.engine.begin() as conn:
+            existing = conn.execute(
+                text("SELECT id FROM phishing_sites WHERE url = :url"), {"url": url}
+            ).fetchone()
+            if existing is None:
+                conn.execute(
+                    text("""
+                        INSERT INTO phishing_sites
+                        (url, manual_flag, first_seen, last_seen, abuse_email,
+                         reported, abuse_report_sent, source, priority, description,
+                         auto_report_eligible, requires_manual_review, auto_analysis_status)
+                        VALUES (:url, 0, :timestamp, :timestamp, :abuse_email,
+                                0, 0, :source, :priority, :description,
+                                0, 1, 'awaiting_approval')
+                    """),
+                    {
+                        "url": url,
+                        "timestamp": timestamp,
+                        "abuse_email": abuse_email,
+                        "source": source,
+                        "priority": priority,
+                        "description": description,
+                    },
+                )
+            else:
+                conn.execute(
+                    text("""
+                        UPDATE phishing_sites
+                        SET last_seen = :timestamp,
+                            requires_manual_review = CASE
+                                WHEN manual_flag = 1 OR abuse_report_sent = 1
+                                    THEN requires_manual_review
+                                ELSE 1
+                            END
+                        WHERE url = :url
+                    """),
+                    {"timestamp": timestamp, "url": url},
+                )
+        logger.info(f"📝 Submission for {url} recorded; awaiting analyst approval")
+        return {
+            "status": "pending_approval",
+            "message": "Submission recorded; an analyst must approve it before it is reported",
+            "url": url,
+            "timestamp": timestamp,
+            "approval_required": True,
+            "report_sent": False,
+        }
 
     def process_phishing_report(
         self, url: str, abuse_email: Optional[str], source: str, priority: str, description: str

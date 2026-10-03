@@ -44,6 +44,8 @@ def api():
         patch("src.api.phishing_api.GrinderReportClient") as mock_grinder,
         patch("src.api.phishing_api.MultiAPIValidator"),
         patch("src.api.phishing_api.GRINDER_INTEGRATION_ENABLED", False),
+        # Keep the SSRF guard offline: no DNS lookups for the test URL.
+        patch("src.api.phishing_api.assess_url_target", return_value="public"),
     ):
         mock_grinder.return_value.test_connection.return_value = {"status": "success"}
         from src.api.phishing_api import PhishingAPI
