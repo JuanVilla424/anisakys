@@ -323,7 +323,7 @@ class TakedownMonitor:
 
         Args:
             state: Stored state of the site.
-            now: Observation time (defaults to the current local time).
+            now: Observation time (defaults to the current UTC time).
 
         Returns:
             ``"transitions"``, ``"checked"`` or ``"skipped"`` (see
@@ -333,7 +333,7 @@ class TakedownMonitor:
             SQLAlchemyError: If the update fails.
         """
         probe = self.prober(state.url, self.timeout)  # network I/O, no transaction open
-        now = now or datetime.datetime.now()
+        now = now or datetime.datetime.now(datetime.timezone.utc)
         ip_info = self._lookup_ip_info(state, probe, now)  # network I/O, no transaction open
         transition = decide_transition(state, probe.result, self.failure_threshold, now)
         if not self._apply(state, probe, transition, ip_info, now):

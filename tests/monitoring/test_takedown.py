@@ -32,7 +32,7 @@ from src.monitoring.takedown import (
 )
 from tests.support.isolated_schema import isolated_schema
 
-NOW = datetime.datetime(2026, 10, 1, 12, 0, 0)
+NOW = datetime.datetime(2026, 10, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
 IP_A = "93.184.215.14"
 IP_B = "93.184.215.15"
 
@@ -405,9 +405,10 @@ class TestTakedownIntegration:
         mon = _monitor(manager, prober)
         t1, t2 = NOW, NOW + datetime.timedelta(minutes=20)
         mon.check_site(mon._load_sites()[0], now=t1)
-        assert _site(engine, URL)["last_seen"] == t1
+        # last_seen is a legacy naive TIMESTAMP column (UTC session): compare wall-clock.
+        assert _site(engine, URL)["last_seen"] == t1.replace(tzinfo=None)
         mon.check_site(mon._load_sites()[0], now=t2)
-        assert _site(engine, URL)["last_seen"] == t2
+        assert _site(engine, URL)["last_seen"] == t2.replace(tzinfo=None)
         assert _events(engine, URL) == []
 
     def test_failure_does_not_touch_last_seen(self, schema):
@@ -417,7 +418,7 @@ class TestTakedownIntegration:
         mon = _monitor(manager, ScriptedProber(tracking, {URL: script}))
         mon.check_site(mon._load_sites()[0], now=NOW)
         mon.check_site(mon._load_sites()[0], now=NOW + datetime.timedelta(hours=1))
-        assert _site(engine, URL)["last_seen"] == NOW
+        assert _site(engine, URL)["last_seen"] == NOW.replace(tzinfo=None)
 
     def test_rdap_only_on_ip_change_or_once_a_day(self, schema):
         manager, engine, tracking = schema

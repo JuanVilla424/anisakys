@@ -31,9 +31,9 @@ UPGRADE_STATEMENTS: Tuple[str, ...] = (
     # Classification of the latest probe (up, nxdomain, connection_error,
     # http_error, waf_challenge, parked, ssrf_blocked) and when it ran.
     "ALTER TABLE phishing_sites ADD COLUMN IF NOT EXISTS last_probe_class TEXT",
-    "ALTER TABLE phishing_sites ADD COLUMN IF NOT EXISTS last_probe_at TIMESTAMP",
+    "ALTER TABLE phishing_sites ADD COLUMN IF NOT EXISTS last_probe_at TIMESTAMPTZ",
     # Last RDAP/IP enrichment, so it runs only on IP change or once a day.
-    "ALTER TABLE phishing_sites ADD COLUMN IF NOT EXISTS ip_checked_at TIMESTAMP",
+    "ALTER TABLE phishing_sites ADD COLUMN IF NOT EXISTS ip_checked_at TIMESTAMPTZ",
     """
     CREATE TABLE IF NOT EXISTS site_status_events (
         id BIGSERIAL PRIMARY KEY,
@@ -44,7 +44,7 @@ UPGRADE_STATEMENTS: Tuple[str, ...] = (
         probe_class TEXT,
         status_code INTEGER,
         detail TEXT,
-        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_site_status_events_site "
