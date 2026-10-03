@@ -1,5 +1,5 @@
 [Unit]
-Description=Anisakys - REST API Server
+Description=Anisakys - REST API Server (api role: no background jobs)
 After=network.target
 
 [Service]
@@ -8,7 +8,7 @@ User=anisakys
 Group=anisakys
 WorkingDirectory=/opt/anisakys
 EnvironmentFile=/opt/anisakys/.env
-ExecStart=/opt/anisakys/venv/bin/python anisakys.py --start-api
+ExecStart=/opt/anisakys/venv/bin/python anisakys.py --start-api --role api
 Restart=always
 RestartSec=10
 
