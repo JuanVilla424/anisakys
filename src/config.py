@@ -95,6 +95,9 @@ class Settings(BaseSettings):
     # Interface the Flask development server (--start-api) binds to. Loopback by
     # default; containers serving through gunicorn bind explicitly instead.
     API_BIND_HOST: str = "127.0.0.1"
+    # Number of reverse proxies (nginx, load balancer) in front of the API whose
+    # X-Forwarded-For/-Proto headers are trusted. 0 disables ProxyFix.
+    TRUSTED_PROXY_HOPS: int = Field(default=0, ge=0, le=10)
 
     # --- v2 phase 0: reporting pipeline & process roles ------------------------
 

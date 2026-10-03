@@ -22,6 +22,7 @@ import validators
 from flask import Flask, Response, current_app, jsonify, request
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
+from werkzeug.middleware.proxy_fix import ProxyFix
 import logging as flask_logging
 
 from src.config import settings
@@ -290,6 +291,17 @@ class PhishingAPI:
 
         # Configure Flask logging to be less verbose
         flask_logging.getLogger("werkzeug").setLevel(flask_logging.WARNING)
+
+        # Behind nginx/a load balancer the socket peer is the proxy. Trust exactly
+        # TRUSTED_PROXY_HOPS X-Forwarded-For/-Proto entries so request.remote_addr
+        # (used by per-key allowed_ips and the rate-limit key) is the real client;
+        # with 0 (default) the headers are ignored and cannot be spoofed.
+        proxy_hops = settings.TRUSTED_PROXY_HOPS
+        if proxy_hops > 0:
+            self.app.wsgi_app = ProxyFix(  # type: ignore[method-assign]
+                self.app.wsgi_app, x_for=proxy_hops, x_proto=proxy_hops
+            )
+            logger.info(f"🔁 Trusting {proxy_hops} reverse-proxy hop(s) for client IP/scheme")
 
         # Rate limiting — bucketed by API key (falls back to IP when no
         # Bearer header is present). Storage defaults to the in-memory
