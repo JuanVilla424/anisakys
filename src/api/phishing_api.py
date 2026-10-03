@@ -7,6 +7,7 @@ and Grinder integration.
 
 import base64
 import datetime
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -180,6 +181,23 @@ def is_shared_infrastructure_ip(ip: str, flagged_cloudflare: bool = False) -> bo
     except ValueError:
         return False
     return is_cloudflare_ip(ip)
+
+
+def campaign_id(kind: str, key: str) -> str:
+    """Return a stable campaign identifier for a grouping key.
+
+    IDs used to be positional (``CAMP-001`` for the first row), so the same
+    cluster changed ID whenever the ordering changed.
+
+    Args:
+        kind: Grouping dimension (e.g. ``"registrar"``).
+        key: Grouping value exactly as grouped in SQL.
+
+    Returns:
+        ``CAMP-`` followed by 10 upper-case hex chars of the key's SHA-256.
+    """
+    digest = hashlib.sha256(f"{kind}:{key}".encode("utf-8")).hexdigest()
+    return f"CAMP-{digest[:10].upper()}"
 
 
 class PhishingAPI:
@@ -1671,76 +1689,102 @@ class PhishingAPI:
         @self.limiter.limit("20 per minute")
         @require_api_key(scope="read")
         def get_campaigns():
-            import datetime as _dt
+            """Registrar-based campaign clusters with their most recent threats.
 
+            A single aggregate query returns every cluster (registrars with at
+            least two sites) together with its 20 most recent sites, instead of
+            one extra query per cluster.
+
+            Returns:
+                JSON ``{"items": [...], "total": int, "kpi": {...}}``; each item's
+                ``id`` is stable across calls (derived from the registrar name).
+            """
             try:
                 with self.db_manager.engine.begin() as conn:
                     groups = conn.execute(text("""
-                        SELECT registrar_name,
-                               COUNT(*) AS site_count,
-                               COUNT(*) FILTER (WHERE site_status = 'up') AS active_count,
-                               COUNT(*) FILTER (WHERE site_status = 'down') AS takedown_count,
-                               MIN(first_seen) AS first_seen,
-                               MAX(last_seen) AS last_activity,
-                               array_agg(DISTINCT resolved_ip)
-                                   FILTER (WHERE resolved_ip IS NOT NULL) AS ips,
-                               AVG(api_confidence_score)
-                                   FILTER (WHERE api_confidence_score IS NOT NULL) AS avg_confidence
-                        FROM phishing_sites
-                        WHERE registrar_name IS NOT NULL
-                        GROUP BY registrar_name
-                        HAVING COUNT(*) >= 2
-                        ORDER BY COUNT(*) FILTER (WHERE site_status = 'up') DESC,
-                                 MAX(last_seen) DESC
+                        WITH clusters AS (
+                            SELECT registrar_name,
+                                   COUNT(*) AS site_count,
+                                   COUNT(*) FILTER (WHERE site_status = 'up') AS active_count,
+                                   COUNT(*) FILTER (WHERE site_status = 'down') AS takedown_count,
+                                   MIN(first_seen) AS first_seen,
+                                   MAX(last_seen) AS last_activity,
+                                   array_agg(DISTINCT resolved_ip)
+                                       FILTER (WHERE resolved_ip IS NOT NULL) AS ips,
+                                   AVG(api_confidence_score)
+                                       FILTER (WHERE api_confidence_score IS NOT NULL)
+                                       AS avg_confidence
+                            FROM phishing_sites
+                            WHERE registrar_name IS NOT NULL
+                            GROUP BY registrar_name
+                            HAVING COUNT(*) >= 2
+                        ),
+                        ranked AS (
+                            SELECT ps.registrar_name, ps.url, ps.site_status,
+                                   ps.first_seen, ps.multi_api_threat_level,
+                                   ROW_NUMBER() OVER (
+                                       PARTITION BY ps.registrar_name
+                                       ORDER BY ps.first_seen DESC NULLS LAST, ps.id DESC
+                                   ) AS rn
+                            FROM phishing_sites ps
+                            JOIN clusters c ON c.registrar_name = ps.registrar_name
+                        ),
+                        recent AS (
+                            SELECT registrar_name,
+                                   json_agg(
+                                       json_build_object(
+                                           'url', url,
+                                           'status', site_status,
+                                           'first_seen', first_seen::text,
+                                           'threat_level', multi_api_threat_level
+                                       )
+                                       ORDER BY rn
+                                   ) AS threats
+                            FROM ranked
+                            WHERE rn <= 20
+                            GROUP BY registrar_name
+                        )
+                        SELECT c.registrar_name, c.site_count, c.active_count,
+                               c.takedown_count, c.first_seen, c.last_activity,
+                               c.ips, c.avg_confidence,
+                               COALESCE(r.threats, '[]'::json) AS threats
+                        FROM clusters c
+                        LEFT JOIN recent r ON r.registrar_name = c.registrar_name
+                        ORDER BY c.active_count DESC, c.last_activity DESC
                     """)).fetchall()
 
-                    items = []
-                    now = _dt.datetime.utcnow()
-                    for i, g in enumerate(groups):
-                        active_count = int(g[2] or 0)
-                        last_activity = g[5]
-                        stale = (
-                            (now - last_activity).total_seconds() > 86400 if last_activity else True
-                        )
-                        if active_count > 0 and not stale:
-                            status = "active"
-                        elif active_count > 0:
-                            status = "monitoring"
-                        else:
-                            status = "closed"
+                items = []
+                now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
+                for g in groups:
+                    active_count = int(g[2] or 0)
+                    last_activity = g[5]
+                    stale = (now - last_activity).total_seconds() > 86400 if last_activity else True
+                    if active_count > 0 and not stale:
+                        status = "active"
+                    elif active_count > 0:
+                        status = "monitoring"
+                    else:
+                        status = "closed"
 
-                        threats_rows = conn.execute(
-                            text("""
-                            SELECT url, site_status, first_seen, multi_api_threat_level
-                            FROM phishing_sites WHERE registrar_name = :r
-                            ORDER BY first_seen DESC LIMIT 20
-                        """),
-                            {"r": g[0]},
-                        ).fetchall()
+                    threats = g[8]
+                    if isinstance(threats, str):
+                        threats = json.loads(threats)
 
-                        items.append(
-                            {
-                                "id": f"CAMP-{i+1:03d}",
-                                "name": f"{g[0]} cluster",
-                                "registrar": g[0],
-                                "status": status,
-                                "sites": int(g[1] or 0),
-                                "takedowns": int(g[3] or 0),
-                                "first_seen": str(g[4]) if g[4] else None,
-                                "last_activity": str(g[5]) if g[5] else None,
-                                "confidence": round(float(g[7] or 0)),
-                                "resolved_ips": list(g[6]) if g[6] else [],
-                                "threats": [
-                                    {
-                                        "url": t[0],
-                                        "status": t[1],
-                                        "first_seen": str(t[2]),
-                                        "threat_level": t[3],
-                                    }
-                                    for t in threats_rows
-                                ],
-                            }
-                        )
+                    items.append(
+                        {
+                            "id": campaign_id("registrar", g[0]),
+                            "name": f"{g[0]} cluster",
+                            "registrar": g[0],
+                            "status": status,
+                            "sites": int(g[1] or 0),
+                            "takedowns": int(g[3] or 0),
+                            "first_seen": str(g[4]) if g[4] else None,
+                            "last_activity": str(g[5]) if g[5] else None,
+                            "confidence": round(float(g[7] or 0)),
+                            "resolved_ips": list(g[6]) if g[6] else [],
+                            "threats": threats or [],
+                        }
+                    )
 
                 kpi = {
                     "active": sum(1 for c in items if c["status"] == "active"),
