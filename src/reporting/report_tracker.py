@@ -1,18 +1,44 @@
 """
-Report tracking system for ICANN compliance
-Tracks sent abuse reports and their responses
+Report tracking for abuse reports (SLA and follow-ups).
+
+Every report is one row in ``abuse_reports`` keyed by its stable report id
+(``ANISAKYS-YYYYMMDD-XXXXXXXX``), the same id the e-mail subject carries.
+
+The ``abuse_reports`` schema is owned by Alembic (revisions 001 and 004); this
+module never creates, alters or drops tables.
+
+Timestamps are written as timezone-aware UTC values and SLA checks compare
+against an explicit ``now``, so callers (and tests) control the clock.
 """
 
-import uuid
+from __future__ import annotations
+
 import json
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Any
-from sqlalchemy import create_engine, text
+import uuid
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from enum import Enum
+from typing import Any, Dict, List, Optional
+
+from sqlalchemy import text
+from sqlalchemy.engine import Connection, Engine
+
+from src.reporting.db import short_transaction, utc_now
 
 logger = logging.getLogger(__name__)
+
+# Statuses for which no follow-up is ever sent.
+CLOSED_STATUSES = (
+    "resolved",
+    "rejected",
+    "timeout",
+    "queued",
+    "failed",
+    "pending_manual",
+    "bounced",
+)
+_CLOSED_SQL = ", ".join(f"'{status}'" for status in CLOSED_STATUSES)
 
 
 def generate_report_id() -> str:
@@ -24,14 +50,36 @@ def generate_report_id() -> str:
     Returns:
         ``ANISAKYS-YYYYMMDD-XXXXXXXX`` (UTC date).
     """
-    return (
-        f"ANISAKYS-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
-    )
+    return f"ANISAKYS-{utc_now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+
+
+def calculate_sla_deadline(start: datetime, business_days: int = 2) -> datetime:
+    """Anisakys' follow-up deadline: ``business_days`` working days after ``start``.
+
+    This is our own follow-up schedule, not a contractual obligation of the
+    recipient.
+
+    Args:
+        start: When the report was sent (naive values are taken as UTC).
+        business_days: Working days to add (Saturday and Sunday are skipped).
+
+    Returns:
+        17:00 UTC on the resulting day, timezone-aware.
+    """
+    current = start if start.tzinfo else start.replace(tzinfo=timezone.utc)
+    current = current.astimezone(timezone.utc)
+    added = 0
+    while added < business_days:
+        current += timedelta(days=1)
+        if current.weekday() < 5:
+            added += 1
+    return current.replace(hour=17, minute=0, second=0, microsecond=0)
 
 
 class ReportStatus(Enum):
     """Status of abuse reports"""
 
+    QUEUED = "queued"
     SENT = "sent"
     ACKNOWLEDGED = "acknowledged"
     IN_PROGRESS = "in_progress"
@@ -39,6 +87,8 @@ class ReportStatus(Enum):
     REJECTED = "rejected"
     TIMEOUT = "timeout"
     BOUNCED = "bounced"
+    FAILED = "failed"
+    PENDING_MANUAL = "pending_manual"
 
 
 @dataclass
@@ -57,44 +107,42 @@ class AbuseReportRecord:
     sla_deadline: Optional[datetime] = None
     icann_compliant: bool = True
     screenshot_included: bool = False
+    screenshot_path: Optional[str] = None
+    attachment_count: int = 0
     multi_api_results: Optional[Dict[str, Any]] = None
     confidence_score: Optional[int] = None
     threat_level: Optional[str] = None
     follow_up_required: bool = False
-    report_date: datetime = None
-    created_at: datetime = None
-    updated_at: datetime = None
+    evidence: Optional[Dict[str, Any]] = None
+    report_date: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
+        """Fill UTC timestamps and, for sent reports, the SLA deadline."""
+        now = utc_now()
         if self.report_date is None:
-            self.report_date = datetime.now()
+            self.report_date = now
         if self.created_at is None:
-            self.created_at = datetime.now()
+            self.created_at = now
         if self.updated_at is None:
-            self.updated_at = datetime.now()
-        if self.sla_deadline is None:
-            # ICANN requires 2 business day response time
+            self.updated_at = now
+        if self.sla_deadline is None and self.status == ReportStatus.SENT.value:
             self.sla_deadline = self._calculate_sla_deadline()
 
     def _calculate_sla_deadline(self) -> datetime:
-        """Calculate SLA deadline (2 business days from report date)"""
-        current = self.report_date or datetime.now()
-        days_added = 0
+        """Calculate the follow-up deadline (2 business days after the report).
 
-        while days_added < 2:
-            current += timedelta(days=1)
-            # Skip weekends (Monday = 0, Sunday = 6)
-            if current.weekday() < 5:  # Monday to Friday
-                days_added += 1
-
-        # Set deadline to end of business day (5 PM)
-        return current.replace(hour=17, minute=0, second=0, microsecond=0)
+        Returns:
+            Timezone-aware UTC deadline.
+        """
+        return calculate_sla_deadline(self.report_date or utc_now())
 
 
 class ReportTracker:
-    """Tracks abuse reports for ICANN compliance - integrates with existing phishing_sites fields"""
+    """Tracks abuse reports and their follow-up SLA in ``abuse_reports``."""
 
-    def __init__(self, db_engine):
+    def __init__(self, db_engine: Optional[Engine]):
         """
         Initialize report tracker
 
@@ -107,8 +155,125 @@ class ReportTracker:
         self.db_engine = db_engine
 
     def generate_report_id(self) -> str:
-        """Generate unique report ID"""
+        """Generate unique report ID.
+
+        Returns:
+            ``ANISAKYS-YYYYMMDD-XXXXXXXX``.
+        """
         return generate_report_id()
+
+    # ------------------------------------------------------------------
+    # Writes used by the reporting pipeline (inside the caller's transaction)
+    # ------------------------------------------------------------------
+
+    def insert_report(self, conn: Connection, report: AbuseReportRecord) -> None:
+        """Insert a new report row (append-only) inside the caller's transaction.
+
+        Args:
+            conn: Connection inside an open transaction.
+            report: The report to record.
+
+        Raises:
+            sqlalchemy.exc.IntegrityError: If the report id already exists.
+        """
+        recipients = report.recipients
+        conn.execute(
+            text("""
+                INSERT INTO abuse_reports (
+                    site_url, site_id, report_date, recipients, cc_recipients, subject,
+                    report_id, status, sla_deadline, icann_compliant, screenshot_included,
+                    screenshot_path, attachment_count, follow_up_required, evidence,
+                    created_at, updated_at
+                ) VALUES (
+                    :site_url,
+                    (SELECT id FROM phishing_sites WHERE url = :site_url ORDER BY id LIMIT 1),
+                    :report_date, :recipients, :cc_recipients, :subject,
+                    :report_id, :status, :sla_deadline, :icann_compliant, :screenshot_included,
+                    :screenshot_path, :attachment_count, :follow_up_required,
+                    CAST(:evidence AS JSONB), :created_at, :updated_at
+                )
+                """),
+            {
+                "site_url": report.site_url,
+                "report_date": report.report_date,
+                "recipients": json.dumps(
+                    recipients if isinstance(recipients, list) else [recipients]
+                ),
+                "cc_recipients": (
+                    json.dumps(report.cc_recipients) if report.cc_recipients else None
+                ),
+                "subject": report.subject,
+                "report_id": report.report_id,
+                "status": report.status,
+                "sla_deadline": report.sla_deadline,
+                "icann_compliant": 1 if report.icann_compliant else 0,
+                "screenshot_included": 1 if report.screenshot_included else 0,
+                "screenshot_path": report.screenshot_path,
+                "attachment_count": report.attachment_count,
+                "follow_up_required": 1 if report.follow_up_required else 0,
+                "evidence": json.dumps(report.evidence) if report.evidence is not None else None,
+                "created_at": report.created_at,
+                "updated_at": report.updated_at,
+            },
+        )
+
+    def mark_report_sent(self, conn: Connection, report_id: str, sent_at: datetime) -> bool:
+        """Move a queued report to ``sent`` and start its SLA clock.
+
+        Only the first primary delivery counts; later ones leave the row alone.
+
+        Args:
+            conn: Connection inside an open transaction.
+            report_id: Tracked report id.
+            sent_at: When the first abuse desk accepted the report.
+
+        Returns:
+            ``True`` if the row changed.
+        """
+        result = conn.execute(
+            text("""
+                UPDATE abuse_reports
+                SET status = 'sent', report_date = :sent_at, sla_deadline = :deadline,
+                    updated_at = :sent_at
+                WHERE report_id = :report_id AND status = 'queued'
+                """),
+            {
+                "report_id": report_id,
+                "sent_at": sent_at,
+                "deadline": calculate_sla_deadline(sent_at),
+            },
+        )
+        return bool(result.rowcount)
+
+    def mark_report_failed_if_undeliverable(self, conn: Connection, report_id: str) -> bool:
+        """Mark a queued report ``failed`` once none of its primary e-mails can succeed.
+
+        Args:
+            conn: Connection inside an open transaction.
+            report_id: Tracked report id.
+
+        Returns:
+            ``True`` if the report was marked failed.
+        """
+        result = conn.execute(
+            text("""
+                UPDATE abuse_reports
+                SET status = 'failed', updated_at = now()
+                WHERE report_id = :report_id AND status = 'queued'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM abuse_report_outbox AS o
+                      WHERE o.report_id = :report_id AND o.channel = 'email'
+                        AND o.audience = 'primary' AND o.followup_seq = 0
+                        AND o.status IN ('pending', 'sending', 'sent')
+                  )
+                """),
+            {"report_id": report_id},
+        )
+        return bool(result.rowcount)
+
+    # ------------------------------------------------------------------
+    # Public API (each call is its own short transaction)
+    # ------------------------------------------------------------------
 
     def track_report(self, report: AbuseReportRecord) -> bool:
         """
@@ -278,19 +443,19 @@ class ReportTracker:
         """
         try:
             with self.db_engine.begin() as conn:
+                now = utc_now()
                 update_data = {
                     "report_id": report_id,
                     "status": status.value,
-                    "updated_at": datetime.now(),
+                    "updated_at": now,
                     "follow_up_required": 1 if follow_up_required else 0,
                 }
 
-                # Add response data if provided
                 if response_content:
                     update_data.update(
                         {
                             "response_received": 1,
-                            "response_date": datetime.now(),
+                            "response_date": now,
                             "response_content": response_content,
                         }
                     )
@@ -313,14 +478,13 @@ class ReportTracker:
                 result = conn.execute(text(query), update_data)
 
                 if result.rowcount > 0:
-                    logger.info(f"✅ Updated report {report_id} status to {status.value}")
+                    logger.info(f"Updated report {report_id} status to {status.value}")
                     return True
-                else:
-                    logger.warning(f"⚠️  Report {report_id} not found for status update")
-                    return False
+                logger.warning(f"Report {report_id} not found for status update")
+                return False
 
         except Exception as e:
-            logger.error(f"❌ Failed to update report status: {e}")
+            logger.error(f"Failed to update report status: {e}")
             return False
 
     def get_report(self, report_id: str) -> Optional[Dict[str, Any]]:
@@ -339,48 +503,9 @@ class ReportTracker:
                     text("SELECT * FROM abuse_reports WHERE report_id = :report_id"),
                     {"report_id": report_id},
                 ).fetchone()
-
-                if result:
-                    # Convert to dict and parse JSON fields
-                    report_dict = dict(result._mapping)
-
-                    # Parse JSON fields
-                    if report_dict.get("recipients"):
-                        try:
-                            report_dict["recipients"] = json.loads(report_dict["recipients"])
-                        except (json.JSONDecodeError, TypeError):
-                            pass  # Keep as string if not valid JSON
-
-                    if report_dict.get("cc_recipients"):
-                        try:
-                            report_dict["cc_recipients"] = json.loads(report_dict["cc_recipients"])
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-
-                    if report_dict.get("multi_api_results"):
-                        try:
-                            report_dict["multi_api_results"] = json.loads(
-                                report_dict["multi_api_results"]
-                            )
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-
-                    # Convert integer flags to boolean
-                    for bool_field in [
-                        "response_received",
-                        "icann_compliant",
-                        "screenshot_included",
-                        "follow_up_required",
-                    ]:
-                        if bool_field in report_dict:
-                            report_dict[bool_field] = bool(report_dict[bool_field])
-
-                    return report_dict
-
-                return None
-
+                return self._decode_row(result) if result else None
         except Exception as e:
-            logger.error(f"❌ Failed to get report {report_id}: {e}")
+            logger.error(f"Failed to get report {report_id}: {e}")
             return None
 
     def get_reports_by_site(self, site_url: str) -> List[Dict[str, Any]]:
@@ -391,96 +516,105 @@ class ReportTracker:
             site_url: Site URL to search for
 
         Returns:
-            List of report dicts
+            List of report dicts, newest first
         """
         try:
             with self.db_engine.connect() as conn:
                 result = conn.execute(
                     text(
-                        "SELECT * FROM abuse_reports WHERE site_url = :site_url ORDER BY report_date DESC"
+                        "SELECT * FROM abuse_reports WHERE site_url = :site_url "
+                        "ORDER BY report_date DESC, id DESC"
                     ),
                     {"site_url": site_url},
                 ).fetchall()
-
-                reports = []
-                for row in result:
-                    report_dict = dict(row._mapping)
-
-                    # Parse JSON fields (same as get_report)
-                    if report_dict.get("recipients"):
-                        try:
-                            report_dict["recipients"] = json.loads(report_dict["recipients"])
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-
-                    if report_dict.get("cc_recipients"):
-                        try:
-                            report_dict["cc_recipients"] = json.loads(report_dict["cc_recipients"])
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-
-                    if report_dict.get("multi_api_results"):
-                        try:
-                            report_dict["multi_api_results"] = json.loads(
-                                report_dict["multi_api_results"]
-                            )
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-
-                    # Convert integer flags to boolean
-                    for bool_field in [
-                        "response_received",
-                        "icann_compliant",
-                        "screenshot_included",
-                        "follow_up_required",
-                    ]:
-                        if bool_field in report_dict:
-                            report_dict[bool_field] = bool(report_dict[bool_field])
-
-                    reports.append(report_dict)
-
-                return reports
-
+                return [self._decode_row(row) for row in result]
         except Exception as e:
-            logger.error(f"❌ Failed to get reports for site {site_url}: {e}")
+            logger.error(f"Failed to get reports for site {site_url}: {e}")
             return []
 
-    def get_overdue_reports(self) -> List[Dict[str, Any]]:
-        """
-        Get reports that are past their SLA deadline
+    @staticmethod
+    def _decode_row(row: Any) -> Dict[str, Any]:
+        """Turn a row into a dict with JSON columns decoded and flags as bools.
+
+        Args:
+            row: Result row.
 
         Returns:
-            List of overdue report dicts
+            The decoded dict.
         """
+        report_dict = dict(row._mapping)
+        for json_field in ("recipients", "cc_recipients", "multi_api_results", "evidence"):
+            value = report_dict.get(json_field)
+            if isinstance(value, str) and value:
+                try:
+                    report_dict[json_field] = json.loads(value)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        for bool_field in (
+            "response_received",
+            "icann_compliant",
+            "screenshot_included",
+            "follow_up_required",
+        ):
+            if bool_field in report_dict:
+                report_dict[bool_field] = bool(report_dict[bool_field])
+        return report_dict
+
+    def get_overdue_reports(self, now: Optional[datetime] = None) -> List[Dict[str, Any]]:
+        """
+        Get reports that are past their SLA deadline.
+
+        Only the newest open report of each site is considered, so a site that
+        was reported again never gets parallel follow-ups.
+
+        Args:
+            now: Reference time (UTC); defaults to the current time.
+
+        Returns:
+            List of overdue report dicts with ``overdue_hours``
+        """
+        reference = now or utc_now()
         try:
-            with self.db_engine.connect() as conn:
-                result = conn.execute(text("""
-                        SELECT ar.* FROM abuse_reports ar
-                        INNER JOIN phishing_sites ps ON ar.site_url = ps.url
-                        WHERE ar.sla_deadline < CURRENT_TIMESTAMP
-                        AND ar.status NOT IN ('resolved', 'rejected', 'timeout')
-                        AND ar.response_received = 0
-                        AND ps.site_status NOT IN ('down', 'timeout', 'resolved')
-                        ORDER BY ar.sla_deadline ASC
-                    """)).fetchall()
+            with short_transaction(self.db_engine) as conn:
+                result = conn.execute(
+                    text(f"""
+                        SELECT latest.*,
+                               ROUND(CAST(EXTRACT(EPOCH FROM (CAST(:now AS timestamptz)
+                                    - latest.sla_deadline)) / 3600 AS numeric), 2)
+                                   AS overdue_hours
+                        FROM (
+                            SELECT DISTINCT ON (ar.site_url) ar.*
+                            FROM abuse_reports AS ar
+                            INNER JOIN phishing_sites AS ps ON ar.site_url = ps.url
+                            WHERE ar.status NOT IN ({_CLOSED_SQL})
+                              AND ps.site_status NOT IN ('down', 'timeout', 'resolved')
+                            ORDER BY ar.site_url, ar.id DESC
+                        ) AS latest
+                        WHERE latest.sla_deadline < :now
+                          AND COALESCE(latest.response_received, 0) = 0
+                        ORDER BY latest.sla_deadline ASC
+                        """),
+                    {"now": reference},
+                ).fetchall()
 
                 overdue_reports = []
                 for row in result:
                     report_dict = dict(row._mapping)
-
-                    # Calculate how overdue
-                    if report_dict.get("sla_deadline"):
-                        overdue_hours = (
-                            datetime.now() - report_dict["sla_deadline"]
-                        ).total_seconds() / 3600
-                        report_dict["overdue_hours"] = round(overdue_hours, 2)
-
+                    if report_dict.get("overdue_hours") is not None:
+                        report_dict["overdue_hours"] = float(report_dict["overdue_hours"])
+                    elif report_dict.get("sla_deadline"):
+                        deadline = report_dict["sla_deadline"]
+                        if deadline.tzinfo is None:
+                            deadline = deadline.replace(tzinfo=timezone.utc)
+                        report_dict["overdue_hours"] = round(
+                            (reference - deadline).total_seconds() / 3600, 2
+                        )
                     overdue_reports.append(report_dict)
 
                 return overdue_reports
 
         except Exception as e:
-            logger.error(f"❌ Failed to get overdue reports: {e}")
+            logger.error(f"Failed to get overdue reports: {e}")
             return []
 
     def get_reports_needing_followup(self) -> List[Dict[str, Any]]:
@@ -502,7 +636,7 @@ class ReportTracker:
                 return [dict(row._mapping) for row in result]
 
         except Exception as e:
-            logger.error(f"❌ Failed to get reports needing follow-up: {e}")
+            logger.error(f"Failed to get reports needing follow-up: {e}")
             return []
 
     def mark_report_for_followup(self, report_id: str, reason: str = None) -> bool:
@@ -600,11 +734,11 @@ class ReportTracker:
                     "avg_response_time_hours": (
                         round(avg_response_time, 2) if avg_response_time else None
                     ),
-                    "generated_at": datetime.now().isoformat(),
+                    "generated_at": utc_now().isoformat(),
                 }
 
         except Exception as e:
-            logger.error(f"❌ Failed to get statistics: {e}")
+            logger.error(f"Failed to get statistics: {e}")
             return {"error": str(e)}
 
 
@@ -617,6 +751,7 @@ def create_report_record(
     multi_api_results: Dict = None,
     screenshot_included: bool = False,
     report_id: Optional[str] = None,
+    status: str = ReportStatus.SENT.value,
 ) -> AbuseReportRecord:
     """
     Create a new AbuseReportRecord
@@ -629,61 +764,30 @@ def create_report_record(
         multi_api_results: Optional API scan results
         screenshot_included: Whether screenshot was included
         report_id: Id already used in the e-mail; generated when omitted
+        status: Initial status (``queued`` until the first delivery)
 
     Returns:
         AbuseReportRecord instance
     """
-    report_id = report_id or generate_report_id()
-
     confidence_score = None
     threat_level = None
 
     if multi_api_results:
         confidence_score = multi_api_results.get("confidence_score")
-        threat_level = multi_api_results.get("threat_level")
+        threat_level = multi_api_results.get("aggregated_threat_level") or multi_api_results.get(
+            "threat_level"
+        )
 
     return AbuseReportRecord(
         site_url=site_url,
         recipients=recipients,
         subject=subject,
-        report_id=report_id,
+        report_id=report_id or generate_report_id(),
+        status=status,
         cc_recipients=cc_recipients,
         multi_api_results=multi_api_results,
         confidence_score=confidence_score,
         threat_level=threat_level,
         screenshot_included=screenshot_included,
-        icann_compliant=True,  # Assume compliant by default
+        icann_compliant=True,
     )
-
-
-if __name__ == "__main__":
-    # Test the report tracker
-    from sqlalchemy import create_engine
-
-    # Create test database engine (you'd use your actual DATABASE_URL)
-    engine = create_engine("sqlite:///test_reports.db")
-    tracker = ReportTracker(engine)
-
-    # Create test report
-    report = create_report_record(
-        site_url="https://phishing-test.com",
-        recipients=["abuse@registrar.com"],
-        subject="Phishing Report: phishing-test.com",
-        cc_recipients=["security@test.com"],
-        screenshot_included=True,
-    )
-
-    # Track the report
-    if tracker.track_report(report):
-        print(f"✅ Tracked report: {report.report_id}")
-
-        # Test retrieving the report
-        retrieved = tracker.get_report(report.report_id)
-        if retrieved:
-            print(f"✅ Retrieved report: {retrieved['report_id']}")
-
-        # Test statistics
-        stats = tracker.get_statistics()
-        print(f"📊 Statistics: {json.dumps(stats, indent=2)}")
-    else:
-        print("❌ Failed to track report")

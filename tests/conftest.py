@@ -210,6 +210,26 @@ def reporting_schema(create_test_database):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _restore_reporting_schema(reporting_schema, db_engine):
+    """Re-apply the reporting schema after tests that drop ``phishing_sites``.
+
+    Some legacy tests drop and recreate ``phishing_sites`` through the runtime
+    DDL, which knows nothing about revision 004's claim columns. One cheap
+    catalogue query per test detects that and restores the columns.
+    """
+    yield
+    with db_engine.connect() as conn:
+        present = conn.execute(
+            text(
+                "SELECT 1 FROM information_schema.columns WHERE table_name = 'phishing_sites' "
+                "AND column_name = 'report_lease_until'"
+            )
+        ).first()
+    if present is None:
+        apply_reporting_schema(db_engine)
+
+
 @pytest.fixture
 def scratch_database(create_test_database):
     """Factory for throw-away databases on the test server (migration tests).

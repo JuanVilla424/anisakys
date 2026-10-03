@@ -408,9 +408,9 @@ class AutoPhishingAnalyzer:
                             "urlvoid": json.loads(api_results[1]) if api_results[1] else {},
                             "phishtank": json.loads(api_results[2]) if api_results[2] else {},
                             "recommendations": [
-                                "🤖 AUTO-DETECTED: Site flagged by automated system",
-                                f"🎯 DETECTION KEYWORDS: {keywords}",
-                                f"📊 THREAT ASSESSMENT: {threat_level.upper()} ({confidence}% confidence)",
+                                f"Detection keywords: {keywords}",
+                                f"Threat assessment: {str(threat_level).upper()} "
+                                f"({confidence}% confidence)",
                             ],
                         }
                     else:
@@ -427,24 +427,8 @@ class AutoPhishingAnalyzer:
                     )
 
                     if success:
-                        # Update database to mark as reported
-                        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        with self.db_manager.engine.begin() as conn:
-                            conn.execute(
-                                text("""
-                                    UPDATE phishing_sites
-                                    SET abuse_report_sent = 1,
-                                        last_report_sent = :timestamp,
-                                        abuse_email = CASE
-                                            WHEN manual_emails = 1 THEN abuse_email
-                                            ELSE :abuse_email
-                                        END,
-                                        reported = 1
-                                    WHERE url = :url
-                                """),
-                                {"timestamp": timestamp, "abuse_email": abuse_list[0], "url": url},
-                            )
-
+                        # send_abuse_report() marks the site and tracks the report
+                        # in the same transaction that queues the e-mails.
                         logger.info(f"✅ AUTO-REPORT SENT: {url} to {abuse_list[0]}")
                         processed_count += 1
                     else:

@@ -174,6 +174,28 @@ class TestAbuseReportManagerInit:
         assert mgr.cc_emails == []
 
 
+class TestCcLists:
+    """The first send CC'd escalation levels 2 and 3: __init__ defaulted the CC
+    list to DEFAULT_CC_EMAILS_ESCALATION_LEVEL2 and the send added level 3."""
+
+    def test_default_cc_list_is_default_cc_emails_not_escalation(
+        self, mock_db, mock_abuse_detector, mock_settings
+    ):
+        mock_settings.DEFAULT_CC_EMAILS = "CERT@example.org, team@example.org"
+        mock_settings.DEFAULT_CC_EMAILS_ESCALATION_LEVEL2 = "l2@example.org"
+        mock_settings.DEFAULT_CC_EMAILS_ESCALATION_LEVEL3 = "l3@example.org"
+        with (
+            patch("src.reporting.abuse_manager.MultiAPIValidator"),
+            patch("src.reporting.abuse_manager.GrinderReportClient"),
+            patch("src.reporting.abuse_manager.AbuseContactValidator"),
+            patch("src.reporting.abuse_manager.get_screenshot_service"),
+            patch("src.reporting.abuse_manager.ReportTracker"),
+        ):
+            mgr = AbuseReportManager(mock_db, mock_abuse_detector, cc_emails=None, timeout=5)
+
+        assert mgr.cc_emails == ["cert@example.org", "team@example.org"]
+
+
 # ---------------------------------------------------------------------------
 # TestReportIpToGrinder
 # ---------------------------------------------------------------------------

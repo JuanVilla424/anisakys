@@ -8,6 +8,7 @@ tracked report, a completed loop) rather than on the import itself.
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -186,37 +187,37 @@ class TestAutoReportDecision:
 
 class TestReportTracking:
     """abuse_manager.py called create_report_record/timeout without imports, so
-    every sent report vanished from SLA tracking."""
+    every sent report vanished from SLA tracking. The report is now tracked in
+    the same transaction that queues its e-mails; checked on the real test DB."""
 
-    def test_sent_report_is_tracked(self):
-        with (
-            patch.object(abuse_manager_module, "MultiAPIValidator"),
-            patch.object(abuse_manager_module, "GrinderReportClient"),
-            patch.object(abuse_manager_module, "get_screenshot_service"),
-            patch.object(abuse_manager_module, "ReportTracker"),
-            patch.object(
-                abuse_manager_module, "report_phishing_url", return_value={"success": False}
-            ),
-            patch.object(abuse_manager_module.smtplib, "SMTP") as smtp,
-            patch("psycopg2.connect"),
-            patch.object(
-                abuse_manager_module.AttachmentConfig, "get_all_attachments", return_value=[]
-            ),
-        ):
-            detector = MagicMock()
-            detector.validate_email.return_value = True
-            detector.validate_abuse_email_domain.return_value = True
-            manager = abuse_manager_module.AbuseReportManager(
-                MagicMock(), detector, cc_emails=[], timeout=5
-            )
-            manager.screenshot_service.capture_screenshot.return_value = {"success": False}
-            sent = manager.send_abuse_report(
-                ["abuse@registrar.example"], "https://phish.example/login", "whois", test_mode=False
-            )
+    def test_sent_report_is_tracked(self, db_engine):
+        from tests.reporting.pipeline_support import (
+            FakeMailer,
+            cleanup_sites,
+            make_manager,
+            make_site_url,
+            network_patches,
+            report_rows,
+        )
+
+        url = make_site_url("regression")
+        mailer = FakeMailer()
+        with ExitStack() as stack:
+            manager = make_manager(db_engine, stack, mailer=mailer)
+            network_patches(stack)
+            try:
+                sent = manager.send_abuse_report(
+                    ["abuse@registrar.example"], url, "whois", test_mode=False
+                )
+                rows = report_rows(db_engine, url)
+            finally:
+                cleanup_sites(db_engine)
 
         assert sent is True
-        assert smtp.return_value.__enter__.return_value.sendmail.called
-        assert manager.report_tracker.track_report.called
+        assert mailer.to("abuse@registrar.example")
+        assert len(rows) == 1
+        assert rows[0]["status"] == "sent"
+        assert rows[0]["sla_deadline"] is not None
 
     def test_serialize_for_json_is_available_to_manual_reports(self):
         assert abuse_manager_module.serialize_for_json({"a": [1]}) == {"a": [1]}
