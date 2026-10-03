@@ -433,20 +433,38 @@ python anisakys.py --show-auto-status
 
 ### 🚀 **REST API Server**
 
-Start the REST API server with authentication:
+Development server (binds `API_BIND_HOST`, `127.0.0.1` by default; the Werkzeug
+debugger is never enabled):
 
 ```bash
 cd anisakys
 python anisakys.py --start-api --api-port 8080 --api-key your_secure_api_key
 ```
 
+Production: serve the WSGI app with gunicorn (as `entrypoint-backend.sh` does). This
+process only serves HTTP; background jobs run in the scheduler role.
+
+```bash
+gunicorn --bind 127.0.0.1:8091 --worker-class gthread --threads 4 'src.api.wsgi:create_app()'
+```
+
+Behind a reverse proxy set `TRUSTED_PROXY_HOPS`; with several workers set
+`RATELIMIT_STORAGE_URL=redis://...` so rate limits are shared.
+
+**API keys and scopes** (`python -m src.cli.api_keys create --help` lists them):
+`read`, `scan`, `report` (submissions wait for analyst approval), `report_send`
+(submissions are reported without approval), `write`, `email_admin` (e-mail monitor
+threads, limited to `EMAIL_MONITOR_ALLOWED_MAILBOXES`), `metrics` and `admin`.
+
 **API Endpoints:**
 
-- `POST /api/v1/report` - Submit phishing reports
+- `POST /api/v1/report` - Submit phishing reports (202 pending approval without `report_send`)
 - `POST /api/v1/multi-scan` - Perform multi-API validation
 - `GET /api/v1/status/<url>` - Check report status
 - `GET /api/v1/stats` - System statistics
-- `GET /api/v1/health` - Health check
+- `POST /api/v2/stix/bundle` - Build a STIX 2.1 indicator bundle (TLP 2.0, AMBER by default)
+- `GET /api/v1/health` - Health check with a database ping (503 when unhealthy)
+- `GET /metrics` - Prometheus metrics (`METRICS_TOKEN` or a `metrics`/`read` API key)
 
 ### 🕸️ **Manual Phishing Site Reporting**
 
