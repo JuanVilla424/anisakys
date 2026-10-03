@@ -8,9 +8,10 @@ import datetime
 from typing import List, Optional, Tuple
 
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
 
 from src.database import DATABASE_URL, db_engine
-from src.dns.network_utils import safe_get_with_redirects, SSRFRedirectError
+from src.detection.liveness import probe_site
 from src.logger import logger
 
 # Default User-Agent for HTTP requests
@@ -127,53 +128,74 @@ class PhishingUtils:
         logger.info(f"🎯 Logged phishing match: {url}")
 
     @staticmethod
+    def _stored_site_status(url: str) -> Tuple[Optional[str], Optional[str]]:
+        """Read the persisted status and takedown date of a site.
+
+        Args:
+            url: Site URL as stored in ``phishing_sites``.
+
+        Returns:
+            ``(site_status, takedown_date)``; ``(None, None)`` if unknown or
+            the database is unavailable.
+        """
+        try:
+            with db_engine.connect() as conn:
+                row = conn.execute(
+                    text("SELECT site_status, takedown_date FROM phishing_sites WHERE url = :url"),
+                    {"url": url},
+                ).first()
+        except SQLAlchemyError as e:
+            logger.warning(f"⚠️ Could not read stored status for {url}: {type(e).__name__}")
+            return None, None
+        if row is None:
+            return None, None
+        return row[0], (str(row[1]) if row[1] is not None else None)
+
+    @staticmethod
     def determine_site_status(
         url: str,
         resolved_ip: Optional[str],
-        current_status: str,
+        current_status: Optional[str],
         current_takedown: Optional[str],
         timestamp: str,
         timeout: int,
     ) -> Tuple[str, Optional[str]]:
-        """Determine the site's status ("up" or "down") and takedown date."""
-        if not resolved_ip:
-            new_status = "down"
-            new_takedown = current_takedown if current_status == "down" else timestamp
-        else:
-            try:
-                response = safe_get_with_redirects(
-                    url,
-                    timeout=timeout,
-                    headers={
-                        "User-Agent": DEFAULT_USER_AGENT,
-                        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                        "Accept-Language": "en-US,en;q=0.9",
-                        "Accept-Encoding": "gzip, deflate, br",
-                        "DNT": "1",
-                        "Connection": "keep-alive",
-                        "Upgrade-Insecure-Requests": "1",
-                    },
-                )
-                if response.status_code == 200:
-                    if "suspended" in response.text.lower():
-                        new_status = "down"
-                        new_takedown = current_takedown if current_status == "down" else timestamp
-                    else:
-                        new_status = "up"
-                        new_takedown = None
-                else:
-                    new_status = "down"
-                    new_takedown = current_takedown if current_status == "down" else timestamp
-            except SSRFRedirectError as e:
-                logger.warning(f"🛑 SSRF: {e.blocked_url} is non-public; marking site down")
-                new_status = "down"
-                new_takedown = current_takedown if current_status == "down" else timestamp
-            except Exception as e:
-                logger.error(f"❌ GET request failed for {url}: {e}")
-                new_status = "down"
-                new_takedown = current_takedown if current_status == "down" else timestamp
+        """Probe a site once and report whether it is (still) up.
 
-        return new_status, new_takedown
+        Compatibility wrapper for callers that probe outside the takedown
+        monitor. One observation can show that a site is alive, but it can
+        never confirm a takedown: that needs ``TAKEDOWN_CONSECUTIVE_FAILURES``
+        failing cycles, which only :class:`src.monitoring.takedown.TakedownMonitor`
+        tracks. A failing, challenged, parked or blocked probe therefore keeps
+        the known status (the caller's, else the stored one, else ``"up"``).
+
+        Args:
+            url: Site URL.
+            resolved_ip: Ignored; the probe resolves the host itself (callers
+                used to pass ``None`` whenever an RDAP lookup failed).
+            current_status: Status known to the caller, if any.
+            current_takedown: Takedown date known to the caller, if any.
+            timestamp: Unused; kept for signature compatibility.
+            timeout: Per-request timeout in seconds.
+
+        Returns:
+            ``("up", None)`` when the probe saw the site alive, otherwise the
+            unchanged ``(status, takedown_date)``.
+        """
+        probe = probe_site(url, timeout)
+        if probe.result.is_alive:
+            return "up", None
+
+        status, takedown = current_status, current_takedown
+        if status is None:
+            status, takedown = PhishingUtils._stored_site_status(url)
+        status = status or "up"
+        logger.info(
+            f"🔎 Single probe of {url} saw {probe.result.classification.value} "
+            f"({probe.result.detail or probe.result.status_code}); keeping status '{status}' "
+            "(takedowns are confirmed by the takedown monitor)"
+        )
+        return status, (takedown if status == "down" else None)
 
 
 # EPIC-006: generate_queries_file moved to src/generators/query_generator.py
