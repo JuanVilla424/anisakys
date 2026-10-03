@@ -57,7 +57,16 @@ TEXT_FORMAT = "%(asctime)s %(levelname)-8s %(name)s [%(correlation_id)s] %(messa
 REDACTED = "[REDACTED]"
 
 # Libraries that are chatty at INFO and drown application logs.
-NOISY_LOGGERS = ("urllib3", "botocore", "boto3", "s3transfer", "selenium", "websocket")
+NOISY_LOGGERS = (
+    "urllib3",
+    "botocore",
+    "boto3",
+    "s3transfer",
+    "selenium",
+    "websocket",
+    # Importing alembic for the startup schema check logs every plugin it registers.
+    "alembic.runtime.plugins",
+)
 
 # ---------------------------------------------------------------------------
 # Secret redaction
