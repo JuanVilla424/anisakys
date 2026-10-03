@@ -45,6 +45,35 @@ MIN_THREAT_SCORE_FOR_URL_SCAN = 30
 GSUITE_SYSTEM_DOMAINS = {"google.com", "googlemail.com"}
 
 
+def monitoring_refusal(details: dict) -> Optional[str]:
+    """Check a thread's mailbox (or domain) against the monitoring allowlist.
+
+    The service account has domain-wide delegation and could read any mailbox
+    of the tenant, so a thread is only run for mailboxes/domains the operator
+    allowed (``src.api.mailbox_policy``). When that policy module is not
+    available the check fails closed.
+
+    Args:
+        details: The thread's ``details`` (``domain`` or ``target_mailbox``).
+
+    Returns:
+        ``None`` when the thread may run, else the reason it may not.
+    """
+    try:
+        from src.api.mailbox_policy import is_domain_allowed, is_mailbox_allowed
+    except ImportError:
+        return "mailbox allowlist (src.api.mailbox_policy) is unavailable; refusing to read mail"
+    domain = str(details.get("domain") or "").strip()
+    if domain:
+        if is_domain_allowed(domain):
+            return None
+        return f"domain-wide monitoring of {domain} is not on the mailbox allowlist"
+    mailbox = str(details.get("target_mailbox") or "").strip()
+    if mailbox and is_mailbox_allowed(mailbox):
+        return None
+    return f"mailbox {mailbox or '(none)'} is not on the mailbox allowlist"
+
+
 class EmailMonitorScheduler:
     def __init__(
         self,
@@ -141,6 +170,11 @@ class EmailMonitorScheduler:
             elif details is None:
                 details = {}
 
+            refusal = monitoring_refusal(details)
+            if refusal:
+                self._record_refused_execution(thread_id, refusal)
+                return
+
             if details.get("domain"):
                 self._run_domain_wide(thread_id, details)
             elif details.get("target_mailbox"):
@@ -151,6 +185,24 @@ class EmailMonitorScheduler:
                 )
         except Exception as exc:
             logger.error(f"email_scheduler: failed thread {thread_id}: {exc}")
+
+    def _record_refused_execution(self, thread_id: int, reason: str) -> None:
+        """Log and record a run that the mailbox allowlist refused.
+
+        Args:
+            thread_id: The e-mail monitor thread.
+            reason: Why the run was refused.
+        """
+        logger.warning(f"email_scheduler: thread {thread_id} not run: {reason}")
+        with db_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO thread_executions "
+                    "(thread_id, execution_type, status, completed_at, error_message) "
+                    "VALUES (:tid, 'email_scan', 'failed', NOW(), :reason)"
+                ),
+                {"tid": thread_id, "reason": reason},
+            )
 
     # ── Domain-wide mode ─────────────────────────────────────────────────────
 
