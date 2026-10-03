@@ -3,7 +3,7 @@ API module for Anisakys Phishing Detection Engine.
 
 Provides REST API for external phishing reports.
 
-``PhishingAPI`` and ``upgrade_phishing_db`` are loaded lazily (PEP 562) so that
+``PhishingAPI`` is loaded lazily (PEP 562) so that
 importing a submodule such as ``src.api.wsgi`` or ``src.api.params`` does not
 pull in the whole API (and its integration clients) as a side effect; this
 also lets ``src.api.wsgi`` control the import order of ``src.detection`` and
@@ -15,19 +15,18 @@ from typing import TYPE_CHECKING, Any
 from src.utils.timeouts import OperationTimeoutError, timeout
 
 if TYPE_CHECKING:  # static analysers see the lazy exports
-    from src.api.phishing_api import PhishingAPI, upgrade_phishing_db
+    from src.api.phishing_api import PhishingAPI
 
 # Backwards-compatible alias: the API used to define its own TimeoutError.
 TimeoutError = OperationTimeoutError  # noqa: A001
 
-_LAZY_EXPORTS = frozenset({"PhishingAPI", "upgrade_phishing_db"})
+_LAZY_EXPORTS = frozenset({"PhishingAPI"})
 
 __all__ = [
     "PhishingAPI",
     "OperationTimeoutError",
     "TimeoutError",
     "timeout",
-    "upgrade_phishing_db",
 ]
 
 

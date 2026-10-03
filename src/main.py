@@ -84,12 +84,12 @@ from src.data import (
     TLD_WHOIS_SERVERS,
 )
 from src.models import DynamicBatchConfig, AttachmentConfig, EngineMode
-from src.database import DatabaseManager, db_engine, DATABASE_URL
+from src.database import DatabaseManager, db_engine, DATABASE_URL, ensure_schema_is_current
 from src.reporting import EnhancedAbuseEmailDetector, AbuseReportManager
 from src.monitoring import TakedownMonitor, start_gsb_rescan_job, stop_gsb_rescan_job
 from src.monitoring.takedown import save_offset
 from src.detection import AutoPhishingAnalyzer, PhishingUtils, PhishingScanner
-from src.api import PhishingAPI, upgrade_phishing_db
+from src.api import PhishingAPI
 from src.intelligence import (
     GrinderReportClient,
     require_api_key,
@@ -212,13 +212,8 @@ class Engine:
 
         self.args = args
         self.db_manager = DatabaseManager(db_url=DATABASE_URL)
-        self.db_manager.init_db()
-        self.db_manager.init_phishing_db()
-        upgrade_phishing_db()
-        self.db_manager.init_registrar_abuse_db()
-        self.db_manager.init_hosting_abuse_db()
-        self.db_manager.init_threads_db()
-        self.db_manager.init_blocklist_db()
+        # The schema is owned by Alembic; refuse to start against a stale database.
+        ensure_schema_is_current(self.db_manager.engine)
 
         # Ensure all initialization connections are closed
         logger.info("🔒 Disposing initialization connections")

@@ -357,6 +357,16 @@ nano .env
 
 > 💡 **Pro Tip:** The system will work with minimal configuration, but API keys significantly enhance detection capabilities.
 
+#### **Step 4: 🗃️ Apply Database Migrations**
+
+```bash
+# Creates or upgrades the schema in DATABASE_URL (run again after every update)
+alembic upgrade head
+```
+
+> ⚠️ The application never creates tables by itself: every process checks at startup that the
+> database is at the latest Alembic revision and refuses to start otherwise.
+
 ## ⚙️ Configuration
 
 ### Essential Environment Variables
