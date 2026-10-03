@@ -436,7 +436,10 @@ class TestDeliverySemantics:
         mailer = FakeMailer()
         manager = make_manager(engine, stack, mailer=mailer)
 
-        manager.dispatch_outbox()
+        # A full dispatch pass runs this first; calling it directly keeps the
+        # test away from outbox rows other tests left in the shared database.
+        assert manager.outbox.expire_interrupted() >= 1
+        manager.dispatch_outbox(report_id="ANISAKYS-TEST-SEMANTICS")
 
         assert mailer.sent == []
         (stored,) = outbox_rows(engine, url)
