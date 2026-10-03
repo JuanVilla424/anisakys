@@ -17,20 +17,24 @@ Options:
 """
 
 import argparse
+import html
 import re
-import smtplib
 import subprocess
 import sys
 import os
 import types
 from datetime import datetime, timezone
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+from email.message import EmailMessage
+from email.utils import formatdate, make_msgid
 
 # ── Bootstrap package stubs to avoid circular imports ────────────────────────
 _base = os.path.join(os.path.dirname(__file__), "..", "..")
 _src = os.path.normpath(os.path.join(_base, "src"))
-for _pkg, _subdir in [("src.intelligence", "intelligence"), ("src.detection", "detection")]:
+for _pkg, _subdir in [
+    ("src.intelligence", "intelligence"),
+    ("src.detection", "detection"),
+    ("src.reporting", "reporting"),
+]:
     if _pkg not in sys.modules:
         _mod = types.ModuleType(_pkg)
         _mod.__path__ = [os.path.join(_src, _subdir)]
@@ -214,11 +218,14 @@ def build_html_report(
 ) -> str:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     sev_color = _SEVERITY_COLOR.get(threat["severity"], "#7f8c8d")
+    esc = html.escape
+    # DNS answers, WHOIS fields and domains are attacker-controlled: escape all.
+    suspect_domain, victim_domain, sender = esc(suspect_domain), esc(victim_domain), esc(sender)
 
     def dns_row(label: str, values: list) -> str:
         if not values:
             return ""
-        val_html = "<br>".join(f"<code>{v}</code>" for v in values)
+        val_html = "<br>".join(f"<code>{esc(str(v))}</code>" for v in values)
         return f"<tr><td style='padding:6px 12px;font-weight:bold;color:#555;white-space:nowrap'>{label}</td><td style='padding:6px 12px'>{val_html}</td></tr>"
 
     dns_rows = "".join(
@@ -236,7 +243,7 @@ def build_html_report(
     )
 
     indicators_html = "".join(
-        f"<li style='margin:4px 0'>{ind}</li>" for ind in threat["indicators"]
+        f"<li style='margin:4px 0'>{esc(str(ind))}</li>" for ind in threat["indicators"]
     )
 
     whois_rows = ""
@@ -247,7 +254,7 @@ def build_html_report(
         ("Registrant Org", "registrant_org"),
     ]:
         if whois.get(key):
-            whois_rows += f"<tr><td style='padding:4px 12px;font-weight:bold;color:#555'>{label}</td><td style='padding:4px 12px'>{whois[key]}</td></tr>"
+            whois_rows += f"<tr><td style='padding:4px 12px;font-weight:bold;color:#555'>{label}</td><td style='padding:4px 12px'>{esc(str(whois[key]))}</td></tr>"
 
     return f"""<!DOCTYPE html>
 <html>
@@ -268,13 +275,13 @@ def build_html_report(
   <table style="border-collapse:collapse;width:100%">
     <tr>
       <td style="padding:6px 12px;font-weight:bold;color:#555">Type</td>
-      <td style="padding:6px 12px"><strong>{threat['type'].replace('_', ' ')}</strong></td>
+      <td style="padding:6px 12px"><strong>{esc(threat['type'].replace('_', ' '))}</strong></td>
     </tr>
     <tr>
       <td style="padding:6px 12px;font-weight:bold;color:#555">Severity</td>
       <td style="padding:6px 12px">
         <span style="background:{sev_color};color:#fff;padding:2px 10px;border-radius:4px;font-weight:bold">
-          {threat['severity']}
+          {esc(threat['severity'])}
         </span>
       </td>
     </tr>
@@ -338,6 +345,22 @@ def send_report(
     html_body: str,
     dry_run: bool = False,
 ) -> None:
+    """Send the report through the shared mailer, under the global SMTP cap.
+
+    Uses the same relay policy as the pipeline (``SMTP_SECURITY``: credentials
+    are never sent without TLS) and consumes a slot of the database-backed
+    rate limit shared by every Anisakys process.
+
+    Args:
+        to_email: Abuse contact.
+        cc_emails: Copy recipients.
+        subject: Message subject.
+        html_body: Escaped HTML report.
+        dry_run: Print instead of sending.
+
+    Raises:
+        SystemExit: When the shared SMTP rate limit is exhausted.
+    """
     if dry_run:
         print("\n" + "=" * 70)
         print(f"[DRY RUN] To:      {to_email}")
@@ -349,30 +372,53 @@ def send_report(
         print("=" * 70)
         return
 
-    msg = MIMEMultipart("alternative")
+    from sqlalchemy import create_engine
+
+    from src.reporting.mailer import SmtpMailer
+    from src.reporting.smtp_rate_limiter import DatabaseSmtpRateLimiter
+
+    engine = create_engine(settings.DATABASE_URL, pool_pre_ping=True)
+    try:
+        limiter = DatabaseSmtpRateLimiter(engine, max_per_hour=settings.SMTP_RATE_LIMIT_PER_HOUR)
+        if not limiter.acquire():
+            print("ERROR: shared SMTP rate limit reached; try again later.", file=sys.stderr)
+            sys.exit(1)
+    finally:
+        engine.dispose()
+
+    msg = EmailMessage()
     msg["Subject"] = subject
     msg["From"] = settings.ABUSE_EMAIL_SENDER
     msg["To"] = to_email
     if cc_emails:
         msg["Cc"] = ", ".join(cc_emails)
+    msg["Date"] = formatdate(localtime=False)
+    msg["Message-ID"] = make_msgid(domain=settings.ABUSE_EMAIL_SENDER.rpartition("@")[2] or None)
+    msg.set_content(
+        "This abuse report is best read as HTML; the HTML part contains the full evidence."
+    )
+    msg.add_alternative(html_body, subtype="html")
 
-    msg.attach(MIMEText(html_body, "html", "utf-8"))
-
-    all_recipients = [to_email] + cc_emails
-
-    with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
-        server.ehlo()
-        if settings.SMTP_PORT == 587:
-            server.starttls()
-            server.ehlo()
-        if settings.SMTP_USER and settings.SMTP_PASS:
-            server.login(settings.SMTP_USER, settings.SMTP_PASS)
-        server.sendmail(settings.ABUSE_EMAIL_SENDER, all_recipients, msg.as_bytes())
-
+    SmtpMailer().send(msg, [to_email] + cc_emails)
     print(f"[ok] Report sent to {to_email} (CC: {', '.join(cc_emails) or 'none'})")
 
 
 # ── CLI entry point ───────────────────────────────────────────────────────────
+
+
+def normalize_domain(raw: str) -> str:
+    """Lower-case a domain argument and drop a leading ``www.`` label.
+
+    ``str.removeprefix`` is used on purpose: ``lstrip("www.")`` strips any of
+    those characters, which turned ``web.com`` into ``eb.com``.
+
+    Args:
+        raw: Domain as typed on the command line.
+
+    Returns:
+        The normalised domain.
+    """
+    return raw.strip().lower().rstrip("/").removeprefix("www.")
 
 
 def parse_args() -> argparse.Namespace:
@@ -416,7 +462,7 @@ def _cc_for_level(level: int) -> list[str]:
 def run() -> None:
     args = parse_args()
 
-    suspect = args.suspect_domain.strip().lower().lstrip("www.").rstrip("/")
+    suspect = normalize_domain(args.suspect_domain)
     victim = (args.victim_domain or "").strip().lower()
 
     # Infer victim domain from settings if not provided
