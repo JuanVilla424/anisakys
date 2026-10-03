@@ -238,7 +238,7 @@ class AbuseReportManager:
         abuse_detector: EnhancedAbuseEmailDetector,
         cc_emails: Optional[List[str]],
         timeout: int,
-        monitoring_event: threading.Event = None,
+        monitoring_event: Optional[threading.Event] = None,
         clock: Optional[Callable[[], datetime.datetime]] = None,
         mailer: Optional[SmtpMailer] = None,
         rate_limiter: Optional[Any] = None,

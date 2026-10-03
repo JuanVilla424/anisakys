@@ -369,7 +369,7 @@ class EnhancedAbuseEmailDetector:
         self,
         domain: str,
         whois_info: Any = None,
-        registrar: str = None,
+        registrar: Optional[str] = None,
         site_content: Optional[str] = None,
     ) -> List[str]:
         """Get abuse contacts for ``domain`` ordered by trust.
@@ -559,15 +559,24 @@ class EnhancedAbuseEmailDetector:
         if network is None:
             return None, None, None, None
         candidates: List[ContactCandidate] = []
+        asn_number = (network.asn or "").replace("AS", "") or None
         tiers = (
-            (ContactTier.RDAP_ABUSE, {"whois_data": network.rdap}),
-            (ContactTier.CURATED, {"provider_name": network.provider_name}),
-            (ContactTier.ASN_ABUSE, {"asn": (network.asn or "").replace("AS", "") or None}),
+            (ContactTier.RDAP_ABUSE, self.abuse_resolver.resolve(whois_data=network.rdap)),
+            (
+                ContactTier.CURATED,
+                (
+                    self.abuse_resolver.resolve(provider_name=network.provider_name)
+                    if network.provider_name
+                    else []
+                ),
+            ),
+            (
+                ContactTier.ASN_ABUSE,
+                self.abuse_resolver.resolve(asn=asn_number) if asn_number else [],
+            ),
         )
-        for tier, kwargs in tiers:
-            if not any(kwargs.values()):
-                continue
-            for email in sorted(self.abuse_resolver.resolve(**kwargs)):
+        for tier, emails in tiers:
+            for email in sorted(emails):
                 candidates.append(ContactCandidate(email=email, tier=tier, source=tier.name))
         abuse_emails = order_by_trust(candidates)
         logger.info(

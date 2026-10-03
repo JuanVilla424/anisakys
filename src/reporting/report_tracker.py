@@ -180,7 +180,7 @@ def _json_list(value: Any) -> List[str]:
 class ReportTracker:
     """Tracks abuse reports and their follow-up SLA in ``abuse_reports``."""
 
-    def __init__(self, db_engine: Optional[Engine]):
+    def __init__(self, db_engine: Engine):
         """
         Initialize report tracker
 
@@ -467,7 +467,7 @@ class ReportTracker:
         self,
         report_id: str,
         status: ReportStatus,
-        response_content: str = None,
+        response_content: Optional[str] = None,
         follow_up_required: bool = False,
     ) -> bool:
         """
@@ -683,7 +683,7 @@ class ReportTracker:
     def mark_report_for_followup(
         self,
         report_id: str,
-        reason: str = None,
+        reason: Optional[str] = None,
         now: Optional[datetime] = None,
         interval_hours: Optional[int] = None,
     ) -> bool:
@@ -799,8 +799,8 @@ def create_report_record(
     site_url: str,
     recipients: List[str],
     subject: str,
-    cc_recipients: List[str] = None,
-    multi_api_results: Dict = None,
+    cc_recipients: Optional[List[str]] = None,
+    multi_api_results: Optional[Dict[str, Any]] = None,
     screenshot_included: bool = False,
     report_id: Optional[str] = None,
     status: str = ReportStatus.SENT.value,
