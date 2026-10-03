@@ -73,6 +73,8 @@ class TestPhishingAPIEndpoints:
             from src.api.phishing_api import PhishingAPI
 
             mock_db = MagicMock(spec=DatabaseManager)
+            # The health probe pings the database; a mock engine answers it.
+            mock_db.engine = MagicMock()
             mock_detector = MagicMock(spec=EnhancedAbuseEmailDetector)
             api = PhishingAPI(mock_db, mock_detector, api_key="test_api_key")
             api.app.config["TESTING"] = True

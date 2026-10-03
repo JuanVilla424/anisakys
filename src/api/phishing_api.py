@@ -14,6 +14,7 @@ import json
 import re
 import socket
 import threading
+import time
 import tomllib
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -50,6 +51,13 @@ from src.intelligence import (
     GRINDER_INTEGRATION_ENABLED,
 )
 from src.logger import logger
+from src.observability.health import (
+    STATUS_HEALTHY,
+    STATUS_UNHEALTHY,
+    check_database,
+    create_health_checker,
+)
+from src.utils.timeouts import OperationTimeoutError, timeout
 from src.dns.network_utils import assess_url_target, is_cloudflare_ip
 from src.screenshot_service import PLAYWRIGHT_AVAILABLE, SELENIUM_AVAILABLE
 from src.screenshot_client import get_screenshot_service
@@ -255,6 +263,10 @@ def campaign_id(kind: str, key: str) -> str:
 
 MEMORY_STORAGE_URI = "memory://"
 
+# Health probe tuning: max wait for the DB ping, and how long a result is reused.
+HEALTH_DB_TIMEOUT_SECONDS = 3.0
+HEALTH_CACHE_SECONDS = 5.0
+
 
 def rate_limit_storage_uri() -> str:
     """Return the rate-limit storage URI configured in ``RATELIMIT_STORAGE_URL``.
@@ -345,6 +357,12 @@ class PhishingAPI:
         )
 
         install_request_ids(self.app)
+
+        # Health probe: a real database ping (src.observability.health).
+        self._health_checker = create_health_checker(check_disk=False)
+        self._health_checker.register("database", self._check_database)
+        self._health_lock = threading.Lock()
+        self._health_cache: Optional[Tuple[float, Dict[str, Any]]] = None
         self.app.register_error_handler(InvalidParameterError, _invalid_parameter_response)
         self.setup_routes()
 
@@ -3030,18 +3048,32 @@ class PhishingAPI:
         @self.app.route("/api/v1/health", methods=["GET"])
         @self.limiter.exempt
         def health_check():
-            """Health check endpoint (no authentication required)."""
+            """Liveness/readiness probe (no authentication required).
+
+            Pings the database through ``src.observability.health``. Only the
+            aggregate and per-component statuses are returned, never messages
+            (they can contain DSNs or exception text); details are logged.
+
+            Returns:
+                200 when healthy or degraded, 503 when unhealthy.
+            """
+            result = self._health_status()
+            status = result["status"]
             return (
                 jsonify(
                     {
-                        "status": "healthy",
+                        "status": status,
                         "timestamp": datetime.datetime.now().isoformat(),
                         "version": APP_VERSION,
                         "grinder_integration": GRINDER_INTEGRATION_ENABLED,
                         "api_authentication": bool(self.api_key),
+                        "checks": {
+                            name: component.get("status", STATUS_UNHEALTHY)
+                            for name, component in result["components"].items()
+                        },
                     }
                 ),
-                200,
+                503 if status == STATUS_UNHEALTHY else 200,
             )
 
         @self.app.route("/metrics", methods=["GET"])
@@ -3062,6 +3094,41 @@ class PhishingAPI:
                 generate_latest(),
                 mimetype=CONTENT_TYPE_LATEST,
             )
+
+    def _check_database(self) -> Dict[str, Any]:
+        """Ping the database with a bounded wait.
+
+        Returns:
+            A health component dict (``status`` and a log-only ``message``).
+        """
+        try:
+            return timeout(HEALTH_DB_TIMEOUT_SECONDS)(check_database)(self.db_manager.engine)
+        except OperationTimeoutError:
+            return {"status": STATUS_UNHEALTHY, "message": "Database ping timed out"}
+
+    def _health_status(self) -> Dict[str, Any]:
+        """Run the health checks, reusing a result younger than the cache TTL.
+
+        The probe is unauthenticated and not rate limited, so caching bounds the
+        number of database connections it can open.
+
+        Returns:
+            The aggregate result of ``HealthCheck.check_all()``.
+        """
+        with self._health_lock:
+            cached = self._health_cache
+            now = time.monotonic()
+            if cached is not None and now - cached[0] < HEALTH_CACHE_SECONDS:
+                return cached[1]
+            result = self._health_checker.check_all()
+            for name, component in result["components"].items():
+                if component.get("status") != STATUS_HEALTHY:
+                    logger.warning(
+                        f"⚠️  Health check '{name}' is {component.get('status')}: "
+                        f"{component.get('message')}"
+                    )
+            self._health_cache = (now, result)
+            return result
 
     def _trigger_image_search(self, thread_id: int, s3_key: str):
         """Run an image tracking search in a fresh DB connection (for background threads)."""
