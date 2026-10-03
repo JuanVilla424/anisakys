@@ -162,6 +162,17 @@ class Settings(BaseSettings):
     # Workspace customer whose Gmail blocked-senders policy is managed;
     # "my_customer" is the documented alias for the caller's own customer.
     GOOGLE_WORKSPACE_CUSTOMER_ID: str = "my_customer"
+    # Takedown monitor: a site is confirmed "down" (and its abuse reports
+    # resolved) only after this many consecutive failing probe cycles
+    # (nxdomain, connection error, HTTP 404/410 from every client profile).
+    TAKEDOWN_CONSECUTIVE_FAILURES: int = Field(default=3, ge=1)
+    # Sites probed in parallel per cycle (each with its own short transaction).
+    TAKEDOWN_PROBE_WORKERS: int = Field(default=4, ge=1, le=64)
+    # Comma-separated URLs that must answer before a cycle may count failures;
+    # empty disables the connectivity check.
+    TAKEDOWN_CANARY_URLS: str = (
+        "https://www.google.com/generate_204,https://www.cloudflare.com/cdn-cgi/trace"
+    )
 
     # --- v2 phase 0: platform, logging & operations ----------------------------
     # Logging (src/observability/structured_logger.py); LOG_LEVEL above sets the
