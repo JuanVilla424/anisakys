@@ -36,7 +36,9 @@ def job(mock_db):
     """GSBRescanJob with GSB integration mocked to avoid API key requirement."""
     with patch("src.monitoring.gsb_rescan.GoogleSafeBrowsingIntegration") as mock_gsb_class:
         mock_gsb_class.return_value.is_available.return_value = True
-        mock_gsb_class.return_value.check_url.return_value = {"checked": True, "safe": True}
+        mock_gsb_class.return_value.lookup_urls.side_effect = lambda urls: {
+            u: {"checked": True, "status": "not_listed", "safe": True} for u in urls
+        }
         j = GSBRescanJob(
             db_manager=mock_db,
             rescan_interval_hours=12,
@@ -102,27 +104,30 @@ class TestGSBRescanJobRunOnce:
         result = job.run_once()
 
         assert result["sites_checked"] == 0
-        assert not job.gsb.check_url.called
+        assert not job.gsb.lookup_urls.called
 
-    def test_rescans_all_sites_returned_by_db(self, job, mock_db):
-        """Should call gsb.check_url once per site from DB."""
+    def test_rescans_all_sites_in_one_batched_lookup(self, job, mock_db):
+        """Should look every due site up in a single batched call."""
         mock_db.get_sites_for_gsb_rescan.return_value = [
             {"url": "https://phish1.com", "gsb_safe": 1},
             {"url": "https://phish2.com", "gsb_safe": 1},
         ]
-        job.gsb.check_url.return_value = {"checked": True, "safe": True}
 
         result = job.run_once()
 
-        assert job.gsb.check_url.call_count == 2
+        job.gsb.lookup_urls.assert_called_once_with(["https://phish1.com", "https://phish2.com"])
+        assert not job.gsb.check_url.called
         assert result["sites_checked"] == 2
+        assert mock_db.update_gsb_result.call_count == 2
 
     def test_counts_threats_when_gsb_detects_unsafe_url(self, job, mock_db):
         """Should increment threats_found when GSB flags a URL as unsafe."""
         mock_db.get_sites_for_gsb_rescan.return_value = [
             {"url": "https://malware.com", "gsb_safe": 1},
         ]
-        job.gsb.check_url.return_value = {"checked": True, "safe": False}
+        job.gsb.lookup_urls.side_effect = lambda urls: {
+            u: {"checked": True, "status": "listed", "safe": False} for u in urls
+        }
         mock_db.update_gsb_result.return_value = {
             "status_changed": True,
             "threat_type": "MALWARE",
@@ -138,7 +143,9 @@ class TestGSBRescanJobRunOnce:
         mock_db.get_sites_for_gsb_rescan.return_value = [
             {"url": "https://newmalware.com", "gsb_safe": 1},
         ]
-        job.gsb.check_url.return_value = {"checked": True, "safe": False}
+        job.gsb.lookup_urls.side_effect = lambda urls: {
+            u: {"checked": True, "status": "listed", "safe": False} for u in urls
+        }
         mock_db.update_gsb_result.return_value = {
             "status_changed": True,
             "threat_type": "MALWARE",
@@ -151,23 +158,60 @@ class TestGSBRescanJobRunOnce:
         assert result["status_changes"][0]["url"] == "https://newmalware.com"
         assert result["status_changes"][0]["threat_type"] == "MALWARE"
 
-    def test_records_error_and_continues_on_gsb_exception(self, job, mock_db):
-        """Should log the error and continue processing when GSB raises."""
+    def test_api_error_skips_update_and_keeps_row(self, job, mock_db):
+        """An errored lookup must not be written back as safe (nor reset the clock)."""
         mock_db.get_sites_for_gsb_rescan.return_value = [
-            {"url": "https://error-site.com", "gsb_safe": 1},
+            {"url": "https://error-site.com", "gsb_safe": 0},
             {"url": "https://ok-site.com", "gsb_safe": 1},
         ]
-        job.gsb.check_url.side_effect = [
-            Exception("API timeout"),
-            {"checked": True, "safe": True},
-        ]
+        job.gsb.lookup_urls.side_effect = lambda urls: {
+            "https://error-site.com": {
+                "checked": False,
+                "status": "error",
+                "safe": None,
+                "error": "API error: 503",
+            },
+            "https://ok-site.com": {"checked": True, "status": "not_listed", "safe": True},
+        }
 
         result = job.run_once()
 
-        assert len(result["errors"]) == 1
-        assert result["errors"][0]["url"] == "https://error-site.com"
-        # Second site should still be processed
+        assert result["errors"] == [{"url": "https://error-site.com", "error": "API error: 503"}]
         assert result["sites_checked"] == 1
+        updated_urls = [c.kwargs["url"] for c in mock_db.update_gsb_result.call_args_list]
+        assert updated_urls == ["https://ok-site.com"]
+
+    def test_missing_result_is_an_error(self, job, mock_db):
+        """A URL absent from the batch answer is not treated as checked."""
+        mock_db.get_sites_for_gsb_rescan.return_value = [{"url": "https://x.com", "gsb_safe": 1}]
+        job.gsb.lookup_urls.side_effect = lambda urls: {}
+
+        result = job.run_once()
+
+        assert result["sites_checked"] == 0
+        assert len(result["errors"]) == 1
+        assert not mock_db.update_gsb_result.called
+
+    def test_failed_db_update_is_reported(self, job, mock_db):
+        """A DB write failure is reported as an error, not counted as checked."""
+        mock_db.get_sites_for_gsb_rescan.return_value = [{"url": "https://x.com", "gsb_safe": 1}]
+        mock_db.update_gsb_result.return_value = {"updated": False, "error": "db down"}
+
+        result = job.run_once()
+
+        assert result["sites_checked"] == 0
+        assert result["errors"] == [{"url": "https://x.com", "error": "db down"}]
+
+    def test_lookup_exception_fails_the_cycle_without_updates(self, job, mock_db):
+        """An unexpected client exception aborts the cycle and writes nothing."""
+        mock_db.get_sites_for_gsb_rescan.return_value = [{"url": "https://x.com", "gsb_safe": 1}]
+        job.gsb.lookup_urls.side_effect = RuntimeError("boom")
+
+        result = job.run_once()
+
+        assert result["error"] == "boom"
+        assert job.stats["errors"] == 1
+        assert not mock_db.update_gsb_result.called
 
     def test_updates_total_rescans_stat_after_run(self, job, mock_db):
         """Should increment total_rescans by the number of sites checked."""
@@ -175,12 +219,27 @@ class TestGSBRescanJobRunOnce:
             {"url": "https://site1.com", "gsb_safe": 1},
             {"url": "https://site2.com", "gsb_safe": 1},
         ]
-        job.gsb.check_url.return_value = {"checked": True, "safe": True}
 
         job.run_once()
 
         assert job.stats["total_rescans"] == 2
         assert job.stats["last_run"] is not None
+
+
+class TestGSBRescanJobLoop:
+    def test_loop_exits_on_process_shutdown(self, job, monkeypatch):
+        """The loop must stop when a process shutdown is requested."""
+        monkeypatch.setattr(gsb_rescan_module, "is_shutdown_requested", lambda: True)
+        with patch.object(job, "_run_rescan") as run:
+            job._run_loop()
+        assert not run.called
+
+    def test_sleep_wakes_on_stop(self, job):
+        """_sleep must return promptly once stop() sets the event."""
+        job._stop_event.set()
+        start = gsb_rescan_module.time.monotonic()
+        job._sleep(3600)
+        assert gsb_rescan_module.time.monotonic() - start < 1
 
 
 # ---------------------------------------------------------------------------

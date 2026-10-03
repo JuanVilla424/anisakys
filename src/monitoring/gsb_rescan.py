@@ -13,12 +13,13 @@ Date: 2026-01-25
 import logging
 import time
 import threading
-from typing import Dict, Any, Optional
+from typing import Dict, Any, List, Optional
 from datetime import datetime
 
 from src.database.manager import DatabaseManager
 from src.intelligence.google_safe_browsing import GoogleSafeBrowsingIntegration
 from src.observability.structured_logger import log_with_context, set_correlation_id
+from src.shutdown import is_shutdown_requested
 
 logger = logging.getLogger(__name__)
 
@@ -102,24 +103,52 @@ class GSBRescanJob:
 
         logger.info("🛑 GSB rescan job stopped")
 
+    def _should_stop(self) -> bool:
+        """Tell whether the job was stopped or the process is shutting down.
+
+        Returns:
+            ``True`` once :meth:`stop` was called or a shutdown was requested.
+        """
+        return self._stop_event.is_set() or is_shutdown_requested()
+
+    def _sleep(self, seconds: float) -> None:
+        """Wait up to ``seconds``, waking early on :meth:`stop` or shutdown.
+
+        Args:
+            seconds: Maximum time to wait.
+        """
+        deadline = time.monotonic() + seconds
+        while not self._should_stop():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            self._stop_event.wait(timeout=min(remaining, 1.0))
+
     def _run_loop(self):
         """Main loop for the background job."""
-        while not self._stop_event.is_set():
+        while not self._should_stop():
             try:
                 self._run_rescan()
             except Exception as e:
+                # Loop guard: a failed cycle is counted and retried next interval.
                 self.stats["errors"] += 1
                 logger.error(f"❌ GSB rescan job error: {e}")
 
-            # Wait for next interval or stop signal
-            self._stop_event.wait(timeout=self.rescan_interval_hours * 3600)
+            # Wait for next interval, stop() or a process shutdown
+            self._sleep(self.rescan_interval_hours * 3600)
 
     def _run_rescan(self) -> Dict[str, Any]:
         """
         Run a single re-scan cycle.
 
+        All due sites are looked up in one batched call. Only checked results
+        (HTTP 200 with a parseable body) are written back; a failed lookup is
+        reported in ``errors`` and leaves the row untouched, so its rescan
+        clock is not reset and the site is retried on the next cycle.
+
         Returns:
-            Dict with rescan results and statistics
+            Dict with rescan results and statistics; ``sites_checked`` counts
+            sites whose fresh verdict was persisted.
         """
         correlation_id = set_correlation_id()
         start_time = time.time()
@@ -156,58 +185,62 @@ class GSBRescanJob:
 
             logger.info(f"🔍 Re-scanning {len(sites)} sites against GSB")
 
-            # Process sites in batches for rate limiting
+            # One batched lookup (the client sends up to 500 URLs per request)
+            # instead of one request per site.
+            urls: List[str] = [site["url"] for site in sites]
+            lookups = self.gsb.lookup_urls(urls)
+
             for site in sites:
                 url = site["url"]
                 previous_safe = site.get("gsb_safe", 1) == 1
+                gsb_result = lookups.get(url) or {
+                    "checked": False,
+                    "error": "No result returned for URL",
+                }
 
-                try:
-                    # Check URL against GSB
-                    gsb_result = self.gsb.check_url(url)
-                    results["sites_checked"] += 1
+                if not gsb_result.get("checked"):
+                    # API error, rate limit, timeout...: not a verdict. Leave the
+                    # stored row (and its 24h rescan clock) untouched so the site
+                    # is retried on the next cycle instead of being marked safe.
+                    error_msg = gsb_result.get("error") or "Unknown error"
+                    results["errors"].append({"url": url, "error": error_msg})
+                    continue
 
-                    if gsb_result.get("checked"):
-                        # Update database with result
-                        update_result = self.db_manager.update_gsb_result(
-                            url=url, gsb_result=gsb_result, previous_safe=previous_safe
-                        )
+                update_result = self.db_manager.update_gsb_result(
+                    url=url, gsb_result=gsb_result, previous_safe=previous_safe
+                )
+                if update_result.get("updated") is False:
+                    results["errors"].append(
+                        {"url": url, "error": update_result.get("error", "DB update failed")}
+                    )
+                    continue
+                results["sites_checked"] += 1
 
-                        if not gsb_result.get("safe", True):
-                            results["threats_found"] += 1
-                            self.stats["threats_detected"] += 1
+                if gsb_result.get("status") == "listed" or gsb_result.get("safe") is False:
+                    results["threats_found"] += 1
+                    self.stats["threats_detected"] += 1
 
-                        if update_result.get("status_changed"):
-                            results["status_changes"].append(
-                                {
-                                    "url": url,
-                                    "threat_type": update_result.get("threat_type"),
-                                    "alert": update_result.get("alert"),
-                                }
-                            )
-                            self.stats["status_changes"] += 1
+                if update_result.get("status_changed"):
+                    results["status_changes"].append(
+                        {
+                            "url": url,
+                            "threat_type": update_result.get("threat_type"),
+                            "alert": update_result.get("alert"),
+                        }
+                    )
+                    self.stats["status_changes"] += 1
 
-                            # Log the status change prominently
-                            log_with_context(
-                                logger,
-                                logging.WARNING,
-                                f"🚨 GSB STATUS CHANGE: {url}",
-                                url=url,
-                                threat_type=update_result.get("threat_type"),
-                                previous_status="safe",
-                                new_status="threat",
-                                event_type="gsb_status_change",
-                            )
-                    else:
-                        # GSB check failed (API error, rate limit, etc.)
-                        error_msg = gsb_result.get("error", "Unknown error")
-                        results["errors"].append({"url": url, "error": error_msg})
-
-                    # Small delay between requests to avoid rate limiting
-                    time.sleep(0.1)
-
-                except Exception as e:
-                    results["errors"].append({"url": url, "error": str(e)})
-                    logger.error(f"❌ Error re-scanning {url}: {e}")
+                    # Log the status change prominently
+                    log_with_context(
+                        logger,
+                        logging.WARNING,
+                        f"🚨 GSB STATUS CHANGE: {url}",
+                        url=url,
+                        threat_type=update_result.get("threat_type"),
+                        previous_status="safe",
+                        new_status="threat",
+                        event_type="gsb_status_change",
+                    )
 
             # Update statistics
             self.stats["total_rescans"] += results["sites_checked"]
@@ -232,6 +265,7 @@ class GSBRescanJob:
             return results
 
         except Exception as e:
+            # Cycle guard: surfaced in the returned results and in stats.
             self.stats["errors"] += 1
             logger.error(f"❌ GSB rescan cycle failed: {e}")
             results["error"] = str(e)
