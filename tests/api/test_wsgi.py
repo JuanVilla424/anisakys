@@ -56,6 +56,13 @@ class TestCreateApp:
 
         assert getattr(app, "api_key") == "from-settings"
 
+    def test_refuses_to_serve_a_database_behind_the_code(self, wsgi_module):
+        """The API role must not start against a schema that misses migrations."""
+        stale = RuntimeError("Database schema is behind; run `alembic upgrade head`")
+        with patch.object(wsgi_module, "ensure_schema_is_current", side_effect=stale):
+            with pytest.raises(RuntimeError, match="alembic upgrade head"):
+                wsgi_module.create_app(api_key="k")
+
     def test_module_level_app_is_created_lazily_once(self, wsgi_module):
         sentinel = MagicMock()
         with patch.object(wsgi_module, "create_app", return_value=sentinel) as factory:

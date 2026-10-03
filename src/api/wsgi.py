@@ -18,7 +18,8 @@ it and each would run its own copy of every job:
   answer 503 while the created thread rows are processed by the scheduler role.
 
 Schema changes are not applied here either: ``alembic upgrade head`` runs
-before the server starts.
+before the server starts, and :func:`create_app` refuses to serve a database
+that is behind the code.
 """
 
 from typing import Any, Optional
@@ -31,7 +32,7 @@ from flask import Flask
 import src.detection.analyzer  # noqa: F401
 from src.api.phishing_api import PhishingAPI
 from src.config import settings
-from src.database import DatabaseManager
+from src.database import DatabaseManager, ensure_schema_is_current
 from src.logger import logger
 from src.reporting.email_detector import EnhancedAbuseEmailDetector
 
@@ -47,12 +48,17 @@ def create_app(api_key: Optional[str] = None) -> Flask:
 
     Returns:
         The configured Flask application (WSGI callable).
+
+    Raises:
+        RuntimeError: If the database schema is not at the latest Alembic
+            revision.
     """
     master_key = api_key or settings.ANISAKYS_API_KEY
     if not master_key:
         logger.warning("⚠️  ANISAKYS_API_KEY is not set: only database API keys are accepted")
 
     db_manager = DatabaseManager()
+    ensure_schema_is_current(db_manager.engine)
     api = PhishingAPI(
         db_manager,
         EnhancedAbuseEmailDetector(db_manager),

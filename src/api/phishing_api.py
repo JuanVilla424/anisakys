@@ -31,7 +31,6 @@ from src.config import settings
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from stix2.exceptions import STIXError
-from src.database import db_engine
 from src.auth import has_scope, require_api_key, require_metrics_access, _hash_key
 from src.api.mailbox_policy import is_domain_allowed, is_mailbox_allowed
 from src.api.errors import (
