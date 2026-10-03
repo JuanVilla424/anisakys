@@ -22,8 +22,8 @@ against one database without sending anything twice:
 
 CC strategy: every primary recipient gets its own message with no ``Cc``
 header, and the CC list (sender plus ``DEFAULT_CC_EMAILS``) gets exactly one
-copy that names the recipients it went to. Escalation lists are never
-copied on the first send.
+copy that names the recipients it went to. Escalation lists (levels 2 and 3)
+are only added from the second follow-up on.
 """
 
 from __future__ import annotations
@@ -33,19 +33,14 @@ import datetime
 import json
 import logging
 import os
-import re
 import smtplib
 import threading
 from dataclasses import dataclass, field
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Sequence
 
 from sqlalchemy import text
 
 from src.config import settings
-from src.dns.network_utils import get_ip_info
-from src.detection.utils import PhishingUtils
 from src.intelligence import (
     GrinderReportClient,
     GRINDER_INTEGRATION_ENABLED,
@@ -65,9 +60,11 @@ from src.reporting.abuse_contact_validator import AbuseContactValidator
 from src.reporting.db import short_transaction, utc_now
 from src.reporting.mailer import SmtpMailer
 from src.reporting.message_builder import (
+    ReportEvidence,
     build_email,
     build_evidence,
     message_id_for,
+    render_followup,
     render_initial_report,
     unique_preserving,
 )
@@ -82,6 +79,7 @@ from src.reporting.outbox import (
 )
 from src.reporting.recipient_policy import host_of, is_acceptable_recipient, normalize_email
 from src.reporting.report_tracker import (
+    FollowupClaim,
     ReportStatus,
     ReportTracker,
     create_report_record,
@@ -1152,8 +1150,11 @@ class AbuseReportManager:
                 conn,
                 note=f"refused by server: {sorted(refused)}" if refused else None,
             )
-            if owned and row.audience == OutboxAudience.PRIMARY.value and not row.followup_seq:
-                self.report_tracker.mark_report_sent(conn, row.report_id, sent_at)
+            if owned and row.audience == OutboxAudience.PRIMARY.value:
+                if row.followup_seq == 0:
+                    self.report_tracker.mark_report_sent(conn, row.report_id, sent_at)
+                else:
+                    self.report_tracker.record_followup_sent(conn, row.report_id, sent_at)
         if not owned:
             logger.warning(
                 f"Outbox row {row.id} was sent after its lease expired; the newer claim "
@@ -1184,306 +1185,178 @@ class AbuseReportManager:
     # Follow-ups
     # ------------------------------------------------------------------
 
-    def process_overdue_followups(self):
-        """Process overdue reports and send follow-up emails every 2 days per ICANN compliance"""
-        logger.info("🔄 Starting overdue follow-up processing...")
+    def _escalation_contacts(self, followup_seq: int) -> List[str]:
+        """Escalation addresses for a follow-up.
 
-        try:
-            # Get overdue reports from report tracker
-            overdue_reports = self.report_tracker.get_overdue_reports()
+        Args:
+            followup_seq: 1 for the first follow-up.
 
-            if not overdue_reports:
-                logger.info("✅ No overdue reports found")
-                return
+        Returns:
+            Nothing for the first follow-up; level 2 from the second; levels 2
+            and 3 from the third on.
+        """
+        contacts: List[str] = []
+        if followup_seq >= 2:
+            contacts += _split_addresses(settings.DEFAULT_CC_EMAILS_ESCALATION_LEVEL2)
+        if followup_seq >= 3:
+            contacts += _split_addresses(settings.DEFAULT_CC_EMAILS_ESCALATION_LEVEL3)
+        return unique_preserving(contacts)
 
-            logger.info(f"📋 Found {len(overdue_reports)} overdue reports requiring follow-up")
+    def process_overdue_followups(self) -> int:
+        """Send a follow-up for every overdue report whose site is still up.
 
-            for report in overdue_reports:
-                try:
-                    site_url = report["site_url"]
-                    report_id = report["report_id"]
-                    overdue_hours = report.get("overdue_hours", 0)
-
-                    logger.info(
-                        f"⚠️  Processing overdue report: {report_id} for {site_url} ({overdue_hours}h overdue)"
-                    )
-
-                    # Double-check if site is still up before sending follow-up
-                    domain = re.sub(r"^https?://", "", site_url).strip().split("/")[0]
-                    resolved_ip, _ = get_ip_info(domain)
-                    current_status, _ = PhishingUtils.determine_site_status(
-                        site_url,
-                        resolved_ip,
-                        None,
-                        None,
-                        datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        self.timeout,
-                    )
-
-                    # Update site status in database regardless of status
-                    try:
-                        with self.db_manager.engine.begin() as conn:
-                            conn.execute(
-                                text("""UPDATE phishing_sites
-                                    SET site_status = :status,
-                                        last_seen = CURRENT_TIMESTAMP,
-                                        takedown_date = CASE
-                                            WHEN :status = 'down' THEN CURRENT_TIMESTAMP
-                                            ELSE takedown_date
-                                        END
-                                    WHERE url = :url"""),
-                                {"status": current_status, "url": site_url},
-                            )
-                            logger.info(
-                                f"✅ Updated site status to {current_status} for {site_url}"
-                            )
-                    except Exception as e:
-                        logger.error(f"❌ Error updating site status: {e}")
-
-                    # Skip follow-up if site is down
-                    if current_status in ["down", "timeout", "resolved"]:
-                        logger.info(
-                            f"🎯 Site {site_url} is now {current_status}, skipping follow-up"
-                        )
-                        continue
-
-                    # Get original recipients
-                    recipients = json.loads(report["recipients"]) if report["recipients"] else []
-
-                    if not recipients:
-                        logger.warning(f"⚠️  No recipients found for {report_id}, skipping")
-                        continue
-
-                    # Prepare follow-up email subject with site URL
-                    follow_up_subject = f"FOLLOW-UP: Phishing Report {report_id} for {site_url} - Response Required (ICANN Compliance)"
-
-                    # Add escalation CCs for overdue reports
-                    escalation_cc = self.cc_emails.copy() if self.cc_emails else []
-
-                    # Always include sender email in CC for follow-ups
-                    sender_email = getattr(settings, "ABUSE_EMAIL_SENDER")
-                    if sender_email and sender_email not in escalation_cc:
-                        escalation_cc.append(sender_email)
-
-                    # Add escalation based on how overdue
-                    if overdue_hours > 72:  # 3+ days overdue - Level 2 escalation
-                        escalation_level2 = (
-                            getattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL2")
-                            if hasattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL2")
-                            else None
-                        )
-                        if escalation_level2:
-                            for email in escalation_level2.split(","):
-                                email = email.strip()
-                                if email and email not in escalation_cc:
-                                    escalation_cc.append(email)
-
-                    if overdue_hours > 96:  # 4+ days overdue - Level 3 escalation
-                        escalation_level3 = (
-                            getattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL3")
-                            if hasattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL3")
-                            else None
-                        )
-                        if escalation_level3:
-                            for email in escalation_level3.split(","):
-                                email = email.strip()
-                                if email and email not in escalation_cc:
-                                    escalation_cc.append(email)
-
-                    # Create follow-up whois context
-                    followup_context = f"""FOLLOW-UP NOTICE - ICANN COMPLIANCE
-
-Original Report ID: {report_id}
-Site: {site_url}
-Original Report Date: {report.get('report_date', 'Unknown')}
-Hours Overdue: {overdue_hours}
-
-This is a follow-up to our previous phishing report. ICANN policies require registrars to respond to abuse reports within 2 business days. Please provide an update on the status of this case.
-
-If the reported site has been taken down, please confirm. If not, please provide expected timeline for resolution.
-"""
-
-                    # Send follow-up (don't create new screenshot to save time)
-                    logger.info(f"📤 Sending follow-up report for {site_url}...")
-
-                    success = self._send_followup_email(
-                        site_url=site_url,
-                        recipients=recipients,
-                        escalation_cc=escalation_cc,
-                        subject=follow_up_subject,
-                        followup_context=followup_context,
-                        report_id=report_id,
-                    )
-
-                    if success:
-                        # Mark as follow-up sent and update status
-                        self.report_tracker.mark_report_for_followup(
-                            report_id, reason=f"Follow-up sent after {overdue_hours}h overdue"
-                        )
-                        logger.info(f"✅ Follow-up sent successfully for {report_id}")
-                    else:
-                        logger.error(f"❌ Failed to send follow-up for {report_id}")
-
-                except Exception as e:
-                    logger.error(
-                        f"❌ Error processing overdue report {report.get('report_id', 'unknown')}: {e}"
-                    )
-                    continue
-
-            logger.info(f"🏁 Completed processing {len(overdue_reports)} overdue reports")
-
-        except Exception as e:
-            logger.error(f"❌ Error in overdue follow-up processing: {e}")
-
-    def _send_followup_email(
-        self,
-        site_url: str,
-        recipients: List[str],
-        escalation_cc: List[str],
-        subject: str,
-        followup_context: str,
-        report_id: str,
-    ) -> bool:
-        """Send a follow-up email for overdue reports"""
-        try:
-            # Use simplified email sending for follow-ups
-            smtp_host = getattr(settings, "SMTP_HOST")
-            smtp_port = getattr(settings, "SMTP_PORT")
-            sender_email = getattr(settings, "ABUSE_EMAIL_SENDER")
-
-            success_count = 0
-
-            for recipient in recipients:
-                try:
-                    msg = MIMEMultipart()
-                    msg["From"] = sender_email
-                    msg["To"] = recipient
-                    msg["Subject"] = subject
-
-                    # Add CCs
-                    if escalation_cc:
-                        msg["Cc"] = ", ".join(escalation_cc)
-
-                    # Simple text body for follow-up
-                    body = f"""Dear Registrar Abuse Team,
-
-{followup_context}
-
-Please respond to this follow-up as required by ICANN policies.
-
-Thank you for your cooperation.
-
-Best regards,
-Phishing Detection Team
-"""
-
-                    msg.attach(MIMEText(body, "plain"))
-
-                    # Send email
-                    if not self._smtp_rate_limiter.acquire():
-                        logger.warning(
-                            f"⏰ SMTP rate limit reached "
-                            f"({settings.SMTP_RATE_LIMIT_PER_HOUR}/hr), skipping follow-up to {recipient}"
-                        )
-                        increment_counter(METRIC_SMTP_RATE_LIMITED)
-                        continue
-
-                    with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
-                        all_recipients = [recipient] + escalation_cc
-                        server.send_message(msg, to_addrs=all_recipients)
-
-                    logger.info(f"✅ Follow-up sent to {recipient}")
-                    success_count += 1
-
-                except Exception as e:
-                    logger.error(f"❌ Failed to send follow-up to {recipient}: {e}")
-                    continue
-
-            return success_count > 0
-
-        except Exception as e:
-            logger.error(f"❌ Error in follow-up email sending: {e}")
-            return False
-
-    def followup_worker(self):
-        """Background worker that checks for overdue reports every 48 hours"""
-        logger.info("🚀 Starting follow-up worker for ICANN compliance (checks every 48 hours)...")
-
-        # Check last follow-up time from database
-        last_followup_time = self._get_last_followup_time()
-
-        if last_followup_time:
-            hours_since_last = (datetime.datetime.now() - last_followup_time).total_seconds() / 3600
-            if hours_since_last < 48:
-                wait_hours = 48 - hours_since_last
-                logger.info(
-                    f"⏰ Last follow-up was {hours_since_last:.1f} hours ago. Waiting {wait_hours:.1f} hours before first check."
+        Returns:
+            Number of follow-ups queued.
+        """
+        now = self.clock()
+        overdue = self.report_tracker.get_overdue_reports(now=now)
+        if not overdue:
+            logger.info("No overdue reports")
+            return 0
+        logger.info(f"{len(overdue)} overdue report(s) to follow up")
+        queued = 0
+        for report in overdue:
+            if is_shutdown_requested():
+                break
+            try:
+                if self._follow_up(report, now):
+                    queued += 1
+            except Exception as e:
+                log_error(
+                    logger,
+                    e,
+                    {
+                        "report_id": report.get("report_id"),
+                        "url": report.get("site_url"),
+                        "operation": "follow_up",
+                        "event_type": "followup_failed",
+                    },
                 )
-                # Wait until 48 hours have passed since last follow-up
-                for _ in range(int(wait_hours * 60)):  # Convert hours to minutes
-                    if not self.running or wait_for_shutdown(60):
-                        return
+        return queued
 
+    def _follow_up(self, report: Dict[str, Any], now: datetime.datetime) -> bool:
+        """Follow up one overdue report if its site is still online.
+
+        Liveness comes from the stored ``site_status``, which only the takedown
+        monitor writes (after several consecutive failed probes); this path
+        never probes the site or marks it down itself.
+
+        Args:
+            report: Overdue report row.
+            now: Current time.
+
+        Returns:
+            ``True`` when a follow-up was queued.
+        """
+        site_url = report["site_url"]
+        report_id = report["report_id"]
+        with short_transaction(self.engine) as conn:
+            status = conn.execute(
+                text("SELECT site_status FROM phishing_sites WHERE url = :url ORDER BY id LIMIT 1"),
+                {"url": site_url},
+            ).scalar()
+            if status != "up":
+                logger.info(f"{site_url} is {status or 'unknown'}; no follow-up for {report_id}")
+                return False
+            claim = self.report_tracker.claim_followup(conn, report_id, now)
+            if claim is None:
+                return False
+            entries = self._followup_entries(claim, now, status)
+            self.outbox.enqueue(conn, entries)
+        if not entries:
+            logger.error(f"Follow-up {claim.followup_seq} of {report_id}: no valid recipient")
+            return False
+        logger.info(f"Follow-up {claim.followup_seq} of {report_id} queued for {site_url}")
+        self.dispatch_outbox(report_id=report_id)
+        return True
+
+    def _followup_entries(
+        self, claim: FollowupClaim, now: datetime.datetime, site_status: str
+    ) -> List[NewOutboxEntry]:
+        """Outbox rows of one follow-up: one per primary plus one CC copy.
+
+        Args:
+            claim: Reserved follow-up.
+            now: Current time.
+            site_status: Current site status.
+
+        Returns:
+            Rows to enqueue (empty when no recipient is valid any more).
+        """
+        primaries = [
+            email for email in claim.recipients if is_acceptable_recipient(email, claim.site_url)
+        ]
+        if not primaries:
+            return []
+        evidence = ReportEvidence.from_dict(claim.evidence, claim.site_url)
+        escalation = self._escalation_contacts(claim.followup_seq)
+        cc_list = self._cc_copy_recipients(primaries, escalation)
+        common: Dict[str, Any] = dict(
+            report_id=claim.report_id,
+            followup_seq=claim.followup_seq,
+            original_report_time=claim.report_date,
+            check_time=now,
+            subject_base=settings.ABUSE_EMAIL_SUBJECT,
+            organization=settings.REPORT_ORGANIZATION,
+            site_status=site_status,
+            escalation_contacts=[address for address in escalation if address in cc_list],
+        )
+        rendered = render_followup(evidence, **common)
+        entries = [
+            NewOutboxEntry(
+                report_id=claim.report_id,
+                site_url=claim.site_url,
+                recipient=email,
+                followup_seq=claim.followup_seq,
+                payload=rendered.to_payload(),
+            )
+            for email in primaries
+        ]
+        if cc_list:
+            copy = render_followup(evidence, notified_recipients=primaries, **common)
+            entries.append(
+                NewOutboxEntry(
+                    report_id=claim.report_id,
+                    site_url=claim.site_url,
+                    recipient=cc_list[0],
+                    cc=cc_list[1:],
+                    audience=OutboxAudience.CC,
+                    followup_seq=claim.followup_seq,
+                    payload=copy.to_payload(),
+                )
+            )
+        return entries
+
+    def followup_worker(self) -> None:
+        """Scheduler loop: look for overdue reports every ``FOLLOWUP_CHECK_INTERVAL_SECONDS``.
+
+        Each report carries its own SLA deadline, advanced by every follow-up,
+        so frequent checks never repeat a follow-up early.
+        """
+        logger.info("Follow-up worker started")
         while self.running and not is_shutdown_requested():
             try:
-                # Process overdue reports
                 self.process_overdue_followups()
-                # Save the time of this follow-up run
                 self._save_followup_time()
-
-                # Wait 48 hours before next check
-                for _ in range(2880):  # 2880 minutes = 48 hours
-                    if not self.running or wait_for_shutdown(60):
-                        break
-
             except Exception as e:
-                logger.error(f"❌ Error in follow-up worker: {e}")
-                wait_for_shutdown(300)  # Wait 5 minutes before retrying on error
+                log_error(logger, e, {"operation": "followup_worker", "event_type": "followup"})
+            if wait_for_shutdown(settings.FOLLOWUP_CHECK_INTERVAL_SECONDS):
+                break
 
-    def stop_followup_worker(self):
-        """Stop the follow-up worker gracefully"""
+    def stop_followup_worker(self) -> None:
+        """Stop the follow-up worker gracefully."""
         self.running = False
-        logger.info("🛑 Follow-up worker stopped")
+        logger.info("Follow-up worker stopped")
 
-    def _get_last_followup_time(self) -> Optional[datetime.datetime]:
-        """Get the last follow-up time from database"""
-        try:
-            with self.db_manager.engine.begin() as conn:
-                result = conn.execute(
-                    text("SELECT last_run FROM system_status WHERE task_name = 'followup_worker'")
-                ).fetchone()
-
-                if result and result[0]:
-                    return result[0]
-                return None
-        except Exception as e:
-            logger.debug(f"No previous follow-up time found: {e}")
-            return None
-
-    def _save_followup_time(self):
-        """Save the current time as last follow-up time"""
-        try:
-            with self.db_manager.engine.begin() as conn:
-                # Create table if not exists
-                conn.execute(text("""
-                    CREATE TABLE IF NOT EXISTS system_status (
-                        task_name VARCHAR(100) PRIMARY KEY,
-                        last_run TIMESTAMP,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """))
-
-                # Upsert the follow-up time
-                conn.execute(
-                    text("""
+    def _save_followup_time(self) -> None:
+        """Record the follow-up worker's last run in ``system_status`` (heartbeat)."""
+        with short_transaction(self.engine) as conn:
+            conn.execute(
+                text("""
                     INSERT INTO system_status (task_name, last_run, updated_at)
-                    VALUES ('followup_worker', :last_run, :updated_at)
+                    VALUES ('followup_worker', :now, :now)
                     ON CONFLICT (task_name)
-                    DO UPDATE SET last_run = :last_run, updated_at = :updated_at
-                """),
-                    {"last_run": datetime.datetime.now(), "updated_at": datetime.datetime.now()},
-                )
-
-                logger.debug("✅ Saved follow-up run time")
-        except Exception as e:
-            logger.error(f"❌ Failed to save follow-up time: {e}")
+                    DO UPDATE SET last_run = :now, updated_at = :now
+                    """),
+                {"now": self.clock()},
+            )

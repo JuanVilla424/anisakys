@@ -3,6 +3,9 @@ Report tracking for abuse reports (SLA and follow-ups).
 
 Every report is one row in ``abuse_reports`` keyed by its stable report id
 (``ANISAKYS-YYYYMMDD-XXXXXXXX``), the same id the e-mail subject carries.
+Tracking is append-only: a new report for a site creates a new row, and a
+follow-up only updates the counters, timestamps and SLA deadline of its own
+report's row.
 
 The ``abuse_reports`` schema is owned by Alembic (revisions 001 and 004); this
 module never creates, alters or drops tables.
@@ -24,6 +27,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
 
+from src.config import settings
 from src.reporting.db import short_transaction, utc_now
 
 logger = logging.getLogger(__name__)
@@ -137,6 +141,40 @@ class AbuseReportRecord:
             Timezone-aware UTC deadline.
         """
         return calculate_sla_deadline(self.report_date or utc_now())
+
+
+@dataclass(frozen=True)
+class FollowupClaim:
+    """A follow-up slot reserved for one overdue report."""
+
+    report_id: str
+    site_url: str
+    followup_seq: int
+    recipients: List[str]
+    report_date: Optional[datetime]
+    evidence: Optional[Dict[str, Any]]
+
+
+def _json_list(value: Any) -> List[str]:
+    """Decode a JSON (or comma separated) recipient list column.
+
+    Args:
+        value: Stored value.
+
+    Returns:
+        The list of addresses.
+    """
+    if not value:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if item]
+    try:
+        decoded = json.loads(value)
+    except (TypeError, ValueError):
+        return [part.strip() for part in str(value).split(",") if part.strip()]
+    if isinstance(decoded, list):
+        return [str(item) for item in decoded if item]
+    return [str(decoded)] if decoded else []
 
 
 class ReportTracker:
@@ -271,14 +309,136 @@ class ReportTracker:
         )
         return bool(result.rowcount)
 
+    def claim_followup(
+        self,
+        conn: Connection,
+        report_id: str,
+        now: datetime,
+        interval_hours: Optional[int] = None,
+        max_followups: Optional[int] = None,
+    ) -> Optional[FollowupClaim]:
+        """Reserve the next follow-up of an overdue report.
+
+        Locks the report row (``FOR UPDATE SKIP LOCKED``), re-checks that it is
+        still overdue, increments ``follow_up_count`` and advances
+        ``sla_deadline`` by one interval, so the same report cannot be followed
+        up again before the next deadline even if delivery is delayed. Once
+        ``max_followups`` is spent the report is closed as ``timeout``.
+
+        Args:
+            conn: Connection inside an open transaction.
+            report_id: Tracked report id.
+            now: Current time (UTC, aware).
+            interval_hours: Hours between follow-ups.
+            max_followups: Maximum number of follow-ups per report.
+
+        Returns:
+            The reserved follow-up, or ``None`` when another worker holds the
+            row, it is no longer overdue, or the follow-up budget is spent.
+        """
+        interval = interval_hours or settings.FOLLOWUP_INTERVAL_HOURS
+        budget = settings.FOLLOWUP_MAX_COUNT if max_followups is None else max_followups
+        row = (
+            conn.execute(
+                text(f"""
+                    SELECT report_id, site_url, recipients, evidence,
+                           CAST(report_date AS timestamptz) AS report_date,
+                           COALESCE(follow_up_count, 0) AS follow_up_count
+                    FROM abuse_reports
+                    WHERE report_id = :report_id
+                      AND sla_deadline < :now
+                      AND COALESCE(response_received, 0) = 0
+                      AND status NOT IN ({_CLOSED_SQL})
+                    FOR UPDATE SKIP LOCKED
+                    """),
+                {"report_id": report_id, "now": now},
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            return None
+        sequence = int(row["follow_up_count"]) + 1
+        if sequence > budget:
+            conn.execute(
+                text("""
+                    UPDATE abuse_reports
+                    SET status = 'timeout', follow_up_required = 0, updated_at = :now
+                    WHERE report_id = :report_id
+                    """),
+                {"report_id": report_id, "now": now},
+            )
+            logger.warning(
+                f"Report {report_id} unanswered after {budget} follow-up(s); closed as timeout"
+            )
+            return None
+        conn.execute(
+            text("""
+                UPDATE abuse_reports
+                SET follow_up_count = :sequence, follow_up_required = 1,
+                    sla_deadline = :next_deadline, updated_at = :now
+                WHERE report_id = :report_id
+                """),
+            {
+                "report_id": report_id,
+                "sequence": sequence,
+                "next_deadline": now + timedelta(hours=interval),
+                "now": now,
+            },
+        )
+        evidence = row["evidence"]
+        if isinstance(evidence, str):
+            evidence = json.loads(evidence)
+        return FollowupClaim(
+            report_id=row["report_id"],
+            site_url=row["site_url"],
+            followup_seq=sequence,
+            recipients=_json_list(row["recipients"]),
+            report_date=row["report_date"],
+            evidence=evidence,
+        )
+
+    def record_followup_sent(
+        self,
+        conn: Connection,
+        report_id: str,
+        sent_at: datetime,
+        interval_hours: Optional[int] = None,
+    ) -> None:
+        """Record a delivered follow-up and restart the SLA clock from it.
+
+        Args:
+            conn: Connection inside an open transaction.
+            report_id: Tracked report id.
+            sent_at: When the follow-up was accepted.
+            interval_hours: Hours until the next follow-up is due.
+        """
+        interval = interval_hours or settings.FOLLOWUP_INTERVAL_HOURS
+        conn.execute(
+            text("""
+                UPDATE abuse_reports
+                SET last_follow_up_at = :sent_at,
+                    sla_deadline = GREATEST(CAST(sla_deadline AS timestamptz), :next_deadline),
+                    updated_at = :sent_at
+                WHERE report_id = :report_id
+                """),
+            {
+                "report_id": report_id,
+                "sent_at": sent_at,
+                "next_deadline": sent_at + timedelta(hours=interval),
+            },
+        )
+
     # ------------------------------------------------------------------
     # Public API (each call is its own short transaction)
     # ------------------------------------------------------------------
 
     def track_report(self, report: AbuseReportRecord) -> bool:
         """
-        Track a new abuse report and update phishing_sites table
-        If a report already exists for this site, update it instead
+        Track a new abuse report and update the phishing_sites table.
+
+        Append-only: every report id gets its own row; an earlier report of
+        the same site is never overwritten.
 
         Args:
             report: AbuseReportRecord to track
@@ -287,139 +447,20 @@ class ReportTracker:
             True if successfully tracked
         """
         try:
-            # Use separate transactions to avoid blocking
-            with self.db_engine.connect() as conn:
-                # Get site_id from phishing_sites table
-                site_result = conn.execute(
-                    text("SELECT id FROM phishing_sites WHERE url = :site_url"),
-                    {"site_url": report.site_url},
-                ).fetchone()
-
-                site_id = site_result[0] if site_result else None
-
-                # Check if a report already exists for this site
-                existing_report = conn.execute(
-                    text(
-                        "SELECT id, report_id FROM abuse_reports WHERE site_url = :site_url ORDER BY created_at DESC LIMIT 1"
-                    ),
-                    {"site_url": report.site_url},
-                ).fetchone()
-
-                if existing_report:
-                    # Update existing report
-                    conn.execute(
-                        text("""
-                            UPDATE abuse_reports SET
-                                site_id = :site_id,
-                                report_date = :report_date,
-                                recipients = :recipients,
-                                cc_recipients = :cc_recipients,
-                                subject = :subject,
-                                report_id = :report_id,
-                                status = :status,
-                                sla_deadline = :sla_deadline,
-                                icann_compliant = :icann_compliant,
-                                screenshot_included = :screenshot_included,
-                                screenshot_path = :screenshot_path,
-                                attachment_count = :attachment_count,
-                                follow_up_required = :follow_up_required,
-                                updated_at = :updated_at
-                            WHERE id = :existing_id
-                            """),
-                        {
-                            "existing_id": existing_report[0],
-                            "site_url": report.site_url,
-                            "site_id": site_id,
-                            "report_date": report.report_date,
-                            "recipients": (
-                                json.dumps(report.recipients)
-                                if isinstance(report.recipients, list)
-                                else report.recipients
-                            ),
-                            "cc_recipients": (
-                                json.dumps(report.cc_recipients) if report.cc_recipients else None
-                            ),
-                            "subject": report.subject,
-                            "report_id": report.report_id,
-                            "status": report.status,
-                            "sla_deadline": report.sla_deadline,
-                            "icann_compliant": 1 if report.icann_compliant else 0,
-                            "screenshot_included": 1 if report.screenshot_included else 0,
-                            "screenshot_path": getattr(report, "screenshot_path", None),
-                            "attachment_count": getattr(report, "attachment_count", 0),
-                            "follow_up_required": 1 if report.follow_up_required else 0,
-                            "updated_at": report.updated_at,
-                        },
-                    )
-                    logger.info(
-                        f"✅ Updated existing report for {report.site_url} (old: {existing_report[1]}, new: {report.report_id})"
-                    )
-                else:
-                    # Insert new report (without specifying id, let SERIAL handle it)
-                    conn.execute(
-                        text("""
-                            INSERT INTO abuse_reports (
-                                site_url, site_id, report_date, recipients, cc_recipients, subject,
-                                report_id, status, sla_deadline, icann_compliant,
-                                screenshot_included, screenshot_path, attachment_count,
-                                follow_up_required, created_at, updated_at
-                            ) VALUES (
-                                :site_url, :site_id, :report_date, :recipients, :cc_recipients, :subject,
-                                :report_id, :status, :sla_deadline, :icann_compliant,
-                                :screenshot_included, :screenshot_path, :attachment_count,
-                                :follow_up_required, :created_at, :updated_at
-                            )
-                        """),
-                        {
-                            "site_url": report.site_url,
-                            "site_id": site_id,
-                            "report_date": report.report_date,
-                            "recipients": (
-                                json.dumps(report.recipients)
-                                if isinstance(report.recipients, list)
-                                else report.recipients
-                            ),
-                            "cc_recipients": (
-                                json.dumps(report.cc_recipients) if report.cc_recipients else None
-                            ),
-                            "subject": report.subject,
-                            "report_id": report.report_id,
-                            "status": report.status,
-                            "sla_deadline": report.sla_deadline,
-                            "icann_compliant": 1 if report.icann_compliant else 0,
-                            "screenshot_included": 1 if report.screenshot_included else 0,
-                            "screenshot_path": getattr(report, "screenshot_path", None),
-                            "attachment_count": getattr(report, "attachment_count", 0),
-                            "follow_up_required": 1 if report.follow_up_required else 0,
-                            "created_at": report.created_at,
-                            "updated_at": report.updated_at,
-                        },
-                    )
-                    logger.info(f"✅ Created new report: {report.report_id} for {report.site_url}")
-
-                conn.commit()
-
-                # Update phishing_sites in a separate transaction
+            with short_transaction(self.db_engine) as conn:
+                self.insert_report(conn, report)
                 conn.execute(
                     text("""
                         UPDATE phishing_sites
-                        SET abuse_report_sent = 1,
-                            reported = 1,
-                            last_report_sent = :report_date
+                        SET abuse_report_sent = 1, reported = 1, last_report_sent = :report_date
                         WHERE url = :site_url
-                    """),
-                    {
-                        "site_url": report.site_url,
-                        "report_date": report.report_date,
-                    },
+                        """),
+                    {"site_url": report.site_url, "report_date": report.report_date},
                 )
-                conn.commit()
-
-                logger.info(f"✅ Tracked abuse report: {report.report_id} for {report.site_url}")
-                return True
-
+            logger.info(f"Tracked abuse report {report.report_id} for {report.site_url}")
+            return True
         except Exception as e:
-            logger.error(f"❌ Failed to track abuse report: {e}")
+            logger.error(f"Failed to track abuse report {report.report_id}: {e}")
             return False
 
     def update_report_status(
@@ -639,35 +680,47 @@ class ReportTracker:
             logger.error(f"Failed to get reports needing follow-up: {e}")
             return []
 
-    def mark_report_for_followup(self, report_id: str, reason: str = None) -> bool:
+    def mark_report_for_followup(
+        self,
+        report_id: str,
+        reason: str = None,
+        now: Optional[datetime] = None,
+        interval_hours: Optional[int] = None,
+    ) -> bool:
         """
-        Mark a report as needing follow-up
+        Mark a report as needing follow-up and push its SLA deadline forward.
+
+        Advancing ``sla_deadline`` by one follow-up interval is what keeps the
+        next overdue check from sending the same follow-up again.
 
         Args:
             report_id: Report ID to mark
             reason: Optional reason for follow-up
+            now: Reference time (UTC); defaults to the current time.
+            interval_hours: Hours until the report is overdue again.
 
         Returns:
             True if successfully marked
         """
+        reference = now or utc_now()
+        interval = interval_hours or settings.FOLLOWUP_INTERVAL_HOURS
         try:
             with self.db_engine.begin() as conn:
                 update_data = {
                     "report_id": report_id,
                     "follow_up_required": 1,
-                    "updated_at": datetime.now(),
+                    "updated_at": reference,
+                    "next_deadline": reference + timedelta(hours=interval),
                 }
-
-                # Add reason to response_content if provided
-                if reason:
-                    update_data["response_content"] = f"Follow-up required: {reason}"
 
                 query = """
                     UPDATE abuse_reports
-                    SET follow_up_required = :follow_up_required, updated_at = :updated_at
+                    SET follow_up_required = :follow_up_required, updated_at = :updated_at,
+                        sla_deadline = :next_deadline
                 """
 
                 if reason:
+                    update_data["response_content"] = f"Follow-up required: {reason}"
                     query += ", response_content = :response_content"
 
                 query += " WHERE report_id = :report_id"
@@ -675,14 +728,13 @@ class ReportTracker:
                 result = conn.execute(text(query), update_data)
 
                 if result.rowcount > 0:
-                    logger.info(f"✅ Marked report {report_id} for follow-up")
+                    logger.info(f"Marked report {report_id} for follow-up")
                     return True
-                else:
-                    logger.warning(f"⚠️  Report {report_id} not found for follow-up marking")
-                    return False
+                logger.warning(f"Report {report_id} not found for follow-up marking")
+                return False
 
         except Exception as e:
-            logger.error(f"❌ Failed to mark report for follow-up: {e}")
+            logger.error(f"Failed to mark report for follow-up: {e}")
             return False
 
     def get_statistics(self) -> Dict[str, Any]:

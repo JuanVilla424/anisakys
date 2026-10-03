@@ -12,7 +12,7 @@ from __future__ import annotations
 import smtplib
 import threading
 from contextlib import ExitStack
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine, text
@@ -35,6 +35,7 @@ from tests.reporting.pipeline_support import (
     network_patches,
     outbox_rows,
     report_rows,
+    set_site_status,
     site_row,
     unfence_foreign_sites,
 )
@@ -200,6 +201,66 @@ class TestScheduledReport:
         assert "hunter2" not in site["report_last_error"]
         assert site["report_lease_until"] is not None, "back-off before the next attempt"
         assert manager.run_reporting_cycle() == 0
+
+
+@pytest.mark.usefixtures("no_default_ccs")
+class TestFollowUps:
+    """Exit criterion: a sent report is tracked with an SLA deadline and is
+    followed up after the deadline (clock mocked), without duplicates."""
+
+    def test_follow_up_after_deadline_advances_sla_and_escalates_later(
+        self, engine, stack, monkeypatch
+    ):
+        monkeypatch.setattr(settings, "DEFAULT_CC_EMAILS_ESCALATION_LEVEL2", "l2@esc-test.example")
+        url = make_site_url("followup")
+        insert_site(engine, url)
+        mailer = FakeMailer()
+        clock = FixedClock(MONDAY)
+        manager = make_manager(engine, stack, mailer=mailer, clock=clock)
+        network_patches(stack)
+        manager.run_reporting_cycle()
+        (report,) = report_rows(engine, url)
+        deadline = report["sla_deadline"]
+
+        clock.now = deadline - timedelta(minutes=1)
+        assert manager.process_overdue_followups() == 0
+
+        clock.now = deadline + timedelta(hours=1)
+        assert manager.process_overdue_followups() == 1
+        assert manager.process_overdue_followups() == 0, "same deadline must not repeat"
+
+        followups = [m for m in mailer.sent if "Follow-up 1:" in m.subject]
+        assert [m.recipients for m in followups] == [["abuse@registrar-test.example"], [SENDER]]
+        assert report["report_id"] in followups[0].subject
+        assert "VirusTotal: 9 of 70 engines" in followups[0].text
+        assert mailer.to("l2@esc-test.example") == [], "no escalation on the first follow-up"
+        (tracked,) = report_rows(engine, url)
+        assert tracked["follow_up_count"] == 1
+        assert tracked["sla_deadline"] == clock.now + timedelta(
+            hours=settings.FOLLOWUP_INTERVAL_HOURS
+        )
+        assert tracked["last_follow_up_at"] == clock.now
+
+        clock.now = tracked["sla_deadline"] + timedelta(minutes=5)
+        assert manager.process_overdue_followups() == 1
+        (escalated,) = mailer.to("l2@esc-test.example")
+        assert "Follow-up 2:" in escalated.subject
+        assert len([m for m in mailer.sent if "Follow-up 2:" in m.subject]) == 2
+
+    def test_site_that_went_down_is_not_followed_up(self, engine, stack):
+        url = make_site_url("down")
+        insert_site(engine, url)
+        clock = FixedClock(MONDAY)
+        mailer = FakeMailer()
+        manager = make_manager(engine, stack, mailer=mailer, clock=clock)
+        network_patches(stack)
+        manager.run_reporting_cycle()
+        set_site_status(engine, url, "down")  # the takedown monitor confirmed it
+
+        clock.now = MONDAY + timedelta(days=5)
+        assert manager.process_overdue_followups() == 0
+        assert report_rows(engine, url)[0]["follow_up_count"] == 0
+        assert len(mailer.sent) == 2, "only the initial report and its CC copy"
 
 
 @pytest.mark.usefixtures("no_default_ccs")

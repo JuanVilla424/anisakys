@@ -195,6 +195,14 @@ class TestCcLists:
 
         assert mgr.cc_emails == ["cert@example.org", "team@example.org"]
 
+    def test_escalation_starts_at_the_second_follow_up(self, manager, mock_settings):
+        mock_settings.DEFAULT_CC_EMAILS_ESCALATION_LEVEL2 = "l2@example.org"
+        mock_settings.DEFAULT_CC_EMAILS_ESCALATION_LEVEL3 = "l3@example.org"
+
+        assert manager._escalation_contacts(1) == []
+        assert manager._escalation_contacts(2) == ["l2@example.org"]
+        assert manager._escalation_contacts(3) == ["l2@example.org", "l3@example.org"]
+
 
 # ---------------------------------------------------------------------------
 # TestReportIpToGrinder
@@ -486,14 +494,7 @@ class TestProcessOverdueFollowups:
             }
         ]
 
-        with (
-            patch("src.reporting.abuse_manager.get_ip_info", return_value=("1.2.3.4", "ASN")),
-            patch(
-                "src.reporting.abuse_manager.PhishingUtils.determine_site_status",
-                return_value=("active", None),
-            ),
-            patch.object(manager, "send_abuse_report", return_value=True),
-        ):
+        with patch.object(manager, "send_abuse_report", return_value=True):
             manager.process_overdue_followups()
 
         # With one overdue report and site still active, send_abuse_report may be called

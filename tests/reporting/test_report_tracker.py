@@ -52,3 +52,82 @@ class TestNoRuntimeDDL:
 
         assert statements, "the tracker should have tried to talk to the database"
         assert not [s for s in statements if s.lstrip().startswith(_DDL_KEYWORDS)]
+
+
+class TestAppendOnlyTracking:
+    """track_report() looked up the latest row of the site and overwrote it, so
+    a new report replaced the previous one (and its SLA/follow-up history)."""
+
+    def test_new_report_for_same_site_adds_a_row(self, db_engine):
+        from tests.reporting.pipeline_support import cleanup_sites, insert_site, make_site_url
+
+        url = make_site_url("append")
+        insert_site(db_engine, url)
+        tracker = ReportTracker(db_engine)
+        first = create_report_record(url, ["abuse@reg.example"], "first")
+        second = create_report_record(url, ["abuse@reg.example"], "second")
+        try:
+            assert tracker.track_report(first) and tracker.track_report(second)
+            rows = tracker.get_reports_by_site(url)
+        finally:
+            cleanup_sites(db_engine)
+
+        assert {row["report_id"] for row in rows} == {first.report_id, second.report_id}
+        assert {row["subject"] for row in rows} == {"first", "second"}
+
+
+class TestFollowupDeadline:
+    """mark_report_for_followup() never moved sla_deadline, so every overdue
+    check would follow the same report up again."""
+
+    def test_marking_a_follow_up_advances_the_deadline(self, db_engine):
+        from datetime import datetime, timedelta, timezone
+
+        from tests.reporting.pipeline_support import cleanup_sites, insert_site, make_site_url
+
+        url = make_site_url("deadline")
+        insert_site(db_engine, url)
+        tracker = ReportTracker(db_engine)
+        sent_at = datetime(2026, 10, 5, 10, 0, tzinfo=timezone.utc)
+        report = create_report_record(url, ["abuse@reg.example"], "s")
+        report.report_date = sent_at
+        report.sla_deadline = sent_at + timedelta(days=2)
+        now = sent_at + timedelta(days=3)
+        try:
+            tracker.track_report(report)
+            assert [r["report_id"] for r in tracker.get_overdue_reports(now=now)] == [
+                report.report_id
+            ]
+
+            assert tracker.mark_report_for_followup(report.report_id, now=now, interval_hours=48)
+
+            assert tracker.get_overdue_reports(now=now) == []
+            later = now + timedelta(hours=49)
+            assert [r["report_id"] for r in tracker.get_overdue_reports(now=later)] == [
+                report.report_id
+            ]
+        finally:
+            cleanup_sites(db_engine)
+
+    def test_only_the_newest_report_of_a_site_is_followed_up(self, db_engine):
+        from datetime import datetime, timedelta, timezone
+
+        from tests.reporting.pipeline_support import cleanup_sites, insert_site, make_site_url
+
+        url = make_site_url("newest")
+        insert_site(db_engine, url)
+        tracker = ReportTracker(db_engine)
+        sent_at = datetime(2026, 10, 5, 10, 0, tzinfo=timezone.utc)
+        older = create_report_record(url, ["abuse@reg.example"], "old")
+        newer = create_report_record(url, ["abuse@reg.example"], "new")
+        for record in (older, newer):
+            record.report_date = sent_at
+            record.sla_deadline = sent_at + timedelta(days=2)
+        try:
+            tracker.track_report(older)
+            tracker.track_report(newer)
+            overdue = tracker.get_overdue_reports(now=sent_at + timedelta(days=3))
+        finally:
+            cleanup_sites(db_engine)
+
+        assert [r["report_id"] for r in overdue] == [newer.report_id]
