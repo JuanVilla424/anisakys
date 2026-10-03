@@ -25,7 +25,7 @@ from src.dns.network_utils import safe_get_with_redirects
 
 # Import integrations
 from src.intelligence.virustotal import VirusTotalIntegration, VIRUSTOTAL_API_KEY
-from src.intelligence.urlvoid import URLVoidIntegration, URLVOID_API_KEY
+from src.intelligence.urlvoid import URLVoidIntegration, URLVOID_API_KEY, URLVOID_ENABLED
 from src.intelligence.phishtank import PhishTankIntegration, PHISHTANK_API_KEY
 from src.intelligence.google_safe_browsing import GoogleSafeBrowsingIntegration
 from src.detection.url_analyzer import URLAnalyzer
@@ -37,8 +37,9 @@ AUTO_REPORT_THRESHOLD_CONFIDENCE = getattr(settings, "AUTO_REPORT_THRESHOLD_CONF
 MANUAL_REVIEW_THRESHOLD_CONFIDENCE = getattr(settings, "MANUAL_REVIEW_THRESHOLD_CONFIDENCE", 50)
 
 # Auto-analysis is only truly enabled if we have API keys AND the setting is enabled
+# (a URLVoid key only counts while the unverified URLVoid client is enabled).
 AUTO_ANALYSIS_ENABLED = AUTO_MULTI_API_SCAN and (
-    VIRUSTOTAL_API_KEY or URLVOID_API_KEY or PHISHTANK_API_KEY
+    VIRUSTOTAL_API_KEY or (URLVOID_ENABLED and URLVOID_API_KEY) or PHISHTANK_API_KEY
 )
 
 

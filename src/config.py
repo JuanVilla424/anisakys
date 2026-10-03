@@ -156,6 +156,9 @@ class Settings(BaseSettings):
     # VirusTotal request budget shared by every client in the process (the
     # public API allows 4 requests/minute; raise it for premium keys).
     VIRUSTOTAL_REQUESTS_PER_MINUTE: int = Field(default=4, ge=1)
+    # The URLVoid client's endpoint and response schema could not be matched
+    # to the vendor's documented API, so it stays off unless explicitly enabled.
+    URLVOID_ENABLED: bool = False
 
     # --- v2 phase 0: platform, logging & operations ----------------------------
     # Logging (src/observability/structured_logger.py); LOG_LEVEL above sets the
