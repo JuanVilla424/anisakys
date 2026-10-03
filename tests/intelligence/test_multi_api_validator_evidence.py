@@ -202,7 +202,7 @@ class TestComprehensiveScan:
             result = validator.comprehensive_scan("https://phish.example/login")
         assert result["aggregated_threat_level"] == "critical"
 
-    def test_userinfo_trick_queries_the_real_host(self, validator):
+    def test_userinfo_trick_queries_the_actual_host(self, validator):
         with (
             patch.object(validator.virustotal, "scan_url", return_value=VT_ERROR),
             patch.object(validator.urlvoid, "analyze_domain", return_value=UV_DISABLED) as uv,
