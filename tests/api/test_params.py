@@ -93,6 +93,8 @@ class TestEndpointsRejectInvalidParameters:
             "/api/v1/intelligence/iocs?threat=severe",
             "/api/v1/intelligence/iocs?search=" + "a" * 201,
             "/api/v1/graph?limit=0",
+            "/api/v1/campaigns?limit=0",
+            "/api/v1/campaigns?offset=-1",
             "/api/v1/graph?focus=asn:1",
             "/api/v1/threads/1/executions?offset=-1",
             "/api/v1/email/senders?blocked_only=maybe",

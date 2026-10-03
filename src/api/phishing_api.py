@@ -2402,17 +2402,35 @@ class PhishingAPI:
         def get_campaigns():
             """Registrar-based campaign clusters with their most recent threats.
 
-            A single aggregate query returns every cluster (registrars with at
-            least two sites) together with its 20 most recent sites, instead of
-            one extra query per cluster.
+            A single aggregate query returns one page of clusters (registrars
+            with at least two sites) together with each cluster's 20 most
+            recent sites, the total number of clusters and the KPIs over all
+            clusters, instead of one extra query per cluster.
+
+            Query params: ``limit`` (1-500, default 100) and ``offset``.
+
+            A cluster is ``active`` when it has live sites and activity in the
+            last 24 hours, ``monitoring`` when it has live sites without recent
+            activity, ``closed`` otherwise. ``confidence`` is the rounded mean
+            stored ``api_confidence_score`` of its sites, null when none was
+            scored. Timestamps are ISO-8601 with an explicit UTC offset.
 
             Returns:
-                JSON ``{"items": [...], "total": int, "kpi": {...}}``; each item's
-                ``id`` is stable across calls (derived from the registrar name).
+                JSON ``{"items": [...], "total": int, "limit": int, "offset": int,
+                "kpi": {...}}``; ``total`` and ``kpi`` cover every cluster, not
+                just the page. Each item's ``id`` is stable across calls
+                (derived from the registrar name).
             """
+            limit = int_arg(request.args, "limit", default=100, minimum=1, maximum=500)
+            offset = _offset_arg()
+            # Same clock as before: naive UTC, compared with naive DB timestamps.
+            stale_before = datetime.datetime.now(datetime.UTC).replace(
+                tzinfo=None
+            ) - datetime.timedelta(days=1)
             try:
                 with self.db_manager.engine.begin() as conn:
-                    groups = conn.execute(text("""
+                    rows = conn.execute(
+                        text("""
                         WITH clusters AS (
                             SELECT registrar_name,
                                    COUNT(*) AS site_count,
@@ -2430,6 +2448,32 @@ class PhishingAPI:
                             GROUP BY registrar_name
                             HAVING COUNT(*) >= 2
                         ),
+                        classified AS (
+                            SELECT c.*,
+                                   CASE
+                                       WHEN c.active_count > 0
+                                            AND c.last_activity >= :stale_before
+                                           THEN 'active'
+                                       WHEN c.active_count > 0 THEN 'monitoring'
+                                       ELSE 'closed'
+                                   END AS status
+                            FROM clusters c
+                        ),
+                        totals AS (
+                            SELECT COUNT(*) AS total,
+                                   COUNT(*) FILTER (WHERE status = 'active') AS active,
+                                   COUNT(*) FILTER (WHERE status = 'monitoring') AS monitoring,
+                                   COUNT(*) FILTER (WHERE status = 'closed') AS closed,
+                                   COALESCE(SUM(site_count), 0) AS total_sites,
+                                   COALESCE(SUM(takedown_count), 0) AS total_takedowns
+                            FROM classified
+                        ),
+                        page AS (
+                            SELECT * FROM classified
+                            ORDER BY active_count DESC, last_activity DESC NULLS LAST,
+                                     registrar_name
+                            LIMIT :lim OFFSET :off
+                        ),
                         ranked AS (
                             SELECT ps.registrar_name, ps.url, ps.site_status,
                                    ps.first_seen, ps.multi_api_threat_level,
@@ -2438,7 +2482,7 @@ class PhishingAPI:
                                        ORDER BY ps.first_seen DESC NULLS LAST, ps.id DESC
                                    ) AS rn
                             FROM phishing_sites ps
-                            JOIN clusters c ON c.registrar_name = ps.registrar_name
+                            JOIN page p ON p.registrar_name = ps.registrar_name
                         ),
                         recent AS (
                             SELECT registrar_name,
@@ -2455,56 +2499,68 @@ class PhishingAPI:
                             WHERE rn <= 20
                             GROUP BY registrar_name
                         )
-                        SELECT c.registrar_name, c.site_count, c.active_count,
-                               c.takedown_count, c.first_seen, c.last_activity,
-                               c.ips, c.avg_confidence,
-                               COALESCE(r.threats, '[]'::json) AS threats
-                        FROM clusters c
-                        LEFT JOIN recent r ON r.registrar_name = c.registrar_name
-                        ORDER BY c.active_count DESC, c.last_activity DESC
-                    """)).fetchall()
+                        SELECT p.registrar_name, p.site_count, p.status,
+                               p.takedown_count, p.first_seen, p.last_activity,
+                               p.ips, p.avg_confidence,
+                               COALESCE(r.threats, '[]'::json) AS threats,
+                               t.total, t.active, t.monitoring, t.closed,
+                               t.total_sites, t.total_takedowns
+                        FROM totals t
+                        LEFT JOIN page p ON TRUE
+                        LEFT JOIN recent r ON r.registrar_name = p.registrar_name
+                        ORDER BY p.active_count DESC, p.last_activity DESC NULLS LAST,
+                                 p.registrar_name
+                    """),
+                        {"stale_before": stale_before, "lim": limit, "off": offset},
+                    ).fetchall()
 
                 items = []
-                now = datetime.datetime.now(datetime.UTC).replace(tzinfo=None)
-                for g in groups:
-                    active_count = int(g[2] or 0)
-                    last_activity = g[5]
-                    stale = (now - last_activity).total_seconds() > 86400 if last_activity else True
-                    if active_count > 0 and not stale:
-                        status = "active"
-                    elif active_count > 0:
-                        status = "monitoring"
-                    else:
-                        status = "closed"
-
-                    threats = g[8]
+                for row in rows:
+                    if row[0] is None:  # no cluster on this page: totals only
+                        continue
+                    threats = row[8]
                     if isinstance(threats, str):
                         threats = json.loads(threats)
-
+                    for threat in threats or []:
+                        if isinstance(threat, dict) and "first_seen" in threat:
+                            threat["first_seen"] = iso_utc(threat["first_seen"])
                     items.append(
                         {
-                            "id": campaign_id("registrar", g[0]),
-                            "name": f"{g[0]} cluster",
-                            "registrar": g[0],
-                            "status": status,
-                            "sites": int(g[1] or 0),
-                            "takedowns": int(g[3] or 0),
-                            "first_seen": str(g[4]) if g[4] else None,
-                            "last_activity": str(g[5]) if g[5] else None,
-                            "confidence": round(float(g[7] or 0)),
-                            "resolved_ips": list(g[6]) if g[6] else [],
+                            "id": campaign_id("registrar", row[0]),
+                            "name": f"{row[0]} cluster",
+                            "registrar": row[0],
+                            "status": row[2],
+                            "sites": int(row[1] or 0),
+                            "takedowns": int(row[3] or 0),
+                            "first_seen": iso_utc(row[4]),
+                            "last_activity": iso_utc(row[5]),
+                            "confidence": round(float(row[7])) if row[7] is not None else None,
+                            "resolved_ips": list(row[6]) if row[6] else [],
                             "threats": threats or [],
                         }
                     )
 
+                first = rows[0] if rows else None
                 kpi = {
-                    "active": sum(1 for c in items if c["status"] == "active"),
-                    "monitoring": sum(1 for c in items if c["status"] == "monitoring"),
-                    "closed": sum(1 for c in items if c["status"] == "closed"),
-                    "total_sites": sum(c["sites"] for c in items),
-                    "total_takedowns": sum(c["takedowns"] for c in items),
+                    "active": int(first[10] or 0) if first else 0,
+                    "monitoring": int(first[11] or 0) if first else 0,
+                    "closed": int(first[12] or 0) if first else 0,
+                    "total_sites": int(first[13] or 0) if first else 0,
+                    "total_takedowns": int(first[14] or 0) if first else 0,
                 }
-                return jsonify({"items": items, "total": len(items), "kpi": kpi}), 200
+                total = int(first[9] or 0) if first else 0
+                return (
+                    jsonify(
+                        {
+                            "items": items,
+                            "total": total,
+                            "limit": limit,
+                            "offset": offset,
+                            "kpi": kpi,
+                        }
+                    ),
+                    200,
+                )
             except Exception as e:
                 return internal_error("get_campaigns", e)
 

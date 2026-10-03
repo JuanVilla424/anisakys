@@ -152,7 +152,7 @@ class TestCampaignsOnPostgres:
         }
         threat = item["threats"][0]
         assert set(threat) == {"url", "status", "first_seen", "threat_level"}
-        assert threat["first_seen"] == "2026-01-01 00:00:00"
+        assert threat["first_seen"] == "2026-01-01T00:00:00+00:00"
         assert not any(c["registrar"] == f"Solo {tag}" for c in body["items"])
 
     def test_campaign_ids_are_stable_hashes_of_the_registrar(self, pg_api):
@@ -182,6 +182,67 @@ class TestCampaignsOnPostgres:
             assert item["id"] == expected
 
 
+class TestCampaignPaginationOnPostgres:
+    def _cluster(self, db_manager, registrar: str, *, scored: bool = True) -> None:
+        tag = uuid.uuid4().hex[:8]
+        for i in range(2):
+            _insert_site(db_manager, f"https://p{i}-{tag}.example/", registrar=registrar)
+        if not scored:
+            with db_manager.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "UPDATE phishing_sites SET api_confidence_score = NULL "
+                        "WHERE registrar_name = :r"
+                    ),
+                    {"r": registrar},
+                )
+
+    def test_confidence_is_null_when_no_site_was_scored(self, pg_api):
+        client, db_manager, headers = pg_api
+        registrar = f"Unscored {uuid.uuid4().hex[:8]}"
+        self._cluster(db_manager, registrar, scored=False)
+
+        body = client.get("/api/v1/campaigns?limit=500", headers=headers).get_json()
+
+        item = next(c for c in body["items"] if c["registrar"] == registrar)
+        assert item["confidence"] is None  # was 0
+
+    def test_pages_share_total_and_kpi_over_all_clusters(self, pg_api):
+        client, db_manager, headers = pg_api
+        for _ in range(3):
+            self._cluster(db_manager, f"Paged {uuid.uuid4().hex[:8]}")
+
+        everything = client.get("/api/v1/campaigns?limit=500", headers=headers).get_json()
+        first = client.get("/api/v1/campaigns?limit=1", headers=headers).get_json()
+        second = client.get("/api/v1/campaigns?limit=1&offset=1", headers=headers).get_json()
+        past_end = client.get(
+            f"/api/v1/campaigns?limit=1&offset={everything['total']}", headers=headers
+        ).get_json()
+
+        assert everything["total"] == len(everything["items"]) >= 3
+        assert [c["id"] for c in first["items"] + second["items"]] == [
+            c["id"] for c in everything["items"][:2]
+        ]
+        for page in (first, second, past_end):
+            assert page["total"] == everything["total"]
+            assert page["kpi"] == everything["kpi"]
+        assert (first["limit"], first["offset"], second["offset"]) == (1, 0, 1)
+        assert past_end["items"] == []
+        assert everything["kpi"]["total_sites"] == sum(c["sites"] for c in everything["items"])
+
+    def test_cluster_timestamps_carry_a_utc_offset(self, pg_api):
+        client, db_manager, headers = pg_api
+        registrar = f"Dated {uuid.uuid4().hex[:8]}"
+        self._cluster(db_manager, registrar)
+
+        body = client.get("/api/v1/campaigns?limit=500", headers=headers).get_json()
+
+        item = next(c for c in body["items"] if c["registrar"] == registrar)
+        assert item["first_seen"] == "2026-01-01T00:00:00+00:00"
+        assert item["last_activity"] == "2026-01-02T00:00:00+00:00"
+        assert item["status"] == "monitoring"  # live sites, no activity in 24 h
+
+
 def test_campaigns_issue_a_single_query():
     """The endpoint used to run one extra query per registrar group (N+1)."""
     from unittest.mock import MagicMock, patch
@@ -197,16 +258,27 @@ def test_campaigns_issue_a_single_query():
         db = MagicMock()
         api = PhishingAPI(db, MagicMock(spec=EnhancedAbuseEmailDetector), api_key="k")
     conn = db.engine.begin.return_value.__enter__.return_value
+    totals = (2, 1, 0, 1, 5, 4)  # total, active, monitoring, closed, sites, takedowns
     conn.execute.return_value.fetchall.return_value = [
-        ("Reg A", 2, 1, 1, None, None, ["192.0.2.1"], 50.0, []),
-        ("Reg B", 3, 0, 3, None, None, None, None, '[{"url": "u"}]'),
+        ("Reg A", 2, "active", 1, None, None, ["192.0.2.1"], 50.0, [], *totals),
+        ("Reg B", 3, "closed", 3, None, None, None, None, '[{"url": "u"}]', *totals),
     ]
 
     resp = api.app.test_client().get("/api/v1/campaigns", headers={"Authorization": "Bearer k"})
 
     assert resp.status_code == 200
     assert conn.execute.call_count == 1
-    assert resp.get_json()["items"][1]["threats"] == [{"url": "u"}]
+    body = resp.get_json()
+    assert body["items"][1]["threats"] == [{"url": "u"}]
+    assert body["items"][1]["confidence"] is None
+    assert body["total"] == 2
+    assert body["kpi"] == {
+        "active": 1,
+        "monitoring": 0,
+        "closed": 1,
+        "total_sites": 5,
+        "total_takedowns": 4,
+    }
 
 
 class TestIocsOnPostgres:
