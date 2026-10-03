@@ -310,3 +310,79 @@ class TestScopeHelpers:
         with app.test_request_context("/", environ_base={"REMOTE_ADDR": "192.168.1.5"}):
             assert _check_ip_allowed("192.168.1.0/24") is True
             assert _check_ip_allowed("10.0.0.0/8") is False
+
+
+# ---------------------------------------------------------------------------
+# Any-of scope requirements and caller scopes on flask.g
+# ---------------------------------------------------------------------------
+
+
+class TestScopeAlternativesAndHasScope:
+    def test_any_of_requirement(self):
+        from src.auth import _scope_allowed
+
+        assert _scope_allowed("metrics", ("metrics", "read")) is True
+        assert _scope_allowed("read", ("metrics", "read")) is True
+        assert _scope_allowed("scan", ("metrics", "read")) is False
+        assert _scope_allowed("admin", ("metrics", "read")) is True
+
+    def test_has_scope_reflects_the_authenticated_key(self):
+        from src.auth import has_scope, require_api_key
+
+        app = _make_app("master-secret")
+        seen = {}
+
+        @app.route("/h")
+        @require_api_key(scope="read")
+        def h():
+            seen["read"] = has_scope("read")
+            seen["write"] = has_scope("write")
+            return "ok", 200
+
+        with (
+            patch("src.auth.increment_counter"),
+            patch("src.auth._lookup_db_key", return_value=_db_row("read,scan")),
+            patch("src.auth._update_last_used"),
+        ):
+            rv = app.test_client().get("/h", headers={"Authorization": "Bearer db-key"})
+        assert rv.status_code == 200
+        assert seen == {"read": True, "write": False}
+
+    def test_master_key_has_every_scope(self):
+        from src.auth import has_scope, require_api_key
+
+        app = _make_app("master-secret")
+        seen = {}
+
+        @app.route("/m")
+        @require_api_key(scope="read")
+        def m():
+            seen["write"] = has_scope("write")
+            return "ok", 200
+
+        with patch("src.auth.increment_counter"):
+            app.test_client().get("/m", headers={"Authorization": "Bearer master-secret"})
+        assert seen == {"write": True}
+
+    def test_has_scope_is_false_outside_requests(self):
+        from src.auth import has_scope
+
+        assert has_scope("read") is False
+
+    def test_insufficient_any_of_scope_message(self):
+        from src.auth import require_api_key
+
+        app = _make_app("master-secret")
+
+        @app.route("/x")
+        @require_api_key(scope=("metrics", "read"))
+        def x():
+            return "ok", 200
+
+        with (
+            patch("src.auth.increment_counter"),
+            patch("src.auth._lookup_db_key", return_value=_db_row("scan")),
+        ):
+            rv = app.test_client().get("/x", headers={"Authorization": "Bearer db-key"})
+        assert rv.status_code == 403
+        assert rv.get_json()["error"] == "Insufficient scope. Required: metrics or read"

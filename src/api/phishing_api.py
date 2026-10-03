@@ -29,7 +29,7 @@ import logging as flask_logging
 from src.config import settings
 from sqlalchemy import text
 from src.database import db_engine
-from src.auth import require_api_key, _hash_key
+from src.auth import require_api_key, require_metrics_access, _hash_key
 from src.api.errors import (
     current_request_id,
     install_request_ids,
@@ -3045,9 +3045,17 @@ class PhishingAPI:
             )
 
         @self.app.route("/metrics", methods=["GET"])
-        @self.limiter.exempt
+        @self.limiter.limit("60 per minute")
+        @require_metrics_access
         def prometheus_metrics():
-            """Prometheus metrics endpoint (no authentication required)."""
+            """Prometheus metrics in text exposition format.
+
+            Requires ``Authorization: Bearer <METRICS_TOKEN>`` or an API key with
+            the ``metrics`` or ``read`` scope; 401/403 otherwise.
+
+            Returns:
+                The Prometheus text payload.
+            """
             from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
             return self.app.response_class(

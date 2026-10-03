@@ -190,3 +190,22 @@ class TestCmdRevoke:
             args = argparse.Namespace(name=None, prefix=None)
             cmd_revoke(args)
         assert exc.value.code == 1
+
+
+class TestScopeDefinitions:
+    def test_cli_and_auth_share_the_same_scopes(self):
+        from src.auth import VALID_SCOPES as AUTH_SCOPES
+        from src.cli.api_keys import VALID_SCOPES as CLI_SCOPES
+
+        assert CLI_SCOPES == AUTH_SCOPES
+        assert "metrics" in CLI_SCOPES
+
+    def test_create_help_documents_every_scope(self, capsys):
+        from src.auth import VALID_SCOPES
+        from src.cli.api_keys import main
+
+        with patch("sys.argv", ["api_keys", "create", "--help"]), pytest.raises(SystemExit):
+            main()
+        out = capsys.readouterr().out
+        for scope in VALID_SCOPES:
+            assert scope in out

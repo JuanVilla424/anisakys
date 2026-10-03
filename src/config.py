@@ -2,7 +2,7 @@ import sys
 import tempfile
 from pathlib import Path
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, SecretStr
 from typing import Optional
 
 from src.dns import cloudflare_ranges
@@ -98,6 +98,9 @@ class Settings(BaseSettings):
     # Number of reverse proxies (nginx, load balancer) in front of the API whose
     # X-Forwarded-For/-Proto headers are trusted. 0 disables ProxyFix.
     TRUSTED_PROXY_HOPS: int = Field(default=0, ge=0, le=10)
+    # Static bearer token for Prometheus scrapers on /metrics (an API key with the
+    # "metrics" or "read" scope also works). Unset = API keys only.
+    METRICS_TOKEN: Optional[SecretStr] = None
 
     # --- v2 phase 0: reporting pipeline & process roles ------------------------
 
