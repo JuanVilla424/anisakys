@@ -347,13 +347,13 @@ class PhishingAPI:
 
                 scan_result["screenshot"] = screenshot_data
 
-                # Save results to database
+                # Save results to database. The report-status read-back must use
+                # the same open transaction: the connection is closed (and every
+                # execute on it fails) as soon as the ``with`` block exits.
                 try:
-                    import json
-
                     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                    with db_engine.begin() as conn:
+                    with self.db_manager.engine.begin() as conn:
                         # Check if URL exists
                         existing = conn.execute(
                             text("SELECT id FROM phishing_sites WHERE url = :url"), {"url": url}
@@ -443,16 +443,17 @@ class PhishingAPI:
                                     ),
                                 },
                             )
+
+                        # Get report status info for response
+                        report_info = conn.execute(
+                            text("""
+                                SELECT last_report_sent, abuse_report_sent, all_abuse_emails
+                                FROM phishing_sites WHERE url = :url
+                                """),
+                            {"url": url},
+                        ).fetchone()
                     logger.info(f"✅ Scan results saved for {url}")
 
-                    # Get report status info for response
-                    report_info = conn.execute(
-                        text("""
-                            SELECT last_report_sent, abuse_report_sent, all_abuse_emails
-                            FROM phishing_sites WHERE url = :url
-                            """),
-                        {"url": url},
-                    ).fetchone()
                     if report_info:
                         scan_result["last_report_sent"] = (
                             str(report_info[0]) if report_info[0] else None
