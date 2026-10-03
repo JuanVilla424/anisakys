@@ -30,6 +30,7 @@ import logging as flask_logging
 from src.config import settings
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
+from stix2.exceptions import STIXError
 from src.database import db_engine
 from src.auth import has_scope, require_api_key, require_metrics_access, _hash_key
 from src.api.mailbox_policy import is_domain_allowed, is_mailbox_allowed
@@ -308,6 +309,10 @@ def _thread_access_denied(thread_type: Any, details: Any) -> Optional[Tuple[Resp
         return jsonify({"error": "Insufficient scope. Required: write"}), 403
     return None
 
+
+# POST /api/v2/stix/bundle limits: request size and reported validation errors.
+STIX_BUNDLE_MAX_BODY_BYTES = 8 * 1024 * 1024
+STIX_BUNDLE_MAX_ERRORS = 100
 
 MEMORY_STORAGE_URI = "memory://"
 
@@ -2435,6 +2440,49 @@ class PhishingAPI:
                 return jsonify({"valid": valid, "errors": errors}), 200
             except Exception as e:
                 return internal_error("validate_stix", e)
+
+        # ── POST /api/v2/stix/bundle ──────────────────────────────────────────
+        @self.app.route("/api/v2/stix/bundle", methods=["POST"])
+        @self.limiter.limit("10 per minute")
+        @require_api_key(scope="read")
+        def build_stix_bundle():
+            """Build a STIX 2.1 indicator bundle marked with TLP 2.0.
+
+            Body: ``{"indicators": [{"type", "value", "first_seen"?, "labels"?,
+            "description"?}], "tlp"?, "confidence"?, "name"?}`` with ``type`` in
+            domain | url | ipv4 | ipv6 | email-addr (max 5000), ``tlp`` in clear |
+            green | amber | amber+strict | red (default amber) and ``confidence``
+            0-100 (default 50).
+
+            Returns:
+                200 ``{"bundle": {...}}``; 400 ``{"error", "details": [{"index",
+                "error"}]}`` on invalid input; 413 when the body is too large.
+            """
+            from src.intelligence.stix_export import (
+                BundleRequestError,
+                build_indicator_bundle,
+                validate_bundle_request,
+            )
+
+            if (request.content_length or 0) > STIX_BUNDLE_MAX_BODY_BYTES:
+                return jsonify({"error": "Request body too large"}), 413
+            try:
+                spec = validate_bundle_request(request.get_json(silent=True))
+            except BundleRequestError as exc:
+                body: Dict[str, Any] = {"error": exc.message}
+                if exc.details:
+                    body["details"] = exc.details[:STIX_BUNDLE_MAX_ERRORS]
+                return jsonify(body), 400
+            try:
+                bundle = build_indicator_bundle(
+                    spec["indicators"],
+                    tlp=spec["tlp"],
+                    confidence=spec["confidence"],
+                    name=spec["name"],
+                )
+            except STIXError as e:
+                return internal_error("build_stix_bundle", e)
+            return jsonify({"bundle": bundle}), 200
 
         # ── POST /api/v1/intelligence/taxii/push ──────────────────────────────
         @self.app.route("/api/v1/intelligence/taxii/push", methods=["POST"])
