@@ -120,6 +120,13 @@ class Settings(BaseSettings):
     LOG_MAX_BYTES: int = Field(default=20 * 1024 * 1024, gt=0)
     LOG_BACKUP_COUNT: int = Field(default=5, ge=0)
     LOG_CONSOLE_FORMAT: str = Field(default="text", pattern="^(text|json)$")
+    # Database connection pooling (src/database/manager.py: create_db_engine).
+    # 0 = no pooling (default). >0 = bounded QueuePool with pre-ping, intended
+    # for the API under gunicorn; keep 0 for the threads/scanner roles.
+    DB_POOL_SIZE: int = Field(default=0, ge=0)
+    DB_MAX_OVERFLOW: int = Field(default=5, ge=0)
+    DB_POOL_TIMEOUT_SECONDS: int = Field(default=30, gt=0)
+    DB_POOL_RECYCLE_SECONDS: int = Field(default=1800, ge=-1)
 
     model_config = {
         "env_file": env_file,

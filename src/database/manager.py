@@ -10,9 +10,12 @@ This module never creates or alters tables: the schema is owned by Alembic
 
 import datetime
 import json
+import os
+import weakref
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.pool import NullPool
 
 from src.config import settings
@@ -20,25 +23,73 @@ from src.logger import logger
 from src.observability.structured_logger import log_detection, log_error
 
 # Database configuration
-DATABASE_URL = getattr(settings, "DATABASE_URL", None)
+DATABASE_URL: str = getattr(settings, "DATABASE_URL", None) or ""
 if not DATABASE_URL:
     raise Exception("DATABASE_URL must be set in your .env file")
 
-# Global engine for database operations with NullPool to avoid connection issues
-db_engine = create_engine(DATABASE_URL, poolclass=NullPool, echo=False)
+# Pooled engines must not reuse connections inherited from a parent process
+# (e.g. gunicorn --preload forks workers after the app was imported).
+_POOLED_ENGINES: "weakref.WeakSet[Engine]" = weakref.WeakSet()
+
+
+def _forget_inherited_connections() -> None:
+    """Drop pooled connections inherited across fork() without closing them."""
+    for engine in list(_POOLED_ENGINES):
+        engine.dispose(close=False)
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_forget_inherited_connections)
+
+
+def create_db_engine(url: str) -> Engine:
+    """Create an engine with the pooling policy from the settings.
+
+    ``DB_POOL_SIZE=0`` (default) keeps the historical behaviour: no pooling,
+    one connection per checkout. A positive value enables a bounded
+    ``QueuePool`` (``DB_POOL_SIZE`` + ``DB_MAX_OVERFLOW`` connections, checked
+    with ``pool_pre_ping`` and recycled after ``DB_POOL_RECYCLE_SECONDS``),
+    meant for long-lived request servers such as the API under gunicorn.
+    Processes that hold transactions open across slow network calls (the
+    threads role) should keep the default.
+
+    Args:
+        url: SQLAlchemy database URL.
+
+    Returns:
+        The engine.
+    """
+    pool_size = int(getattr(settings, "DB_POOL_SIZE", 0) or 0)
+    if pool_size <= 0:
+        return create_engine(url, poolclass=NullPool, echo=False)
+    engine = create_engine(
+        url,
+        echo=False,
+        pool_size=pool_size,
+        max_overflow=int(getattr(settings, "DB_MAX_OVERFLOW", 5)),
+        pool_timeout=int(getattr(settings, "DB_POOL_TIMEOUT_SECONDS", 30)),
+        pool_recycle=int(getattr(settings, "DB_POOL_RECYCLE_SECONDS", 1800)),
+        pool_pre_ping=True,
+    )
+    _POOLED_ENGINES.add(engine)
+    return engine
+
+
+# Global engine shared by every DatabaseManager using the default URL.
+db_engine = create_db_engine(DATABASE_URL)
 
 
 class DatabaseManager:
     """Database operations manager with enhanced auto-analysis support."""
 
-    def __init__(self, db_url: str = None):
+    def __init__(self, db_url: Optional[str] = None):
         self.db_url = db_url or DATABASE_URL
         # Reuse the shared global engine for the default URL; honor an
         # explicit different db_url instead of silently ignoring it.
         if self.db_url == DATABASE_URL:
             self.engine = db_engine
         else:
-            self.engine = create_engine(self.db_url, poolclass=NullPool, echo=False)
+            self.engine = create_db_engine(self.db_url)
 
     def get_sites_for_gsb_rescan(
         self, max_age_hours: int = 24, limit: int = 100
