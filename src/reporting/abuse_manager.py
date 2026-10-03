@@ -6,6 +6,7 @@ Enhanced abuse report manager with Grinder integration for IP reporting.
 
 from __future__ import annotations
 
+import base64
 import datetime
 import json
 import logging
@@ -54,6 +55,37 @@ if TYPE_CHECKING:
 
 # Testing mode flag - controls CC email suppression (default: False in production)
 IS_TESTING_MODE = False
+
+
+def encode_screenshot_for_gsb(
+    capture_result: Optional[Dict[str, Any]], max_bytes: Optional[int] = None
+) -> Optional[str]:
+    """Base64-encode the screenshot file of a capture result for GSB.
+
+    The screenshot services return the file location (``screenshot_path``),
+    never the image bytes, so the file has to be read here.
+
+    Args:
+        capture_result: Result of ``capture_screenshot()`` (may be ``None``).
+        max_bytes: Larger files are not submitted; defaults to
+            ``GSB_SCREENSHOT_MAX_BYTES``.
+
+    Returns:
+        The base64 text, or ``None`` when there is no usable screenshot.
+    """
+    if not capture_result or not capture_result.get("success"):
+        return None
+    path = capture_result.get("screenshot_path")
+    if not path or not os.path.isfile(path):
+        logger.warning("Screenshot file missing; submitting to GSB without it")
+        return None
+    limit = settings.GSB_SCREENSHOT_MAX_BYTES if max_bytes is None else max_bytes
+    size = os.path.getsize(path)
+    if limit and size > limit:
+        logger.warning(f"Screenshot is {size} bytes (limit {limit}); not sent to GSB")
+        return None
+    with open(path, "rb") as handle:
+        return base64.b64encode(handle.read()).decode("ascii")
 
 
 class AbuseReportManager:
@@ -720,7 +752,7 @@ class AbuseReportManager:
                 logger.info(f"🔄 Submitting {site_url} to Google Safe Browsing...")
                 gsb_result = report_phishing_url(
                     url=site_url,
-                    screenshot_base64=screenshot_info.get("base64") if screenshot_info else None,
+                    screenshot_base64=encode_screenshot_for_gsb(screenshot_info),
                 )
                 if gsb_result.get("success"):
                     logger.info(
