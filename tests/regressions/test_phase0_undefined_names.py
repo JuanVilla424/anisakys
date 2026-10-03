@@ -262,3 +262,18 @@ class TestResetOffsetCommand:
         from src import main as main_module
 
         assert callable(main_module.save_offset)
+
+
+class TestTestingModeReachesReporting:
+    """set_testing_mode() only flipped src.main's flag; the reporting pipeline
+    reads its own, so CC recipients were still e-mailed in testing mode."""
+
+    def test_flag_is_propagated_to_the_reporting_pipeline(self, monkeypatch):
+        from src import main as main_module
+
+        monkeypatch.setattr(abuse_manager_module, "IS_TESTING_MODE", False)
+        monkeypatch.setattr(main_module, "IS_TESTING_MODE", False)
+
+        main_module.set_testing_mode(True)
+
+        assert abuse_manager_module.IS_TESTING_MODE is True

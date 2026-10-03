@@ -125,10 +125,20 @@ from src.runtime import (
 IS_TESTING_MODE = False
 
 
-def set_testing_mode(enabled=True):
-    """Enable/disable global testing mode. In testing mode, CCs are NEVER sent."""
+def set_testing_mode(enabled: bool = True) -> None:
+    """Enable or disable testing mode, in which CC recipients are never e-mailed.
+
+    The reporting pipeline reads ``src.reporting.abuse_manager.IS_TESTING_MODE``;
+    setting only this module's flag (as before) left CCs enabled.
+
+    Args:
+        enabled: Whether testing mode is active.
+    """
     global IS_TESTING_MODE
+    import src.reporting.abuse_manager as abuse_manager_module
+
     IS_TESTING_MODE = enabled
+    abuse_manager_module.IS_TESTING_MODE = enabled
     if enabled:
         logger.warning("🧪 TESTING MODE ACTIVE - CCs disabled for security")
 
@@ -654,7 +664,10 @@ class Engine:
             api_port = getattr(self.args, "api_port", None) or getattr(
                 settings, "ANISAKYS_API_PORT", 8091
             )
-            logger.info("🚀 Starting API server with background reporting enabled...")
+            logger.info(
+                "🚀 Starting API development server"
+                + (" (background jobs run in this process)" if self.role == ProcessRole.ALL else "")
+            )
             # Development server only (production: gunicorn + src.api.wsgi). Never
             # run with debug=True: the Werkzeug debugger allows remote code execution.
             api.run(
