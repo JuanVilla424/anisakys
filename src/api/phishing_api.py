@@ -650,6 +650,68 @@ def build_graph(rows: List[Any], focus: Optional[Tuple[str, str]]) -> Dict[str, 
     return {"nodes": node_list, "edges": edge_list, "meta": meta}
 
 
+def integration_health(
+    integration: Any, name: str, display_name: str, configured: bool
+) -> Dict[str, Any]:
+    """Describe one integration for GET /api/v1/integrations from real data only.
+
+    Circuit breakers live in each API process and start ``closed`` with no
+    calls, which says nothing about the provider. So:
+
+    * no breaker -> ``status``/``circuit_breaker``/``error_rate`` unknown;
+    * ``open`` -> ``offline``; ``half_open`` -> ``degraded``;
+    * ``closed`` -> ``online`` once at least one call was recorded, else
+      ``unknown``;
+    * ``error_rate`` is failed/total calls, null before the first call;
+    * ``last_success`` is null: the breaker does not record when a call last
+      succeeded (its ``last_state_change`` is reported as ``state_changed_at``).
+
+    Args:
+        integration: Client object (may expose ``circuit_breaker``), or None.
+        name: Stable identifier.
+        display_name: Label for the console.
+        configured: Whether the integration has the configuration it needs.
+
+    Returns:
+        ``{"name", "display_name", "status", "circuit_breaker", "last_call_ms",
+        "last_success", "state_changed_at", "error_rate", "configured"}``.
+    """
+    entry: Dict[str, Any] = {
+        "name": name,
+        "display_name": display_name,
+        "status": "unknown",
+        "circuit_breaker": None,
+        "last_call_ms": None,
+        "last_success": None,
+        "state_changed_at": None,
+        "error_rate": None,
+        "configured": configured,
+    }
+    breaker = getattr(integration, "circuit_breaker", None)
+    if breaker is None:
+        return entry
+    state = breaker.state.value  # 'closed' / 'open' / 'half_open'
+    stats = breaker.stats
+    total = stats.total_requests or 0
+    if state == "open":
+        status = "offline"
+    elif state == "half_open":
+        status = "degraded"
+    else:
+        status = "online" if total > 0 else "unknown"
+    entry.update(
+        {
+            "status": status,
+            "circuit_breaker": state,
+            "last_call_ms": stats.last_call_ms,
+            # datetime.now() of this process: naive local time.
+            "state_changed_at": iso_utc(stats.last_state_change, naive_is_local=True),
+            "error_rate": round((stats.failed_requests or 0) / total, 3) if total else None,
+        }
+    )
+    return entry
+
+
 def campaign_id(kind: str, key: str) -> str:
     """Return a stable campaign identifier for a grouping key.
 
@@ -1955,88 +2017,44 @@ class PhishingAPI:
         @self.limiter.limit("20 per minute")
         @require_api_key(scope="read")
         def get_integrations():
-            """Return health and circuit-breaker state of all external integrations."""
+            """Return health and circuit-breaker state of all external integrations.
+
+            ``status`` is ``online``/``degraded``/``offline`` only when backed by
+            circuit-breaker data of this API process (closed with at least one
+            recorded call / half-open / open) and ``unknown`` otherwise: no
+            breaker, or a breaker that has not made a call yet. SMTP has no
+            breaker and the API does not send e-mail itself, so it is always
+            ``unknown``; ``/api/v1/stats`` carries the real delivery state.
+
+            Returns:
+                JSON list of :func:`integration_health` entries.
+            """
             try:
-
-                def _cb_info(integration, name, display_name, configured):
-                    cb = getattr(integration, "circuit_breaker", None)
-                    if cb is None:
-                        return {
-                            "name": name,
-                            "display_name": display_name,
-                            "status": "online",
-                            "circuit_breaker": "closed",
-                            "last_call_ms": None,
-                            "last_success": None,
-                            "error_rate": None,
-                            "configured": configured,
-                        }
-                    state = cb.state.value  # 'closed' / 'open' / 'half_open'
-                    stats = cb.stats
-                    total = stats.total_requests or 0
-                    failed = stats.failed_requests or 0
-                    error_rate = round(failed / total, 3) if total > 0 else 0.0
-                    status = (
-                        "online"
-                        if state == "closed"
-                        else ("offline" if state == "open" else "degraded")
-                    )
-                    last_success = (
-                        stats.last_state_change.isoformat()
-                        if stats.last_state_change and state == "closed"
-                        else None
-                    )
-                    return {
-                        "name": name,
-                        "display_name": display_name,
-                        "status": status,
-                        "circuit_breaker": state,
-                        "last_call_ms": stats.last_call_ms,
-                        "last_success": last_success,
-                        "error_rate": error_rate,
-                        "configured": configured,
-                    }
-
                 mv = self.multi_api_validator
                 integrations = [
                     # PhishTank's checkurl endpoint works unauthenticated (a key
                     # only raises the rate limit), so it's always "configured".
-                    _cb_info(
+                    integration_health(
                         mv.virustotal, "virustotal", "VirusTotal", bool(mv.virustotal.api_key)
                     ),
-                    _cb_info(mv.urlvoid, "urlvoid", "URLVoid", bool(mv.urlvoid.api_key)),
-                    _cb_info(mv.phishtank, "phishtank", "PhishTank", True),
-                    _cb_info(
+                    integration_health(mv.urlvoid, "urlvoid", "URLVoid", bool(mv.urlvoid.api_key)),
+                    integration_health(mv.phishtank, "phishtank", "PhishTank", True),
+                    integration_health(
                         mv.google_safe_browsing,
                         "gsb",
                         "Google Safe Browsing",
-                        mv.google_safe_browsing.enabled,
+                        bool(mv.google_safe_browsing.enabled),
                     ),
-                    _cb_info(
-                        self.grinder_client, "grinder", "Grinder", self.grinder_client.enabled
+                    integration_health(
+                        self.grinder_client,
+                        "grinder",
+                        "Grinder",
+                        bool(self.grinder_client.enabled),
+                    ),
+                    integration_health(
+                        None, "smtp", "SMTP (Abuse Reports)", bool(settings.SMTP_HOST)
                     ),
                 ]
-
-                # SMTP is implicit: if grinder is off, use its config flag as proxy
-                smtp_status = "online"
-                smtp_configured = True
-                if self.report_manager is not None:
-                    smtp_configured = getattr(self.report_manager, "smtp_configured", True)
-                    smtp_status = "online" if smtp_configured else "offline"
-
-                integrations.append(
-                    {
-                        "name": "smtp",
-                        "display_name": "SMTP (Abuse Reports)",
-                        "status": smtp_status,
-                        "circuit_breaker": "closed" if smtp_status == "online" else "open",
-                        "last_call_ms": None,
-                        "last_success": None,
-                        "error_rate": 0.0,
-                        "configured": smtp_configured,
-                    }
-                )
-
                 return jsonify(integrations), 200
 
             except Exception as e:

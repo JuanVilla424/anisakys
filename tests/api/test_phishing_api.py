@@ -226,6 +226,95 @@ class TestIntegrationsEndpoint:
         vt = next(i for i in data if i["name"] == "virustotal")
         assert vt["configured"] is True
 
+    @staticmethod
+    def _entries(client, headers):
+        resp = client.get("/api/v1/integrations", headers=headers)
+        assert resp.status_code == 200
+        return {i["name"]: i for i in json.loads(resp.data)}
+
+    @staticmethod
+    def _fake_breaker(state, total=0, failed=0):
+        from types import SimpleNamespace
+
+        stats = SimpleNamespace(
+            total_requests=total,
+            failed_requests=failed,
+            last_call_ms=12.5 if total else None,
+            last_state_change=None,
+        )
+        return SimpleNamespace(state=SimpleNamespace(value=state), stats=stats)
+
+    def test_integration_without_a_breaker_is_unknown_not_online(self, integrations_setup):
+        client, _, headers = integrations_setup
+
+        pt = self._entries(client, headers)["phishtank"]
+
+        assert pt["status"] == "unknown"
+        assert pt["circuit_breaker"] is None
+        assert pt["error_rate"] is None
+        assert pt["last_success"] is None
+
+    def test_breaker_without_calls_is_unknown(self, integrations_setup):
+        client, _, headers = integrations_setup
+
+        vt = self._entries(client, headers)["virustotal"]
+
+        assert vt["status"] == "unknown"
+        assert vt["circuit_breaker"] == "closed"
+        assert vt["error_rate"] is None  # was 0.0
+
+    def test_closed_breaker_with_calls_is_online(self, integrations_setup):
+        from src.circuit_breaker import CircuitBreaker
+
+        client, api, headers = integrations_setup
+        cb = CircuitBreaker("VirusTotal")
+        cb.call(lambda: "ok")
+        api.multi_api_validator.virustotal.circuit_breaker = cb
+
+        vt = self._entries(client, headers)["virustotal"]
+
+        assert vt["status"] == "online"
+        assert vt["error_rate"] == 0.0
+        # The breaker never records when a call last succeeded.
+        assert vt["last_success"] is None
+
+    @pytest.mark.parametrize("state, status", [("open", "offline"), ("half_open", "degraded")])
+    def test_open_and_half_open_breakers(self, integrations_setup, state, status):
+        client, api, headers = integrations_setup
+        api.multi_api_validator.virustotal.circuit_breaker = self._fake_breaker(
+            state, total=4, failed=3
+        )
+
+        vt = self._entries(client, headers)["virustotal"]
+
+        assert vt["status"] == status
+        assert vt["circuit_breaker"] == state
+        assert vt["error_rate"] == 0.75
+
+    def test_state_change_time_is_reported_with_utc_offset(self, integrations_setup):
+        import datetime
+
+        client, api, headers = integrations_setup
+        breaker = self._fake_breaker("open", total=5, failed=5)
+        breaker.stats.last_state_change = datetime.datetime(2026, 1, 2, 3, 4, 5)
+        api.multi_api_validator.virustotal.circuit_breaker = breaker
+
+        vt = self._entries(client, headers)["virustotal"]
+
+        expected = datetime.datetime(2026, 1, 2, 3, 4, 5).astimezone(datetime.UTC).isoformat()
+        assert vt["state_changed_at"] == expected
+        assert vt["state_changed_at"].endswith("+00:00")
+
+    def test_smtp_is_unknown_with_no_invented_breaker_or_error_rate(self, integrations_setup):
+        client, _, headers = integrations_setup
+
+        smtp = self._entries(client, headers)["smtp"]
+
+        assert smtp["status"] == "unknown"  # was "online"
+        assert smtp["circuit_breaker"] is None  # was "closed"
+        assert smtp["error_rate"] is None  # was 0.0
+        assert smtp["configured"] is True  # SMTP_HOST is set in .env.test
+
 
 class TestPhishingAPIAuthentication:
     """Tests for API authentication behavior."""
