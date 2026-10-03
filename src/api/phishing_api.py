@@ -47,7 +47,7 @@ from src.api.params import (
     int_arg,
     str_arg,
 )
-from src.api.serializers import iso_utc, severest_threat_level
+from src.api.serializers import STORED_THREAT_LEVELS, iso_utc, severest_threat_level
 from src.intelligence import (
     MultiAPIValidator,
     GrinderReportClient,
@@ -198,6 +198,109 @@ REPORT_STATUSES = frozenset(
     {"sent", "acknowledged", "in_progress", "resolved", "rejected", "timeout", "bounced", "pending"}
 )
 IOC_TYPES = frozenset({"domain", "ip", "email"})
+IOC_SEARCH_MAX_LENGTH = 200
+
+# Host part of phishing_sites.url, as used for domain IOCs and graph nodes.
+IOC_DOMAIN_SQL = "SPLIT_PART(SPLIT_PART(url, '://', 2), '/', 1)"
+
+# Stored threat levels from no verdict to most severe; an IP's threat is the
+# highest-ranked level among the sites resolving to it.
+_IOC_THREAT_ORDER = ("unknown", "clean", "low", "medium", "high", "critical")
+_IOC_SEVEREST_THREAT_SQL = "(ARRAY[{levels}])[MAX(CASE multi_api_threat_level {cases} END)]".format(
+    levels=", ".join(f"'{level}'" for level in _IOC_THREAT_ORDER),
+    cases=" ".join(
+        f"WHEN '{level}' THEN {rank}" for rank, level in enumerate(_IOC_THREAT_ORDER, 1)
+    ),
+)
+
+IOC_ORDER_BY: Dict[str, str] = {
+    "domain": "last_seen DESC NULLS LAST, value, threat NULLS LAST, source NULLS LAST",
+    "ip": "hits DESC, value",
+}
+
+
+def _ioc_query(ioc_type: str, *, search: bool, threat: bool) -> str:
+    """Build the ``WITH iocs AS (...)`` clause of GET /api/v1/intelligence/iocs.
+
+    Filters are bound parameters (``:search`` lower-cased, ``:threat``); only
+    constant SQL fragments are interpolated.
+
+    Args:
+        ioc_type: ``"domain"`` or ``"ip"``.
+        search: Whether to filter on ``:search`` (substring of the value).
+        threat: Whether to filter on ``:threat`` (the item's threat level).
+
+    Returns:
+        A CTE defining ``iocs(value, first_seen, last_seen, threat, source|cloudflare, hits)``.
+    """
+    if ioc_type == "ip":
+        where = "resolved_ip IS NOT NULL AND resolved_ip <> ''"
+        if search:
+            where += " AND STRPOS(LOWER(resolved_ip), :search) > 0"
+        outer = "WHERE threat = :threat" if threat else ""
+        return f"""
+            WITH grouped AS (
+                SELECT resolved_ip AS value,
+                       MIN(first_seen) AS first_seen,
+                       MAX(last_seen) AS last_seen,
+                       {_IOC_SEVEREST_THREAT_SQL} AS threat,
+                       bool_or(is_cloudflare = 1) AS cloudflare,
+                       COUNT(*) AS hits
+                FROM phishing_sites
+                WHERE {where}
+                GROUP BY resolved_ip
+            ),
+            iocs AS (SELECT * FROM grouped {outer})
+        """
+    where = f"url IS NOT NULL AND {IOC_DOMAIN_SQL} <> ''"
+    if search:
+        where += f" AND STRPOS(LOWER({IOC_DOMAIN_SQL}), :search) > 0"
+    if threat:
+        where += " AND multi_api_threat_level = :threat"
+    return f"""
+        WITH iocs AS (
+            SELECT {IOC_DOMAIN_SQL} AS value,
+                   MIN(first_seen) AS first_seen,
+                   MAX(last_seen) AS last_seen,
+                   multi_api_threat_level AS threat,
+                   source,
+                   COUNT(*) AS hits
+            FROM phishing_sites
+            WHERE {where}
+            GROUP BY value, multi_api_threat_level, source
+        )
+    """
+
+
+def _ioc_item(ioc_type: str, row: Any, position: int) -> Dict[str, Any]:
+    """Serialise one row of the IOC query.
+
+    Args:
+        ioc_type: ``"domain"`` or ``"ip"``.
+        row: ``(value, first_seen, last_seen, threat, source|cloudflare, hits, total)``.
+        position: 1-based position across pages (used in the legacy ``id``).
+
+    Returns:
+        The IOC item.
+    """
+    value, first_seen, last_seen, threat, extra, hits = row[:6]
+    if ioc_type == "ip":
+        source = None
+        tags = [] if extra is None else ["cloudflare" if extra else "direct"]
+    else:
+        source, tags = extra, []
+    return {
+        "id": f"{'IP' if ioc_type == 'ip' else 'D'}-{position}",
+        "type": ioc_type,
+        "value": value,
+        "first_seen": iso_utc(first_seen),
+        "last_seen": iso_utc(last_seen),
+        "threat": threat,
+        "source": source,
+        "hits": int(hits),
+        "tags": tags,
+    }
+
 
 # Largest accepted pagination offset (deep OFFSET scans are never legitimate here).
 MAX_OFFSET = 1_000_000
@@ -2331,86 +2434,71 @@ class PhishingAPI:
         def get_iocs():
             """List indicators of compromise derived from tracked phishing sites.
 
-            Query params: ``type`` (domain | ip | email), ``limit``, ``offset``.
-            Registrar/hosting abuse-desk mailboxes are reporting contacts, not
-            indicators, so ``type=email`` never exposes them.
+            Query params: ``type`` (domain | ip | email), ``limit``, ``offset``,
+            ``search`` (case-insensitive substring of the value, at most 200
+            characters) and ``threat`` (a stored threat level: critical, high,
+            medium, low, clean or unknown).
+
+            Domain items are one row per (host, stored threat level, source);
+            their ``threat`` is that stored level. IP items aggregate every site
+            resolving to the address; their ``threat`` is the severest stored
+            level among those sites (``unknown`` only when nothing else is
+            known, null when no site was analysed) and ``tags`` is
+            ``["cloudflare"]``/``["direct"]`` from ``is_cloudflare``, or empty
+            when that was never recorded. ``threat`` filters on the item's
+            ``threat``. Registrar/hosting abuse-desk mailboxes are reporting
+            contacts, not indicators, so ``type=email`` never exposes them.
 
             Returns:
-                JSON ``{"items": [...], "total": int, "counts": {...}}``.
+                JSON ``{"items": [...], "total": int, "counts": {...}}``;
+                ``total`` counts every item matching the filters (all pages),
+                ``counts`` the distinct domains/IPs tracked (unfiltered).
             """
             ioc_type = enum_arg(request.args, "type", IOC_TYPES, default="domain")
             limit = int_arg(request.args, "limit", default=100, maximum=500)
             offset = _offset_arg()
+            search = str_arg(request.args, "search", max_length=IOC_SEARCH_MAX_LENGTH)
+            threat = enum_arg(request.args, "threat", STORED_THREAT_LEVELS)
             try:
+                params: Dict[str, Any] = {"lim": limit, "off": offset}
+                if search:
+                    params["search"] = search.lower()
+                if threat:
+                    params["threat"] = threat
+                items: List[Dict[str, Any]] = []
+                total = 0
                 with self.db_manager.engine.begin() as conn:
-                    if ioc_type == "ip":
+                    if ioc_type in ("ip", "domain"):
+                        cte = _ioc_query(ioc_type, search=bool(search), threat=bool(threat))
                         rows = conn.execute(
-                            text("""
-                            SELECT resolved_ip AS value,
-                                   MIN(first_seen)::text AS first_seen,
-                                   MAX(last_seen)::text AS last_seen,
-                                   COUNT(*) AS hits,
-                                   CASE WHEN bool_or(is_cloudflare = 1) THEN 'cloudflare'
-                                        ELSE 'direct' END AS tag
-                            FROM phishing_sites WHERE resolved_ip IS NOT NULL
-                            GROUP BY resolved_ip
-                            ORDER BY COUNT(*) DESC LIMIT :lim OFFSET :off
-                        """),
-                            {"lim": limit, "off": offset},
+                            text(f"""
+                                {cte}
+                                SELECT *, COUNT(*) OVER () AS total FROM iocs
+                                ORDER BY {IOC_ORDER_BY[ioc_type]}
+                                LIMIT :lim OFFSET :off
+                            """),
+                            params,
                         ).fetchall()
+                        if rows:
+                            total = int(rows[0][-1])
+                        elif offset:
+                            total = int(
+                                conn.execute(
+                                    text(f"{cte} SELECT COUNT(*) FROM iocs"), params
+                                ).scalar()
+                                or 0
+                            )
                         items = [
-                            {
-                                "id": f"IP-{offset+i+1}",
-                                "type": "ip",
-                                "value": r[0],
-                                "first_seen": r[1],
-                                "last_seen": r[2],
-                                "threat": None,
-                                "source": None,
-                                "hits": int(r[3]),
-                                "tags": [r[4]],
-                            }
-                            for i, r in enumerate(rows)
+                            _ioc_item(ioc_type, row, offset + i + 1) for i, row in enumerate(rows)
                         ]
-                    elif ioc_type == "email":
-                        # phishing_sites.all_abuse_emails holds the registrar/hosting
-                        # abuse desks we report *to*; they are contacts, not
-                        # indicators, and must never be shared as IOCs. No source of
-                        # malicious e-mail indicators exists yet, so the list is empty.
-                        items = []
-                    else:  # domain (default)
-                        rows = conn.execute(
-                            text("""
-                            SELECT SPLIT_PART(SPLIT_PART(url, '://', 2), '/', 1) AS value,
-                                   MIN(first_seen)::text AS first_seen,
-                                   MAX(last_seen)::text AS last_seen,
-                                   multi_api_threat_level AS threat, source,
-                                   COUNT(*) AS hits
-                            FROM phishing_sites WHERE url IS NOT NULL
-                            GROUP BY value, multi_api_threat_level, source
-                            ORDER BY MAX(last_seen) DESC LIMIT :lim OFFSET :off
-                        """),
-                            {"lim": limit, "off": offset},
-                        ).fetchall()
-                        items = [
-                            {
-                                "id": f"D-{offset+i+1}",
-                                "type": "domain",
-                                "value": r[0],
-                                "first_seen": r[1],
-                                "last_seen": r[2],
-                                "threat": r[3],
-                                "source": r[4],
-                                "hits": int(r[5]),
-                                "tags": [],
-                            }
-                            for i, r in enumerate(rows)
-                        ]
+                    # type=email: phishing_sites.all_abuse_emails holds the
+                    # registrar/hosting abuse desks we report *to*; they are
+                    # contacts, not indicators, and must never be shared as IOCs.
+                    # No source of malicious e-mail indicators exists yet.
 
-                    counts_row = conn.execute(text("""
-                        SELECT
-                            COUNT(DISTINCT SPLIT_PART(SPLIT_PART(url,'://',2),'/',1)),
-                            COUNT(DISTINCT resolved_ip)
+                    counts_row = conn.execute(text(f"""
+                        SELECT COUNT(DISTINCT NULLIF({IOC_DOMAIN_SQL}, '')),
+                               COUNT(DISTINCT NULLIF(resolved_ip, ''))
                         FROM phishing_sites
                     """)).fetchone()
 
@@ -2418,7 +2506,7 @@ class PhishingAPI:
                     jsonify(
                         {
                             "items": items,
-                            "total": len(items),
+                            "total": total,
                             "counts": {
                                 "domain": int(counts_row[0] or 0),
                                 "ip": int(counts_row[1] or 0),

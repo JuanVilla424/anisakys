@@ -90,6 +90,8 @@ class TestEndpointsRejectInvalidParameters:
             "/api/v1/threads/1/results?limit=ten",
             "/api/v1/intelligence/iocs?limit=-1",
             "/api/v1/intelligence/iocs?type=hash",
+            "/api/v1/intelligence/iocs?threat=severe",
+            "/api/v1/intelligence/iocs?search=" + "a" * 201,
             "/api/v1/graph?limit=0",
             "/api/v1/graph?focus=asn:1",
             "/api/v1/threads/1/executions?offset=-1",

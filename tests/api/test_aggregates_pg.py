@@ -232,3 +232,124 @@ class TestIocsOnPostgres:
         assert f"ioc-{tag}.example" in {i["value"] for i in domains.get_json()["items"]}
         serialized = domains.get_data(as_text=True) + str(email)
         assert "abuse@registrar.example" not in serialized
+
+    def test_total_counts_every_matching_item_not_the_page(self, pg_api):
+        client, db_manager, headers = pg_api
+        tag = uuid.uuid4().hex[:8]
+        for i in range(3):
+            _insert_site(db_manager, f"https://total-{i}-{tag}.example/x")
+
+        page = client.get(
+            "/api/v1/intelligence/iocs", query_string={"search": tag, "limit": 2}, headers=headers
+        ).get_json()
+        beyond = client.get(
+            "/api/v1/intelligence/iocs",
+            query_string={"search": tag, "limit": 2, "offset": 10},
+            headers=headers,
+        ).get_json()
+
+        assert len(page["items"]) == 2
+        assert page["total"] == 3
+        assert beyond["items"] == []
+        assert beyond["total"] == 3
+
+    def test_search_is_a_case_insensitive_substring_of_the_value(self, pg_api):
+        client, db_manager, headers = pg_api
+        tag = uuid.uuid4().hex[:8]
+        _insert_site(db_manager, f"https://login-{tag}.example/")
+        _insert_site(db_manager, f"https://other-{tag}.example/")
+
+        body = client.get(
+            "/api/v1/intelligence/iocs",
+            query_string={"search": f"LOGIN-{tag.upper()}"},
+            headers=headers,
+        ).get_json()
+
+        assert [i["value"] for i in body["items"]] == [f"login-{tag}.example"]
+        assert body["total"] == 1
+        item = body["items"][0]
+        assert item["first_seen"] == "2026-01-01T00:00:00+00:00"
+        assert item["last_seen"] == "2026-01-02T00:00:00+00:00"
+
+    def test_search_treats_like_wildcards_literally(self, pg_api):
+        client, _, headers = pg_api
+
+        body = client.get(
+            "/api/v1/intelligence/iocs", query_string={"search": "%"}, headers=headers
+        ).get_json()
+
+        assert body["items"] == [] and body["total"] == 0
+
+    def test_threat_filter_matches_the_stored_level(self, pg_api):
+        client, db_manager, headers = pg_api
+        tag = uuid.uuid4().hex[:8]
+        _insert_site(db_manager, f"https://crit-{tag}.example/")
+        _insert_site(db_manager, f"https://high-{tag}.example/")
+        with db_manager.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE phishing_sites SET multi_api_threat_level = 'critical' WHERE url = :u"
+                ),
+                {"u": f"https://crit-{tag}.example/"},
+            )
+
+        body = client.get(
+            "/api/v1/intelligence/iocs",
+            query_string={"search": tag, "threat": "CRITICAL"},
+            headers=headers,
+        ).get_json()
+
+        assert [(i["value"], i["threat"]) for i in body["items"]] == [
+            (f"crit-{tag}.example", "critical")
+        ]
+        assert body["total"] == 1
+
+    def test_ip_items_derive_threat_and_do_not_invent_hosting(self, pg_api):
+        client, db_manager, headers = pg_api
+        tag = uuid.uuid4().hex[:8]
+        ip = f"198.18.{int(tag[:2], 16)}.{int(tag[2:4], 16)}"
+        _insert_site(db_manager, f"https://ip-a-{tag}.example/", ip=ip)
+        _insert_site(db_manager, f"https://ip-b-{tag}.example/", ip=ip)
+        with db_manager.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE phishing_sites SET multi_api_threat_level = 'unknown', "
+                    "is_cloudflare = NULL WHERE url = :u"
+                ),
+                {"u": f"https://ip-b-{tag}.example/"},
+            )
+
+        body = client.get(
+            "/api/v1/intelligence/iocs",
+            query_string={"type": "ip", "search": ip},
+            headers=headers,
+        ).get_json()
+        critical = client.get(
+            "/api/v1/intelligence/iocs",
+            query_string={"type": "ip", "search": ip, "threat": "critical"},
+            headers=headers,
+        ).get_json()
+
+        item = next(i for i in body["items"] if i["value"] == ip)
+        assert item["threat"] == "high"
+        assert item["hits"] == 2
+        # is_cloudflare was never recorded for these rows: no tag, not "direct".
+        assert item["tags"] == []
+        assert critical["items"] == [] and critical["total"] == 0
+
+    def test_ip_tags_reflect_the_stored_cloudflare_flag(self, pg_api):
+        client, db_manager, headers = pg_api
+        tag = uuid.uuid4().hex[:8]
+        ip = f"198.19.{int(tag[:2], 16)}.{int(tag[2:4], 16)}"
+        _insert_site(db_manager, f"https://cf-{tag}.example/", ip=ip)
+        with db_manager.engine.begin() as conn:
+            conn.execute(
+                text("UPDATE phishing_sites SET is_cloudflare = 0 WHERE url = :u"),
+                {"u": f"https://cf-{tag}.example/"},
+            )
+
+        body = client.get(
+            "/api/v1/intelligence/iocs", query_string={"type": "ip", "search": ip}, headers=headers
+        ).get_json()
+
+        assert next(i for i in body["items"] if i["value"] == ip)["tags"] == ["direct"]
