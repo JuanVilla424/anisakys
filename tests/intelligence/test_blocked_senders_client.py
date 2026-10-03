@@ -45,9 +45,9 @@ def _client(customer_id=None, setting=None):
         )
     )
     oauth2 = ModuleType("google.oauth2")
-    oauth2.service_account = fake_sa
+    setattr(oauth2, "service_account", fake_sa)
     discovery = ModuleType("googleapiclient.discovery")
-    discovery.build = MagicMock(return_value=svc)
+    setattr(discovery, "build", MagicMock(return_value=svc))
     modules = {
         "google.oauth2": oauth2,
         "google.oauth2.service_account": fake_sa,

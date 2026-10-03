@@ -317,7 +317,9 @@ def upgrade(url: str, revision: str = "head") -> None:
 
 def script_head() -> str:
     """Return the newest revision id in ``alembic/versions``."""
-    return ScriptDirectory.from_config(get_alembic_config("postgresql://unused")).get_current_head()
+    head = ScriptDirectory.from_config(get_alembic_config("postgresql://unused")).get_current_head()
+    assert head is not None, "alembic/versions has no head revision"
+    return head
 
 
 def downgrade(url: str, revision: str) -> None:

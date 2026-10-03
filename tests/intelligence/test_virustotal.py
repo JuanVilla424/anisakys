@@ -5,6 +5,7 @@ circuit breaker, pending/0-engine/stale analyses reported as no data (never
 clean), and the shared token bucket.
 """
 
+from typing import Optional
 import time
 from unittest.mock import MagicMock, patch
 
@@ -28,7 +29,7 @@ def _resp(status=200, body=None):
     return resp
 
 
-def _report(stats, date=FRESH):
+def _report(stats, date: Optional[int] = FRESH):
     return {"data": {"attributes": {"last_analysis_stats": stats, "last_analysis_date": date}}}
 
 

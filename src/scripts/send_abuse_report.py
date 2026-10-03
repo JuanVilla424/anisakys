@@ -377,6 +377,9 @@ def send_report(
     from src.reporting.mailer import SmtpMailer
     from src.reporting.smtp_rate_limiter import DatabaseSmtpRateLimiter
 
+    if not settings.DATABASE_URL:
+        print("ERROR: DATABASE_URL is required for the shared SMTP rate limit.", file=sys.stderr)
+        sys.exit(1)
     engine = create_engine(settings.DATABASE_URL, pool_pre_ping=True)
     try:
         limiter = DatabaseSmtpRateLimiter(engine, max_per_hour=settings.SMTP_RATE_LIMIT_PER_HOUR)

@@ -5,6 +5,7 @@ OAuth (success only on a parsed Operation), the disabled-unless-configured
 behaviour, and the crx-report channel being reported as unverified.
 """
 
+from typing import Any, Dict
 import importlib
 from unittest.mock import MagicMock
 
@@ -51,7 +52,7 @@ def oauth_session():
 
 
 def _reporter(oauth_session, **kwargs):
-    defaults = dict(
+    defaults: Dict[str, Any] = dict(
         project=PROJECT,
         credentials=object(),
         session_factory=lambda creds: oauth_session,

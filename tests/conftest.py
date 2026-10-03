@@ -169,6 +169,7 @@ def _load_migration(filename: str):
 
     path = os.path.join(os.path.dirname(__file__), "..", "alembic", "versions", filename)
     spec = importlib.util.spec_from_file_location(f"_migration_{filename[:3]}", path)
+    assert spec is not None and spec.loader is not None, f"cannot load migration {filename}"
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -193,7 +194,7 @@ def apply_reporting_schema(engine) -> None:
             def execute(sql: str) -> None:
                 conn.execute(text(sql))
 
-        baseline.op = _Op()
+        setattr(baseline, "op", _Op())
         baseline.upgrade()
         for statement in reporting.UPGRADE_STATEMENTS:
             conn.execute(text(statement))

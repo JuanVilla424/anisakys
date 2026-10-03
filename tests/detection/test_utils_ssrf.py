@@ -8,6 +8,7 @@ status. Only the takedown monitor (N consecutive failing cycles) marks sites
 down.
 """
 
+from typing import Optional
 import socket
 import unittest
 from unittest.mock import patch
@@ -39,7 +40,11 @@ def _response(status, body):
     return resp
 
 
-def _call(current_status="up", current_takedown=None, resolved_ip="203.0.113.5"):
+def _call(
+    current_status: Optional[str] = "up",
+    current_takedown: Optional[str] = None,
+    resolved_ip: Optional[str] = "203.0.113.5",
+):
     return PhishingUtils.determine_site_status(
         url=URL,
         resolved_ip=resolved_ip,
