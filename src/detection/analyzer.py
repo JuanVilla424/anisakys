@@ -6,6 +6,8 @@ Provides automated phishing analysis using multi-API validation.
 
 from __future__ import annotations
 
+import datetime
+import json
 import re
 import time
 import threading
@@ -14,8 +16,14 @@ from typing import Any, Dict, List, Optional, TYPE_CHECKING
 from sqlalchemy import text
 
 from src.config import settings
-from src.intelligence import MultiAPIValidator, AUTO_ANALYSIS_ENABLED
+from src.intelligence import (
+    AUTO_ANALYSIS_ENABLED,
+    AUTO_REPORT_THRESHOLD_CONFIDENCE,
+    MANUAL_REVIEW_THRESHOLD_CONFIDENCE,
+    MultiAPIValidator,
+)
 from src.logger import logger
+from src.models import AttachmentConfig
 
 # Get config value
 AUTO_ANALYSIS_DELAY_SECONDS = getattr(settings, "AUTO_ANALYSIS_DELAY_SECONDS", 30) or 30

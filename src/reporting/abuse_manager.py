@@ -19,7 +19,7 @@ import traceback
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlalchemy import text
@@ -46,8 +46,14 @@ from src.reporting.smtp_rate_limiter import SmtpRateLimiter
 from src.models import AttachmentConfig
 from src.reporting.abuse_contact_validator import AbuseContactValidator
 from src.screenshot_client import get_screenshot_service
-from src.reporting.report_tracker import ReportTracker
+from src.reporting.report_tracker import ReportTracker, create_report_record
+from src.utils.serialization import serialize_for_json
+from src.utils.timeouts import timeout
 from src.shutdown import shutdown_requested
+
+if TYPE_CHECKING:
+    from src.database import DatabaseManager
+    from src.reporting.email_detector import EnhancedAbuseEmailDetector
 
 # Testing mode flag - controls CC email suppression (default: False in production)
 IS_TESTING_MODE = False

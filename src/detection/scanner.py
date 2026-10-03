@@ -6,6 +6,10 @@ Main scanner class for detecting phishing sites through keyword analysis.
 
 from __future__ import annotations
 
+import datetime
+import gc
+import json
+import logging
 import os
 import re
 import socket
@@ -14,6 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+from sqlalchemy import text
 
 from src.config import (
     settings,
@@ -33,7 +38,7 @@ from src.logger import logger
 from src.models import DynamicBatchConfig
 from src.monitoring.takedown import get_offset, save_offset
 from src.observability.metrics import increment_counter, METRIC_REDIRECT_CHAINS_TOTAL
-from src.observability.structured_logger import log_error
+from src.observability.structured_logger import log_error, log_with_context
 from src.shutdown import shutdown_requested
 
 QUERIES_FILE = getattr(settings, "QUERIES_FILE", None)
@@ -257,17 +262,16 @@ class PhishingScanner:
 
                         log_with_context(
                             logger,
-                            "info",
-                            f"Redirect analysis complete: {redirect_chain.hop_count} hops, risk_score={redirect_chain.risk_score}",
-                            {
-                                "original_url": url,
-                                "final_url": final_url,
-                                "hop_count": redirect_chain.hop_count,
-                                "risk_score": redirect_chain.risk_score,
-                                "has_cloudflare": redirect_chain.has_cloudflare,
-                                "has_suspicious_tld": redirect_chain.has_suspicious_tld,
-                                "event_type": "redirect_analysis_complete",
-                            },
+                            logging.INFO,
+                            f"Redirect analysis complete: {redirect_chain.hop_count} hops, "
+                            f"risk_score={redirect_chain.risk_score}",
+                            original_url=url,
+                            final_url=final_url,
+                            hop_count=redirect_chain.hop_count,
+                            risk_score=redirect_chain.risk_score,
+                            has_cloudflare=redirect_chain.has_cloudflare,
+                            has_suspicious_tld=redirect_chain.has_suspicious_tld,
+                            event_type="redirect_analysis_complete",
                         )
                     except Exception as redirect_error:
                         log_error(
@@ -357,7 +361,7 @@ class PhishingScanner:
                                                             has_cross_domain, has_loop, total_time_ms, analyzed_at
                                                         ) VALUES (
                                                             :site_id, :original_url, :final_url, :hop_count,
-                                                            :chain_urls::jsonb, :status_codes::jsonb, :risk_score,
+                                                            CAST(:chain_urls AS JSONB), CAST(:status_codes AS JSONB), :risk_score,
                                                             :has_cloudflare, :has_suspicious_tld, :has_url_shortener,
                                                             :has_cross_domain, :has_loop, :total_time_ms, NOW()
                                                         )

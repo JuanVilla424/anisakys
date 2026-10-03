@@ -44,10 +44,10 @@ class Settings(BaseSettings):
     QUERIES_FILE: Optional[str] = None
     OFFSET_FILE: Optional[str] = None
     AUTO_MULTI_API_SCAN: Optional[bool] = False
-    AUTO_REPORT_THRESHOLD_CONFIDENCE: Optional[int] = None
+    AUTO_REPORT_THRESHOLD_CONFIDENCE: int = Field(default=85, ge=0, le=100)
     AUTO_REPORT_THREAT_LEVELS: Optional[str] = None
-    MANUAL_REVIEW_THRESHOLD_CONFIDENCE: Optional[int] = None
-    AUTO_ANALYSIS_DELAY_SECONDS: Optional[int] = None
+    MANUAL_REVIEW_THRESHOLD_CONFIDENCE: int = Field(default=70, ge=0, le=100)
+    AUTO_ANALYSIS_DELAY_SECONDS: int = Field(default=30, ge=0)
     VIRUSTOTAL_API_KEY: Optional[str] = None
     URLVOID_API_KEY: Optional[str] = None
     PHISHTANK_API_KEY: Optional[str] = None
@@ -90,6 +90,15 @@ class Settings(BaseSettings):
     EMAIL_MONITORED_MAILBOXES: Optional[str] = None
     EMAIL_BLOCK_THRESHOLD: Optional[int] = 5
     EMAIL_POLL_INTERVAL_MINUTES: Optional[int] = 15
+
+    # --- v2 phase 0: API, auth & HTTP serving ---------------------------------
+
+    # --- v2 phase 0: reporting pipeline & process roles ------------------------
+
+    # --- v2 phase 0: detection & threat-intel providers ------------------------
+    GOOGLE_WEB_RISK_API_KEY: Optional[str] = None
+
+    # --- v2 phase 0: platform, logging & operations ----------------------------
 
     model_config = {
         "env_file": env_file,

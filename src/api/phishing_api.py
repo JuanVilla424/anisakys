@@ -35,6 +35,7 @@ from src.intelligence import (
     URLVOID_API_KEY,
     PHISHTANK_API_KEY,
     GrinderReportClient,
+    GRINDER0X_API_URL,
     GRINDER_INTEGRATION_ENABLED,
 )
 from src.logger import logger
@@ -72,49 +73,6 @@ def _load_app_version() -> str:
 
 
 APP_VERSION = _load_app_version()
-
-
-class TimeoutError(Exception):
-    """Raised when an operation times out"""
-
-    pass
-
-
-def timeout(seconds=10):
-    """Thread-safe decorator to add timeout to functions"""
-
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            import threading
-            import time
-
-            result = [None]
-            error = [None]
-
-            def target():
-                try:
-                    result[0] = func(*args, **kwargs)
-                except Exception as e:
-                    error[0] = e
-
-            thread = threading.Thread(target=target)
-            thread.daemon = True
-            thread.start()
-            thread.join(timeout=seconds)
-
-            if thread.is_alive():
-                # Thread is still running, it timed out
-                raise TimeoutError(f"Operation timed out after {seconds} seconds")
-
-            if error[0]:
-                raise error[0]
-
-            return result[0]
-
-        return wrapper
-
-    return decorator
 
 
 def rate_limit_key() -> str:

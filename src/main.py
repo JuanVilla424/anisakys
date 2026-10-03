@@ -50,6 +50,7 @@ from functools import wraps
 import signal
 import sys
 
+from src.utils.serialization import serialize_for_json  # noqa: F401 (re-exported)
 from src.config import (
     settings,
     CLOUDFLARE_IP_RANGES,
@@ -86,8 +87,9 @@ from src.models import DynamicBatchConfig, AttachmentConfig, EngineMode
 from src.database import DatabaseManager, db_engine, DATABASE_URL
 from src.reporting import EnhancedAbuseEmailDetector, AbuseReportManager
 from src.monitoring import TakedownMonitor, start_gsb_rescan_job, stop_gsb_rescan_job
+from src.monitoring.takedown import save_offset
 from src.detection import AutoPhishingAnalyzer, PhishingUtils, PhishingScanner
-from src.api import PhishingAPI, TimeoutError, timeout, upgrade_phishing_db
+from src.api import PhishingAPI, upgrade_phishing_db
 from src.intelligence import (
     GrinderReportClient,
     require_api_key,
@@ -132,32 +134,6 @@ if not QUERIES_FILE:
     raise Exception("QUERIES_FILE must be set in your .env file")
 
 OFFSET_FILE = getattr(settings, "OFFSET_FILE")
-
-
-def serialize_for_json(obj):
-    """Convert objects with datetime to JSON-serializable format"""
-    if obj is None:
-        return None
-
-    if hasattr(obj, "__dict__"):
-        # For objects with attributes, convert to dict
-        result = {}
-        for key, value in obj.__dict__.items():
-            if isinstance(value, datetime.datetime):
-                result[key] = value.isoformat()
-            elif isinstance(value, list):
-                result[key] = [serialize_for_json(item) for item in value]
-            else:
-                result[key] = value
-        return result
-    elif isinstance(obj, datetime.datetime):
-        return obj.isoformat()
-    elif isinstance(obj, list):
-        return [serialize_for_json(item) for item in obj]
-    elif isinstance(obj, dict):
-        return {key: serialize_for_json(value) for key, value in obj.items()}
-    else:
-        return obj
 
 
 # Auto-Analysis delay (other configs imported from src.intelligence)
