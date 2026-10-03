@@ -8,6 +8,12 @@ import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import pytest
+
+# Live network: connects to the configured SMTP server and sends a real report.
+# Excluded by default; run with `pytest -m network`.
+pytestmark = pytest.mark.network
+
 from src.config import settings
 import smtplib
 from email.mime.multipart import MIMEMultipart

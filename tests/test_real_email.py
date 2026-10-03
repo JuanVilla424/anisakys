@@ -8,6 +8,12 @@ import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import pytest
+
+# Live network: resolves MX records of real mail providers and captures real websites.
+# Excluded by default; run with `pytest -m network`.
+pytestmark = pytest.mark.network
+
 from src.reporting.abuse_contact_validator import AbuseContactValidator
 from src.screenshot_service import ScreenshotService
 from src.reporting.report_tracker import create_report_record

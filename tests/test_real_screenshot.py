@@ -8,6 +8,12 @@ import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import pytest
+
+# Live network: captures screenshots of real websites.
+# Excluded by default; run with `pytest -m network`.
+pytestmark = pytest.mark.network
+
 from src.screenshot_service import ScreenshotService
 import tempfile
 from pathlib import Path

@@ -1,7 +1,11 @@
+import errno
+import ipaddress
+import socket
 import sys
 import os
 import pytest
 import uuid
+from typing import Any, Optional, Union
 from urllib.parse import urlparse
 import psycopg2
 from alembic import command
@@ -14,6 +18,86 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 # import cycle that otherwise breaks test collection. Safe at runtime (the app
 # boots via src.main which imports these in a working order).
 import src.detection.analyzer  # noqa: F401,E402
+
+# ---------------------------------------------------------------------------
+# Network guard: tests not marked `network` may only talk to this machine.
+# ---------------------------------------------------------------------------
+# Several code paths resolve hostnames or query WHOIS without being mocked;
+# outside the `network` marker they must behave as if offline instead of
+# silently depending on (and hammering) real services. PostgreSQL goes
+# through libpq's own sockets and is not affected.
+
+_REAL_CONNECT = socket.socket.connect
+_REAL_CONNECT_EX = socket.socket.connect_ex
+_REAL_SENDTO = socket.socket.sendto
+_REAL_GETADDRINFO = socket.getaddrinfo
+
+
+class NetworkAccessBlocked(OSError):
+    """A test without the ``network`` marker tried to reach a remote host."""
+
+
+def _host_is_local(host: Union[str, bytes, None]) -> bool:
+    """Tell whether ``host`` designates this machine.
+
+    Args:
+        host: Host name or address as passed to the socket API.
+
+    Returns:
+        True for ``None`` (passive lookups), ``localhost`` and loopback IPs.
+    """
+    if host is None:
+        return True
+    name = host.decode() if isinstance(host, bytes) else str(host)
+    if name in ("", "localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(name.split("%")[0]).is_loopback
+    except ValueError:
+        return False
+
+
+def _blocked(target: Any) -> NetworkAccessBlocked:
+    return NetworkAccessBlocked(
+        errno.ENETUNREACH,
+        f"test attempted network access to {target!r}; mark it @pytest.mark.network",
+    )
+
+
+def _guarded_connect(self: socket.socket, address: Any) -> None:
+    if self.family in (socket.AF_INET, socket.AF_INET6) and not _host_is_local(address[0]):
+        raise _blocked(address)
+    return _REAL_CONNECT(self, address)
+
+
+def _guarded_connect_ex(self: socket.socket, address: Any) -> int:
+    if self.family in (socket.AF_INET, socket.AF_INET6) and not _host_is_local(address[0]):
+        return errno.ENETUNREACH
+    return _REAL_CONNECT_EX(self, address)
+
+
+def _guarded_sendto(self: socket.socket, data: bytes, *args: Any) -> int:
+    address = args[-1]
+    if self.family in (socket.AF_INET, socket.AF_INET6) and not _host_is_local(address[0]):
+        raise _blocked(address)
+    return _REAL_SENDTO(self, data, *args)
+
+
+def _guarded_getaddrinfo(host: Optional[Union[str, bytes]], *args: Any, **kwargs: Any) -> Any:
+    if not _host_is_local(host):
+        raise socket.gaierror(socket.EAI_NONAME, f"DNS lookup of {host!r} blocked in tests")
+    return _REAL_GETADDRINFO(host, *args, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _block_network_unless_marked(request, monkeypatch):
+    """Keep every test that is not marked ``network`` off the internet."""
+    if request.node.get_closest_marker("network") is None:
+        monkeypatch.setattr(socket.socket, "connect", _guarded_connect)
+        monkeypatch.setattr(socket.socket, "connect_ex", _guarded_connect_ex)
+        monkeypatch.setattr(socket.socket, "sendto", _guarded_sendto)
+        monkeypatch.setattr(socket, "getaddrinfo", _guarded_getaddrinfo)
+    yield
 
 
 @pytest.fixture(scope="session")

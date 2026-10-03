@@ -8,6 +8,12 @@ import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import pytest
+
+# Live network: sends a complete report through the configured SMTP server.
+# Excluded by default; run with `pytest -m network`.
+pytestmark = pytest.mark.network
+
 from src.main import AbuseReportManager, Engine, set_testing_mode
 import argparse
 
