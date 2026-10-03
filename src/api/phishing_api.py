@@ -1803,6 +1803,15 @@ class PhishingAPI:
         @self.limiter.limit("20 per minute")
         @require_api_key(scope="read")
         def get_iocs():
+            """List indicators of compromise derived from tracked phishing sites.
+
+            Query params: ``type`` (domain | ip | email), ``limit``, ``offset``.
+            Registrar/hosting abuse-desk mailboxes are reporting contacts, not
+            indicators, so ``type=email`` never exposes them.
+
+            Returns:
+                JSON ``{"items": [...], "total": int, "counts": {...}}``.
+            """
             ioc_type = request.args.get("type", "domain")
             limit = min(int(request.args.get("limit", 100)), 500)
             offset = int(request.args.get("offset", 0))
@@ -1838,32 +1847,11 @@ class PhishingAPI:
                             for i, r in enumerate(rows)
                         ]
                     elif ioc_type == "email":
-                        rows = conn.execute(
-                            text("""
-                            SELECT email, COUNT(*) AS hits
-                            FROM (
-                                SELECT UNNEST(STRING_TO_ARRAY(all_abuse_emails, ', ')) AS email
-                                FROM phishing_sites
-                                WHERE all_abuse_emails IS NOT NULL AND all_abuse_emails != ''
-                            ) sub
-                            GROUP BY email ORDER BY COUNT(*) DESC LIMIT :lim OFFSET :off
-                        """),
-                            {"lim": limit, "off": offset},
-                        ).fetchall()
-                        items = [
-                            {
-                                "id": f"E-{offset+i+1}",
-                                "type": "email",
-                                "value": r[0],
-                                "first_seen": None,
-                                "last_seen": None,
-                                "threat": None,
-                                "source": None,
-                                "hits": int(r[1]),
-                                "tags": [],
-                            }
-                            for i, r in enumerate(rows)
-                        ]
+                        # phishing_sites.all_abuse_emails holds the registrar/hosting
+                        # abuse desks we report *to*; they are contacts, not
+                        # indicators, and must never be shared as IOCs. No source of
+                        # malicious e-mail indicators exists yet, so the list is empty.
+                        items = []
                     else:  # domain (default)
                         rows = conn.execute(
                             text("""
@@ -1896,12 +1884,7 @@ class PhishingAPI:
                     counts_row = conn.execute(text("""
                         SELECT
                             COUNT(DISTINCT SPLIT_PART(SPLIT_PART(url,'://',2),'/',1)),
-                            COUNT(DISTINCT resolved_ip),
-                            (SELECT COUNT(DISTINCT e)
-                             FROM (SELECT UNNEST(STRING_TO_ARRAY(all_abuse_emails,', ')) AS e
-                                   FROM phishing_sites
-                                   WHERE all_abuse_emails IS NOT NULL
-                                   AND all_abuse_emails != '') sub)
+                            COUNT(DISTINCT resolved_ip)
                         FROM phishing_sites
                     """)).fetchone()
 
@@ -1913,7 +1896,7 @@ class PhishingAPI:
                             "counts": {
                                 "domain": int(counts_row[0] or 0),
                                 "ip": int(counts_row[1] or 0),
-                                "email": int(counts_row[2] or 0),
+                                "email": 0,
                             },
                         }
                     ),

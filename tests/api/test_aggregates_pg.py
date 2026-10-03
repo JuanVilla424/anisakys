@@ -142,3 +142,28 @@ def test_campaigns_issue_a_single_query():
     assert resp.status_code == 200
     assert conn.execute.call_count == 1
     assert resp.get_json()["items"][1]["threats"] == [{"url": "u"}]
+
+
+class TestIocsOnPostgres:
+    def test_abuse_desk_mailboxes_are_not_exported_as_email_iocs(self, pg_api):
+        client, db_manager, headers = pg_api
+        tag = uuid.uuid4().hex[:8]
+        _insert_site(db_manager, f"https://ioc-{tag}.example/", ip="198.51.100.77")
+        with db_manager.engine.begin() as conn:
+            conn.execute(
+                text("UPDATE phishing_sites SET all_abuse_emails = :e WHERE url = :u"),
+                {
+                    "e": "abuse@registrar.example, abuse@hoster.example",
+                    "u": f"https://ioc-{tag}.example/",
+                },
+            )
+
+        email = client.get("/api/v1/intelligence/iocs?type=email", headers=headers).get_json()
+        domains = client.get("/api/v1/intelligence/iocs?type=domain&limit=500", headers=headers)
+
+        assert email["items"] == []
+        assert email["counts"]["email"] == 0
+        assert domains.status_code == 200
+        assert f"ioc-{tag}.example" in {i["value"] for i in domains.get_json()["items"]}
+        serialized = domains.get_data(as_text=True) + str(email)
+        assert "abuse@registrar.example" not in serialized
