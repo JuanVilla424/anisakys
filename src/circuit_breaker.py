@@ -7,30 +7,44 @@ Prevents cascading failures when external APIs are down or slow.
 States:
 - CLOSED: Normal operation, requests pass through
 - OPEN: Failure threshold exceeded, requests fail fast
-- HALF_OPEN: Testing if service recovered, limited requests allowed
+- HALF_OPEN: Testing if service recovered; exactly one trial call at a time
 
-Author: BMAD Dev Team
-Date: 2025-11-21
-Version: 1.1.0
+Failures are exceptions raised by the wrapped callable *and* HTTP responses
+that signal an unhealthy upstream (429 and 5xx) when the callable returns a
+``requests.Response`` (or a tuple whose first element is one). Such responses
+are still returned to the caller, so existing status-code handling keeps
+working, but they count towards opening the circuit.
+
+Retries never re-send non-idempotent requests (POST/PUT/PATCH) unless the
+caller explicitly marks the call idempotent, and backoff waits are interrupted
+by a shutdown request.
 """
 
-import time
 import logging
-from enum import Enum
-from typing import Callable, Any, Optional, Dict
-from functools import wraps
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
+from functools import wraps
+from typing import Any, Callable, Dict, Optional
 
-from src.observability.structured_logger import log_with_context, log_error
+import requests
+
 from src.observability.metrics import (
-    increment_counter,
-    set_gauge,
-    observe_histogram,
     METRIC_API_CALLS_TOTAL,
     METRIC_API_LATENCY_SECONDS,
     METRIC_CIRCUIT_BREAKER_STATE,
+    increment_counter,
+    observe_histogram,
+    set_gauge,
 )
+from src.observability.structured_logger import log_with_context
+from src.shutdown import wait_for_shutdown
+from src.utils.redaction import redact_secrets
+
+# HTTP methods whose repetition may duplicate a side effect upstream.
+NON_IDEMPOTENT_METHODS = frozenset({"POST", "PUT", "PATCH"})
 
 
 class CircuitState(Enum):
@@ -43,17 +57,29 @@ class CircuitState(Enum):
 
 @dataclass
 class CircuitBreakerConfig:
-    """Configuration for circuit breaker."""
+    """Configuration for circuit breaker.
 
-    failure_threshold: int = 5  # Failures before opening
-    recovery_timeout: int = 60  # Seconds before trying half-open
-    success_threshold: int = 2  # Successes in half-open before closing
-    timeout: float = 10.0  # Request timeout in seconds
+    Attributes:
+        failure_threshold: Consecutive failures (in CLOSED) before opening.
+        recovery_timeout: Seconds to stay OPEN before admitting a trial call.
+        success_threshold: Successful trial calls in HALF_OPEN before closing.
+        timeout: Per-request timeout in seconds. The breaker cannot interrupt
+            an arbitrary callable, so integrations must pass this value as the
+            ``timeout`` of the HTTP call they wrap.
+        max_retries: Total attempts per call (1 disables retries).
+        retry_backoff_base: Base seconds for exponential backoff.
+        retry_backoff_max: Upper bound for a single backoff wait.
+    """
+
+    failure_threshold: int = 5
+    recovery_timeout: int = 60
+    success_threshold: int = 2
+    timeout: float = 10.0
 
     # Retry configuration
     max_retries: int = 3
-    retry_backoff_base: float = 1.0  # Base seconds for exponential backoff
-    retry_backoff_max: float = 30.0  # Max backoff time
+    retry_backoff_base: float = 1.0
+    retry_backoff_max: float = 30.0
 
 
 @dataclass
@@ -78,16 +104,68 @@ class CircuitBreakerOpenError(Exception):
     pass
 
 
+class UnhealthyResponseError(requests.HTTPError):
+    """Marker for a 429/5xx response that was recorded as a breaker failure."""
+
+
+def _extract_response(result: Any) -> Optional[requests.Response]:
+    """Return the ``requests.Response`` carried by a call result, if any.
+
+    Args:
+        result: Whatever the wrapped callable returned.
+
+    Returns:
+        The response when ``result`` is one, or is a tuple starting with one
+        (the ``(response, elapsed_ms)`` shape used by the integrations).
+    """
+    if isinstance(result, requests.Response):
+        return result
+    if isinstance(result, tuple) and result and isinstance(result[0], requests.Response):
+        return result[0]
+    return None
+
+
+def _is_unhealthy_status(status_code: int) -> bool:
+    """Tell whether an HTTP status means the upstream is unhealthy.
+
+    Args:
+        status_code: HTTP status code.
+
+    Returns:
+        ``True`` for 429 (rate limited) and every 5xx.
+    """
+    return status_code == 429 or status_code >= 500
+
+
+def _request_method(obj: Any) -> Optional[str]:
+    """Best-effort HTTP method of the request behind a response/exception.
+
+    ``requests`` attaches the prepared request to the exceptions raised by its
+    transport adapter (connection errors, timeouts, TLS errors) and to every
+    response, so the method is known for all HTTP failures.
+
+    Args:
+        obj: A ``requests.Response`` or a ``requests.RequestException``.
+
+    Returns:
+        Upper-case method name, or ``None`` when it cannot be determined.
+    """
+    request = getattr(obj, "request", None)
+    method = getattr(request, "method", None)
+    return method.upper() if isinstance(method, str) else None
+
+
 class CircuitBreaker:
     """
-    Circuit Breaker implementation for API calls.
+    Thread-safe circuit breaker for API calls.
 
     Usage:
         cb = CircuitBreaker("MyAPI", config)
+        response = cb.call(session.get, url, timeout=cb.config.timeout)
 
-        @cb.call
+        @cb
         def my_api_call():
-            return requests.get("https://api.example.com")
+            return requests.get("https://api.example.com", timeout=10)
     """
 
     def __init__(
@@ -96,14 +174,23 @@ class CircuitBreaker:
         config: Optional[CircuitBreakerConfig] = None,
         logger: Optional[logging.Logger] = None,
     ):
+        """Create a breaker.
+
+        Args:
+            name: Name used in logs and metrics (usually the API name).
+            config: Thresholds/retry settings; defaults to ``CircuitBreakerConfig()``.
+            logger: Logger to use; defaults to this module's logger.
+        """
         self.name = name
         self.config = config or CircuitBreakerConfig()
         self.logger = logger or logging.getLogger(__name__)
 
+        self._lock = threading.RLock()
         self._state = CircuitState.CLOSED
         self._failure_count = 0
         self._success_count = 0
         self._last_failure_time: Optional[float] = None
+        self._half_open_trial_in_flight = False
         self._stats = CircuitBreakerStats()
 
         log_with_context(
@@ -126,8 +213,12 @@ class CircuitBreaker:
         """Get circuit breaker statistics."""
         return self._stats
 
-    def _transition_to(self, new_state: CircuitState):
-        """Transition to a new state."""
+    def _transition_to(self, new_state: CircuitState) -> None:
+        """Transition to a new state. Caller must hold ``self._lock``.
+
+        Args:
+            new_state: Target state.
+        """
         if new_state == self._state:
             return
 
@@ -167,8 +258,8 @@ class CircuitBreaker:
         elapsed = time.time() - self._last_failure_time
         return elapsed >= self.config.recovery_timeout
 
-    def _record_success(self):
-        """Record a successful request."""
+    def _record_success(self) -> None:
+        """Record a successful request. Caller must hold ``self._lock``."""
         self._stats.total_requests += 1
         self._stats.successful_requests += 1
 
@@ -181,24 +272,30 @@ class CircuitBreaker:
             # Reset failure count on success
             self._failure_count = 0
 
-    def _record_failure(self, error: Exception):
-        """Record a failed request."""
+    def _record_failure(self, error: Exception) -> None:
+        """Record a failed request. Caller must hold ``self._lock``.
+
+        Args:
+            error: The exception (or synthetic HTTP error) that failed the call.
+        """
         self._stats.total_requests += 1
         self._stats.failed_requests += 1
         self._stats.last_failure_time = datetime.now()
         self._last_failure_time = time.time()
         self._failure_count += 1
 
-        log_error(
+        # Exception text from requests embeds the request URL, which may carry
+        # a credential in its query string: never log it unredacted.
+        log_with_context(
             self.logger,
-            error,
-            {
-                "circuit_breaker": self.name,
-                "state": self._state.value,
-                "failure_count": self._failure_count,
-                "failure_threshold": self.config.failure_threshold,
-                "event_type": "circuit_breaker_failure",
-            },
+            logging.ERROR,
+            f"Error occurred: {redact_secrets(error)}",
+            error_type=type(error).__name__,
+            circuit_breaker=self.name,
+            state=self._state.value,
+            failure_count=self._failure_count,
+            failure_threshold=self.config.failure_threshold,
+            event_type="circuit_breaker_failure",
         )
 
         if self._state == CircuitState.HALF_OPEN:
@@ -208,92 +305,172 @@ class CircuitBreaker:
             if self._failure_count >= self.config.failure_threshold:
                 self._transition_to(CircuitState.OPEN)
 
-    def call(self, func: Callable, *args, **kwargs) -> Any:
+    def _admit(self) -> bool:
+        """Decide whether a call may proceed.
+
+        Returns:
+            ``True`` when the admitted call is the single HALF_OPEN trial.
+
+        Raises:
+            CircuitBreakerOpenError: When the circuit is OPEN, or HALF_OPEN with
+                its trial call already in flight.
+        """
+        with self._lock:
+            if self._should_attempt_reset():
+                self._transition_to(CircuitState.HALF_OPEN)
+
+            if self._state == CircuitState.OPEN:
+                self._stats.rejected_requests += 1
+                log_with_context(
+                    self.logger,
+                    logging.WARNING,
+                    f"Circuit breaker OPEN: rejecting request to {self.name}",
+                    circuit_breaker=self.name,
+                    failure_count=self._failure_count,
+                    seconds_until_retry=int(
+                        self.config.recovery_timeout
+                        - (time.time() - (self._last_failure_time or 0))
+                    ),
+                    event_type="circuit_breaker_rejected",
+                )
+                raise CircuitBreakerOpenError(
+                    f"Circuit breaker '{self.name}' is OPEN. "
+                    f"Service unavailable after {self._failure_count} failures."
+                )
+
+            if self._state == CircuitState.HALF_OPEN:
+                if self._half_open_trial_in_flight:
+                    self._stats.rejected_requests += 1
+                    raise CircuitBreakerOpenError(
+                        f"Circuit breaker '{self.name}' is HALF_OPEN with a trial call "
+                        "already in flight."
+                    )
+                self._half_open_trial_in_flight = True
+                return True
+            return False
+
+    @staticmethod
+    def _may_retry(idempotent: Optional[bool], method: Optional[str]) -> bool:
+        """Tell whether a failed attempt may be repeated.
+
+        Args:
+            idempotent: Explicit caller declaration; wins when not ``None``.
+            method: HTTP method inferred from the failed request, if known.
+
+        Returns:
+            ``False`` for POST/PUT/PATCH unless declared idempotent; ``True``
+            for other methods and for callables that are not HTTP requests.
+        """
+        if idempotent is not None:
+            return idempotent
+        if method is None:
+            return True
+        return method not in NON_IDEMPOTENT_METHODS
+
+    def _backoff(self, attempt: int, error_text: str) -> bool:
+        """Sleep before the next attempt, waking early on shutdown.
+
+        Args:
+            attempt: Zero-based index of the attempt that just failed.
+            error_text: Already-redacted description of the failure.
+
+        Returns:
+            ``True`` if a shutdown was requested and retrying must stop.
+        """
+        backoff = min(self.config.retry_backoff_base * (2**attempt), self.config.retry_backoff_max)
+        log_with_context(
+            self.logger,
+            logging.WARNING,
+            f"Circuit breaker retry {attempt + 1}/{self.config.max_retries}",
+            circuit_breaker=self.name,
+            attempt=attempt + 1,
+            max_retries=self.config.max_retries,
+            backoff_seconds=backoff,
+            error=error_text,
+            event_type="circuit_breaker_retry",
+        )
+        return wait_for_shutdown(backoff)
+
+    def call(
+        self,
+        func: Callable[..., Any],
+        *args: Any,
+        idempotent: Optional[bool] = None,
+        **kwargs: Any,
+    ) -> Any:
         """
         Execute a function with circuit breaker protection.
 
         Args:
-            func: Function to execute
-            *args: Positional arguments for function
-            **kwargs: Keyword arguments for function
+            func: Function to execute.
+            *args: Positional arguments for function.
+            idempotent: Whether repeating the call is safe. ``None`` (default)
+                infers it from the HTTP method of the failed request, so
+                POST/PUT/PATCH are never retried; pass ``True`` for read-only
+                lookups sent as POST, ``False`` to disable retries entirely.
+                Consumed by the breaker, never forwarded to ``func``.
+            **kwargs: Keyword arguments for function.
 
         Returns:
-            Result from function
+            Result from function. A 429/5xx ``requests.Response`` result is
+            returned as well, after being recorded as a failure.
 
         Raises:
-            CircuitBreakerOpenError: If circuit is open
-            Exception: Any exception from the function
+            CircuitBreakerOpenError: If the circuit is open (or half-open with
+                a trial already running).
+            Exception: The last exception raised by the function.
         """
-        # Check if we should attempt reset
-        if self._should_attempt_reset():
-            self._transition_to(CircuitState.HALF_OPEN)
+        is_trial = self._admit()
+        # No retries for the half-open trial: fail fast and reopen.
+        max_attempts = 1 if is_trial else max(1, self.config.max_retries)
+        call_start = time.time()
+        try:
+            attempt = 0
+            while True:
+                last_attempt = attempt >= max_attempts - 1
+                try:
+                    result = func(*args, **kwargs)
+                except Exception as e:
+                    if (
+                        not last_attempt
+                        and self._may_retry(idempotent, _request_method(e))
+                        and not self._backoff(attempt, redact_secrets(e))
+                    ):
+                        attempt += 1
+                        continue
+                    with self._lock:
+                        self._stats.last_call_ms = round((time.time() - call_start) * 1000, 1)
+                        self._record_failure(e)
+                    raise
 
-        # Reject if circuit is open
-        if self._state == CircuitState.OPEN:
-            self._stats.rejected_requests += 1
-            log_with_context(
-                self.logger,
-                logging.WARNING,
-                f"Circuit breaker OPEN: rejecting request to {self.name}",
-                circuit_breaker=self.name,
-                failure_count=self._failure_count,
-                seconds_until_retry=int(
-                    self.config.recovery_timeout - (time.time() - (self._last_failure_time or 0))
-                ),
-                event_type="circuit_breaker_rejected",
-            )
-            raise CircuitBreakerOpenError(
-                f"Circuit breaker '{self.name}' is OPEN. "
-                f"Service unavailable after {self._failure_count} failures."
-            )
+                response = _extract_response(result)
+                if response is not None and _is_unhealthy_status(response.status_code):
+                    failure = UnhealthyResponseError(
+                        f"{self.name} answered HTTP {response.status_code}"
+                    )
+                    if (
+                        not last_attempt
+                        and self._may_retry(idempotent, _request_method(response))
+                        and not self._backoff(attempt, str(failure))
+                    ):
+                        attempt += 1
+                        continue
+                    with self._lock:
+                        self._stats.last_call_ms = round((time.time() - call_start) * 1000, 1)
+                        self._record_failure(failure)
+                    return result
 
-        # Attempt the call with retries
-        _call_start = time.time()
-        last_exception = None
-        for attempt in range(self.config.max_retries):
-            try:
-                result = func(*args, **kwargs)
-                elapsed = time.time() - _call_start
-                self._record_success()
-                self._stats.last_call_ms = round(elapsed * 1000, 1)
+                elapsed = time.time() - call_start
+                with self._lock:
+                    self._record_success()
+                    self._stats.last_call_ms = round(elapsed * 1000, 1)
                 observe_histogram(METRIC_API_LATENCY_SECONDS, elapsed, api_name=self.name)
                 increment_counter(METRIC_API_CALLS_TOTAL, api_name=self.name)
                 return result
-
-            except Exception as e:
-                last_exception = e
-
-                # Don't retry if we're in half-open (fail fast)
-                if self._state == CircuitState.HALF_OPEN:
-                    self._stats.last_call_ms = round((time.time() - _call_start) * 1000, 1)
-                    self._record_failure(e)
-                    raise
-
-                # Calculate backoff
-                if attempt < self.config.max_retries - 1:
-                    backoff = min(
-                        self.config.retry_backoff_base * (2**attempt), self.config.retry_backoff_max
-                    )
-
-                    log_with_context(
-                        self.logger,
-                        logging.WARNING,
-                        f"Circuit breaker retry {attempt + 1}/{self.config.max_retries}",
-                        circuit_breaker=self.name,
-                        attempt=attempt + 1,
-                        max_retries=self.config.max_retries,
-                        backoff_seconds=backoff,
-                        error=str(e),
-                        event_type="circuit_breaker_retry",
-                    )
-
-                    time.sleep(backoff)
-
-        # All retries exhausted
-        if last_exception:
-            self._stats.last_call_ms = round((time.time() - _call_start) * 1000, 1)
-            self._record_failure(last_exception)
-            raise last_exception
+        finally:
+            if is_trial:
+                with self._lock:
+                    self._half_open_trial_in_flight = False
 
     def __call__(self, func: Callable) -> Callable:
         """
@@ -311,18 +488,20 @@ class CircuitBreaker:
 
         return wrapper
 
-    def reset(self):
+    def reset(self) -> None:
         """Manually reset circuit breaker to CLOSED state."""
-        log_with_context(
-            self.logger,
-            logging.INFO,
-            f"Circuit breaker manually reset: {self.name}",
-            circuit_breaker=self.name,
-            old_state=self._state.value,
-            event_type="circuit_breaker_manual_reset",
-        )
+        with self._lock:
+            log_with_context(
+                self.logger,
+                logging.INFO,
+                f"Circuit breaker manually reset: {self.name}",
+                circuit_breaker=self.name,
+                old_state=self._state.value,
+                event_type="circuit_breaker_manual_reset",
+            )
 
-        self._transition_to(CircuitState.CLOSED)
-        self._failure_count = 0
-        self._success_count = 0
-        self._last_failure_time = None
+            self._transition_to(CircuitState.CLOSED)
+            self._failure_count = 0
+            self._success_count = 0
+            self._last_failure_time = None
+            self._half_open_trial_in_flight = False
