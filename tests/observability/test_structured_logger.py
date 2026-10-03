@@ -18,6 +18,8 @@ from datetime import datetime
 from io import StringIO
 
 
+import pytest
+
 from src.observability.structured_logger import (
     StructuredFormatter,
     set_correlation_id,
@@ -27,6 +29,7 @@ from src.observability.structured_logger import (
     log_detection,
     log_api_call,
     log_error,
+    reset_logging,
 )
 
 
@@ -342,6 +345,15 @@ class TestCorrelationID:
 class TestSetupStructuredLogging:
     """Tests for setup_structured_logging function."""
 
+    @pytest.fixture(autouse=True)
+    def _restore_logging(self):
+        root = logging.getLogger()
+        level = root.level
+        reset_logging()
+        yield
+        reset_logging()
+        root.setLevel(level)
+
     def test_setup_basic_configuration(self, tmp_path):
         """Test basic logging setup."""
         log_file = tmp_path / "test.log"
@@ -350,7 +362,8 @@ class TestSetupStructuredLogging:
 
         assert logger is not None
         assert logger.level == logging.DEBUG
-        assert len(logger.handlers) == 2  # Console + File
+        managed = [h for h in logger.handlers if getattr(h, "_anisakys_managed", False)]
+        assert len(managed) == 2  # Console + File
 
     def test_log_file_creation(self, tmp_path):
         """Test that log file is created."""

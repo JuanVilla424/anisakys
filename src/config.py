@@ -112,6 +112,14 @@ class Settings(BaseSettings):
     GOOGLE_WEB_RISK_API_KEY: Optional[str] = None
 
     # --- v2 phase 0: platform, logging & operations ----------------------------
+    # Logging (src/observability/structured_logger.py); LOG_LEVEL above sets the
+    # level. Each process writes its own <LOG_DIR>/anisakys-<role>-<pid>.log; an
+    # empty LOG_DIR disables the file (console only, e.g. in containers).
+    LOG_DIR: Optional[str] = None
+    LOG_PROCESS_NAME: Optional[str] = None
+    LOG_MAX_BYTES: int = Field(default=20 * 1024 * 1024, gt=0)
+    LOG_BACKUP_COUNT: int = Field(default=5, ge=0)
+    LOG_CONSOLE_FORMAT: str = Field(default="text", pattern="^(text|json)$")
 
     model_config = {
         "env_file": env_file,
