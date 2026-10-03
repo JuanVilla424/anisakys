@@ -39,7 +39,7 @@ from src.observability.metrics import (
     METRIC_REPORTS_SENT_TOTAL,
     METRIC_SMTP_RATE_LIMITED,
 )
-from src.reporting.smtp_rate_limiter import SmtpRateLimiter
+from src.reporting.smtp_rate_limiter import DatabaseSmtpRateLimiter
 from src.models import AttachmentConfig
 from src.reporting.abuse_contact_validator import AbuseContactValidator
 from src.screenshot_client import get_screenshot_service
@@ -78,7 +78,10 @@ class AbuseReportManager:
             screenshots_dir=settings.SCREENSHOTS_DIR, timeout=timeout
         )
         self.report_tracker = ReportTracker(db_manager.engine)
-        self._smtp_rate_limiter = SmtpRateLimiter(settings.SMTP_RATE_LIMIT_PER_HOUR)
+        # Shared through the database: the cap holds across every process.
+        self._smtp_rate_limiter = DatabaseSmtpRateLimiter(
+            db_manager.engine, settings.SMTP_RATE_LIMIT_PER_HOUR
+        )
 
         if cc_emails is None:
             default_cc = (
