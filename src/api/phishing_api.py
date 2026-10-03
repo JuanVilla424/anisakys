@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import validators
-from flask import Flask, current_app, jsonify, request
+from flask import Flask, Response, current_app, jsonify, request
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 import logging as flask_logging
@@ -28,6 +28,13 @@ from src.config import settings
 from sqlalchemy import text
 from src.database import db_engine
 from src.auth import require_api_key, _hash_key
+from src.api.params import (
+    InvalidParameterError,
+    bool_arg,
+    enum_arg,
+    int_arg,
+    str_arg,
+)
 from src.intelligence import (
     MultiAPIValidator,
     GrinderReportClient,
@@ -123,6 +130,44 @@ def parse_recipients(raw: Optional[str]) -> List[str]:
     if not isinstance(decoded, list):
         return []
     return [item.strip() for item in decoded if isinstance(item, str) and item.strip()]
+
+
+# Accepted values of enum-like query parameters.
+SITE_STATUSES = frozenset({"up", "down"})
+PRIORITIES = frozenset({"critical", "high", "medium", "low"})
+REPORT_STATUSES = frozenset(
+    {"sent", "acknowledged", "in_progress", "resolved", "rejected", "timeout", "bounced", "pending"}
+)
+IOC_TYPES = frozenset({"domain", "ip", "email"})
+
+# Largest accepted pagination offset (deep OFFSET scans are never legitimate here).
+MAX_OFFSET = 1_000_000
+
+
+def _offset_arg() -> int:
+    """Read the ``offset`` pagination parameter of the current request.
+
+    Returns:
+        The offset (0 when absent).
+
+    Raises:
+        InvalidParameterError: If it is not an integer in ``[0, MAX_OFFSET]``.
+    """
+    return int_arg(
+        request.args, "offset", default=0, minimum=0, maximum=MAX_OFFSET, clamp_to_maximum=False
+    )
+
+
+def _invalid_parameter_response(exc: InvalidParameterError) -> Tuple[Response, int]:
+    """Turn a query-parameter validation error into a 400 response.
+
+    Args:
+        exc: The validation error raised by a ``src.api.params`` helper.
+
+    Returns:
+        A ``(response, 400)`` tuple naming the offending parameter.
+    """
+    return jsonify({"error": exc.message, "parameter": exc.parameter}), 400
 
 
 # SQL expression (lower-cased, trimmed) matched against each focus type of
@@ -252,6 +297,7 @@ class PhishingAPI:
             storage_uri=(getattr(settings, "RATELIMIT_STORAGE_URL", None) or "memory://"),
         )
 
+        self.app.register_error_handler(InvalidParameterError, _invalid_parameter_response)
         self.setup_routes()
 
         # Test Grinder connection on startup
@@ -999,13 +1045,13 @@ class PhishingAPI:
         @require_api_key(scope="read")
         def get_sites():
             """List phishing sites with optional filters and pagination."""
+            limit = int_arg(request.args, "limit", default=100, maximum=500)
+            offset = _offset_arg()
+            status_filter = enum_arg(request.args, "status", SITE_STATUSES)
+            priority_filter = enum_arg(request.args, "priority", PRIORITIES)
+            source_filter = str_arg(request.args, "source", max_length=64)
+            search = str_arg(request.args, "search") or ""
             try:
-                limit = min(int(request.args.get("limit", 100)), 500)
-                offset = int(request.args.get("offset", 0))
-                status_filter = request.args.get("status")
-                priority_filter = request.args.get("priority")
-                source_filter = request.args.get("source")
-                search = request.args.get("search", "").strip()
 
                 where_clauses = []
                 params: Dict[str, Any] = {"limit": limit, "offset": offset}
@@ -1083,10 +1129,10 @@ class PhishingAPI:
         @require_api_key(scope="read")
         def get_reports():
             """List abuse reports with threat context from phishing_sites."""
+            limit = int_arg(request.args, "limit", default=100, maximum=500)
+            offset = _offset_arg()
+            status_filter = enum_arg(request.args, "status", REPORT_STATUSES)
             try:
-                limit = min(int(request.args.get("limit", 100)), 500)
-                offset = int(request.args.get("offset", 0))
-                status_filter = request.args.get("status")
 
                 where_sql = "WHERE ar.status = :status" if status_filter else ""
                 params: Dict[str, Any] = {"limit": limit, "offset": offset}
@@ -1148,20 +1194,13 @@ class PhishingAPI:
             try:
                 data = request.get_json() or {}
                 new_status = data.get("status")
-                valid = {
-                    "sent",
-                    "acknowledged",
-                    "in_progress",
-                    "resolved",
-                    "rejected",
-                    "timeout",
-                    "bounced",
-                    "pending",
-                }
-                if not new_status or new_status not in valid:
+                if not new_status or new_status not in REPORT_STATUSES:
                     return (
                         jsonify(
-                            {"error": f"Invalid status. Must be one of: {', '.join(sorted(valid))}"}
+                            {
+                                "error": "Invalid status. Must be one of: "
+                                + ", ".join(sorted(REPORT_STATUSES))
+                            }
                         ),
                         400,
                     )
@@ -1355,8 +1394,8 @@ class PhishingAPI:
         @require_api_key(scope="read")
         def get_activity():
             """Recent platform activity: new detections, reports sent, GSB changes, takedowns."""
+            limit = int_arg(request.args, "limit", default=20, maximum=100)
             try:
-                limit = min(int(request.args.get("limit", 20)), 100)
 
                 with self.db_manager.engine.begin() as conn:
                     # Recent detections (new sites)
@@ -1597,9 +1636,9 @@ class PhishingAPI:
         @self.limiter.limit("20 per minute")
         @require_api_key(scope="read")
         def get_thread_results(thread_id: int):
+            limit = int_arg(request.args, "limit", default=50, maximum=1000)
+            offset = _offset_arg()
             try:
-                limit = min(int(request.args.get("limit", 50)), 1000)
-                offset = int(request.args.get("offset", 0))
                 own_domain = (getattr(settings, "GOOGLE_WORKSPACE_DOMAIN", None) or "").lower()
                 with self.db_manager.engine.begin() as conn:
                     total = (
@@ -1812,9 +1851,9 @@ class PhishingAPI:
             Returns:
                 JSON ``{"items": [...], "total": int, "counts": {...}}``.
             """
-            ioc_type = request.args.get("type", "domain")
-            limit = min(int(request.args.get("limit", 100)), 500)
-            offset = int(request.args.get("offset", 0))
+            ioc_type = enum_arg(request.args, "type", IOC_TYPES, default="domain")
+            limit = int_arg(request.args, "limit", default=100, maximum=500)
+            offset = _offset_arg()
             try:
                 with self.db_manager.engine.begin() as conn:
                     if ioc_type == "ip":
@@ -1933,12 +1972,12 @@ class PhishingAPI:
             Returns:
                 JSON ``{"nodes": [...], "edges": [...], "meta": {...}}``.
             """
+            limit = int_arg(request.args, "limit", default=200, minimum=1, maximum=500)
             try:
-                limit = min(int(request.args.get("limit", 200)), 500)
-                try:
-                    focus = parse_graph_focus(request.args.get("focus"))
-                except ValueError as exc:
-                    return jsonify({"error": str(exc)}), 400
+                focus = parse_graph_focus(request.args.get("focus"))
+            except ValueError as exc:
+                raise InvalidParameterError("focus", str(exc)) from None
+            try:
 
                 # The focus filter runs in SQL, before LIMIT, so a focused node
                 # is found even when it is not among the most recent rows.
@@ -2538,7 +2577,10 @@ class PhishingAPI:
             for field, cast in allowed.items():
                 if field in data:
                     updates.append(f"{field} = :{field}")
-                    params[field] = cast(data[field]) if data[field] is not None else None
+                    try:
+                        params[field] = cast(data[field]) if data[field] is not None else None
+                    except (TypeError, ValueError):
+                        return jsonify({"error": f"'{field}' must be of type {cast.__name__}"}), 400
             if not updates:
                 return jsonify({"error": "No valid fields to update"}), 400
             try:
@@ -2591,8 +2633,8 @@ class PhishingAPI:
         @self.limiter.limit("20 per minute")
         @require_api_key(scope="read")
         def get_thread_executions(thread_id: int):
-            limit = min(int(request.args.get("limit", 20)), 100)
-            offset = int(request.args.get("offset", 0))
+            limit = int_arg(request.args, "limit", default=20, maximum=100)
+            offset = _offset_arg()
             try:
                 with self.db_manager.engine.begin() as conn:
                     exists = conn.execute(
@@ -2746,10 +2788,10 @@ class PhishingAPI:
         def list_email_senders():
             from src.intelligence.email_reputation import SenderReputationTracker
 
-            blocked_only = request.args.get("blocked_only", "false").lower() == "true"
-            whitelisted_only = request.args.get("whitelisted_only", "false").lower() == "true"
-            limit = min(int(request.args.get("limit", 50)), 200)
-            offset = int(request.args.get("offset", 0))
+            blocked_only = bool_arg(request.args, "blocked_only")
+            whitelisted_only = bool_arg(request.args, "whitelisted_only")
+            limit = int_arg(request.args, "limit", default=50, maximum=200)
+            offset = _offset_arg()
             try:
                 tracker = SenderReputationTracker()
                 with self.db_manager.engine.begin() as conn:
@@ -2880,9 +2922,9 @@ class PhishingAPI:
         def list_email_domains():
             from src.intelligence.email_reputation import SenderReputationTracker
 
-            blocked_only = request.args.get("blocked_only", "false").lower() == "true"
-            limit = min(int(request.args.get("limit", 50)), 200)
-            offset = int(request.args.get("offset", 0))
+            blocked_only = bool_arg(request.args, "blocked_only")
+            limit = int_arg(request.args, "limit", default=50, maximum=200)
+            offset = _offset_arg()
             try:
                 tracker = SenderReputationTracker()
                 with self.db_manager.engine.begin() as conn:
