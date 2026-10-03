@@ -101,6 +101,10 @@ class Settings(BaseSettings):
     # Static bearer token for Prometheus scrapers on /metrics (an API key with the
     # "metrics" or "read" scope also works). Unset = API keys only.
     METRICS_TOKEN: Optional[SecretStr] = None
+    # Mailboxes the API may create e-mail monitor threads for (comma-separated;
+    # "@domain" allows a whole domain, incl. domain-wide monitoring).
+    # EMAIL_MONITORED_MAILBOXES and EMAIL_ABUSE_MAILBOX are allowed implicitly.
+    EMAIL_MONITOR_ALLOWED_MAILBOXES: Optional[str] = None
 
     # --- v2 phase 0: reporting pipeline & process roles ------------------------
 

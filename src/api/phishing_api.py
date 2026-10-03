@@ -30,7 +30,8 @@ import logging as flask_logging
 from src.config import settings
 from sqlalchemy import text
 from src.database import db_engine
-from src.auth import require_api_key, require_metrics_access, _hash_key
+from src.auth import has_scope, require_api_key, require_metrics_access, _hash_key
+from src.api.mailbox_policy import is_domain_allowed, is_mailbox_allowed
 from src.api.errors import (
     current_request_id,
     install_request_ids,
@@ -259,6 +260,52 @@ def campaign_id(kind: str, key: str) -> str:
     """
     digest = hashlib.sha256(f"{kind}:{key}".encode("utf-8")).hexdigest()
     return f"CAMP-{digest[:10].upper()}"
+
+
+def email_monitor_target_allowed(details: Any) -> bool:
+    """Tell whether an e-mail monitor thread targets an allowlisted mailbox/domain.
+
+    Args:
+        details: The thread's ``details`` (JSON text or already-decoded dict).
+
+    Returns:
+        True when its ``domain`` (domain-wide mode) or ``target_mailbox`` is
+        allowlisted; False for anything else, including malformed details.
+    """
+    if isinstance(details, str):
+        try:
+            details = json.loads(details)
+        except ValueError:
+            return False
+    if not isinstance(details, dict):
+        return False
+    domain, mailbox = details.get("domain"), details.get("target_mailbox")
+    if domain:
+        return isinstance(domain, str) and is_domain_allowed(domain)
+    if mailbox:
+        return isinstance(mailbox, str) and is_mailbox_allowed(mailbox)
+    return False
+
+
+def _thread_access_denied(thread_type: Any, details: Any) -> Optional[Tuple[Response, int]]:
+    """Enforce per-thread-type scopes inside routes that accept several scopes.
+
+    Args:
+        thread_type: ``analysis_threads.thread_type`` of the target thread.
+        details: Its ``details`` column.
+
+    Returns:
+        A 403 response when the caller may not act on the thread, else None.
+    """
+    if thread_type == "email_monitor":
+        if not has_scope("email_admin"):
+            return jsonify({"error": "Insufficient scope. Required: email_admin"}), 403
+        if not email_monitor_target_allowed(details):
+            return jsonify({"error": "Mailbox is not on the e-mail monitoring allowlist"}), 403
+        return None
+    if not has_scope("write"):
+        return jsonify({"error": "Insufficient scope. Required: write"}), 403
+    return None
 
 
 MEMORY_STORAGE_URI = "memory://"
@@ -2552,8 +2599,20 @@ class PhishingAPI:
         # ── POST /api/v1/threads/<id>/search ──────────────────────────────────
         @self.app.route("/api/v1/threads/<int:thread_id>/search", methods=["POST"])
         @self.limiter.limit("5 per minute")
-        @require_api_key(scope="write")
+        @require_api_key(scope=("write", "email_admin"))
         def trigger_thread_search(thread_id: int):
+            """Trigger an on-demand search/scan for a thread.
+
+            E-mail monitor threads read a mailbox through domain-wide delegation,
+            so they need the ``email_admin`` scope and an allowlisted mailbox;
+            every other thread type needs ``write``.
+
+            Args:
+                thread_id: Thread to search for.
+
+            Returns:
+                202 when triggered; 403/404/400/503 otherwise.
+            """
             try:
                 with self.db_manager.engine.begin() as conn:
                     row = conn.execute(
@@ -2566,6 +2625,9 @@ class PhishingAPI:
                 if not row:
                     return jsonify({"error": "Thread not found"}), 404
                 thread_type, s3_key, details = row[0], row[1], row[2]
+                denied = _thread_access_denied(thread_type, details)
+                if denied is not None:
+                    return denied
                 if thread_type == "image_tracking":
                     if not self.scheduler:
                         return (
@@ -2630,8 +2692,19 @@ class PhishingAPI:
         # ── PATCH /api/v1/threads/<id> ─────────────────────────────────────────
         @self.app.route("/api/v1/threads/<int:thread_id>", methods=["PATCH"])
         @self.limiter.limit("20 per minute")
-        @require_api_key(scope="write")
+        @require_api_key(scope=("write", "email_admin"))
         def update_thread(thread_id: int):
+            """Update a thread's label, status or search interval.
+
+            E-mail monitor threads need ``email_admin`` (and an allowlisted
+            mailbox); every other thread type needs ``write``.
+
+            Args:
+                thread_id: Thread to update.
+
+            Returns:
+                200 when updated; 400/403/404 otherwise.
+            """
             data = request.get_json(silent=True) or {}
             allowed = {"label": str, "status": str, "search_interval_hours": int}
             updates, params = [], {"id": thread_id}
@@ -2646,6 +2719,15 @@ class PhishingAPI:
                 return jsonify({"error": "No valid fields to update"}), 400
             try:
                 with self.db_manager.engine.begin() as conn:
+                    thread = conn.execute(
+                        text("SELECT thread_type, details FROM analysis_threads WHERE id = :id"),
+                        {"id": thread_id},
+                    ).fetchone()
+                    if not thread:
+                        return jsonify({"error": "Thread not found"}), 404
+                    denied = _thread_access_denied(thread[0], thread[1])
+                    if denied is not None:
+                        return denied
                     result = conn.execute(
                         text(f"UPDATE analysis_threads SET {', '.join(updates)} WHERE id = :id"),
                         params,
@@ -2738,8 +2820,18 @@ class PhishingAPI:
         # ── POST /api/v1/threads/email-monitor ───────────────────────────────
         @self.app.route("/api/v1/threads/email-monitor", methods=["POST"])
         @self.limiter.limit("10 per minute")
-        @require_api_key(scope="write")
+        @require_api_key(scope="email_admin")
         def create_email_monitor_thread():
+            """Create an e-mail threat monitor for a mailbox or a whole domain.
+
+            The monitor reads mail through a service account with domain-wide
+            delegation, so it needs the ``email_admin`` scope and only accepts
+            mailboxes/domains on the allowlist (see ``src.api.mailbox_policy``).
+
+            Returns:
+                201 with the thread ID; 400 on invalid input, 403 when the
+                mailbox or domain is not allowlisted.
+            """
             data = request.get_json(silent=True) or {}
             label = data.get("label")
             target_mailbox = data.get("target_mailbox")
@@ -2748,6 +2840,49 @@ class PhishingAPI:
 
             if not target_mailbox and not domain:
                 return jsonify({"error": "Either target_mailbox or domain is required"}), 400
+
+            if domain:
+                if not isinstance(domain, str):
+                    return jsonify({"error": "domain must be a string"}), 400
+                domain = domain.strip().lower()
+                if admin_email is not None and (
+                    not isinstance(admin_email, str)
+                    or not validators.email(admin_email)
+                    or not admin_email.lower().endswith(f"@{domain}")
+                ):
+                    return (
+                        jsonify(
+                            {"error": "admin_email must be an address in the monitored domain"}
+                        ),
+                        400,
+                    )
+                if not is_domain_allowed(domain):
+                    logger.warning(f"🛑 Refused domain-wide e-mail monitor for {domain}")
+                    return (
+                        jsonify({"error": "Domain is not on the e-mail monitoring allowlist"}),
+                        403,
+                    )
+            else:
+                if not isinstance(target_mailbox, str) or not validators.email(target_mailbox):
+                    return jsonify({"error": "target_mailbox must be an e-mail address"}), 400
+                target_mailbox = target_mailbox.strip()
+                if not is_mailbox_allowed(target_mailbox):
+                    logger.warning(f"🛑 Refused e-mail monitor for mailbox {target_mailbox}")
+                    return (
+                        jsonify({"error": "Mailbox is not on the e-mail monitoring allowlist"}),
+                        403,
+                    )
+
+            search_interval_hours = data.get("search_interval_hours", 1)
+            if (
+                isinstance(search_interval_hours, bool)
+                or not isinstance(search_interval_hours, int)
+                or not 1 <= search_interval_hours <= 720
+            ):
+                return (
+                    jsonify({"error": "search_interval_hours must be an integer from 1 to 720"}),
+                    400,
+                )
 
             if domain:
                 details = {
@@ -2764,7 +2899,6 @@ class PhishingAPI:
                     "last_history_id": None,
                 }
 
-            search_interval_hours = data.get("search_interval_hours", 1)
             try:
                 with self.db_manager.engine.begin() as conn:
                     row = conn.execute(
@@ -2794,9 +2928,18 @@ class PhishingAPI:
         # ── GET /api/v1/threads/<id>/email-inboxes ───────────────────────────
         @self.app.route("/api/v1/threads/<int:thread_id>/email-inboxes", methods=["GET"])
         @self.limiter.limit("20 per minute")
-        @require_api_key(scope="read")
+        @require_api_key(scope="email_admin")
         def get_thread_email_inboxes(thread_id: int):
-            """Aggregate email scan results grouped by recipient inbox."""
+            """Aggregate email scan results grouped by recipient inbox.
+
+            Per-mailbox threat data needs the ``email_admin`` scope.
+
+            Args:
+                thread_id: E-mail monitor thread.
+
+            Returns:
+                JSON ``{"items": [...], "total": int}`` or 404.
+            """
             try:
                 with self.db_manager.engine.begin() as conn:
                     exists = conn.execute(

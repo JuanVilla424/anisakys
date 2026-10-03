@@ -11,6 +11,7 @@ Scopes (see SCOPE_DESCRIPTIONS; "admin" is a wildcard):
   scan     — POST scan endpoints: multi-scan, gsb/check, scan/domain
   report   — POST report endpoints: report, gsb/report; update report status
   write    — create/update threads, thread results, sender reputation, blocklist
+  email_admin — create/update e-mail monitor threads, read per-mailbox results
   metrics  — scrape the Prometheus /metrics endpoint
   admin    — All endpoints (wildcard)
 
@@ -49,6 +50,10 @@ SCOPE_DESCRIPTIONS: Dict[str, str] = {
     "scan": "on-demand scans: multi-scan, gsb/check, scan/domain",
     "report": "submit URLs (/report, gsb/report) and update abuse-report status",
     "write": "create/update threads and results, sender reputation and blocklist",
+    "email_admin": (
+        "create/update e-mail monitor threads and read per-mailbox results "
+        "(only allowlisted mailboxes)"
+    ),
     "metrics": "scrape the Prometheus /metrics endpoint",
     "admin": "every endpoint (wildcard)",
 }
