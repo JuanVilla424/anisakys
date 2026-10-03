@@ -22,12 +22,9 @@ DDL = re.compile(DDL_PATTERN, re.IGNORECASE)
 # Statements written in upper case (the convention for SQL in this code base).
 DDL_STATEMENT = re.compile(DDL_PATTERN)
 
-# Files whose runtime DDL is being removed by another phase-0 workstream
-# (reporting pipeline). Delete the entries once that work has landed.
-PENDING_REMOVAL = {
-    "reporting/report_tracker.py",
-    "reporting/abuse_manager.py",
-}
+# Files allowed to keep runtime DDL while it is being migrated. Empty: every
+# module now relies on the Alembic schema.
+PENDING_REMOVAL: set = set()
 
 
 def _ddl_strings(path: Path) -> List[str]:

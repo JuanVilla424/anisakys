@@ -23,6 +23,7 @@ from typing import Dict, FrozenSet, Iterator, Set, Tuple
 
 import pytest
 from alembic import command
+from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
@@ -314,6 +315,11 @@ def upgrade(url: str, revision: str = "head") -> None:
     command.upgrade(get_alembic_config(url), revision)
 
 
+def script_head() -> str:
+    """Return the newest revision id in ``alembic/versions``."""
+    return ScriptDirectory.from_config(get_alembic_config("postgresql://unused")).get_current_head()
+
+
 def downgrade(url: str, revision: str) -> None:
     """Run ``alembic downgrade`` against ``url``."""
     command.downgrade(get_alembic_config(url), revision)
@@ -389,11 +395,20 @@ def scanner_redirect_chain_insert() -> str:
 class TestFreshDatabase:
     """``alembic upgrade head`` on an empty database."""
 
-    def test_upgrade_head_creates_every_table_and_column(self, scratch_database, make_engine):
+    def test_upgrade_to_003_creates_every_table_and_column(self, scratch_database, make_engine):
+        """EXPECTED_COLUMNS is the schema of revision 003; later revisions add to it."""
+        url = scratch_database()
+        upgrade(url, "003")
+
+        assert table_columns(make_engine(url)) == EXPECTED_COLUMNS
+
+    def test_upgrade_head_keeps_every_003_column(self, scratch_database, make_engine):
         url = scratch_database()
         upgrade(url)
 
-        assert table_columns(make_engine(url)) == EXPECTED_COLUMNS
+        columns = table_columns(make_engine(url))
+        for table, expected in EXPECTED_COLUMNS.items():
+            assert expected <= columns.get(table, set()), table
 
     def test_upgrade_head_creates_hot_filter_indexes(self, scratch_database, make_engine):
         url = scratch_database()
@@ -462,7 +477,7 @@ class TestFreshDatabase:
         url = scratch_database()
         command.stamp(get_alembic_config(url), "002")
 
-        upgrade(url)
+        upgrade(url, "003")
 
         assert table_columns(make_engine(url)) == EXPECTED_COLUMNS
 
@@ -721,7 +736,7 @@ class TestAlembicCli:
         result = self._run_alembic({"ANISAKYS_ENV_FILE": str(env_file)})
 
         assert result.returncode == 0, result.stderr
-        assert "003 (head)" in result.stdout
+        assert f"{script_head()} (head)" in result.stdout
 
     def test_environment_variable_wins_over_env_file(self, scratch_database, tmp_path):
         url = scratch_database()
@@ -732,7 +747,7 @@ class TestAlembicCli:
         result = self._run_alembic({"ANISAKYS_ENV_FILE": str(env_file), "DATABASE_URL": url})
 
         assert result.returncode == 0, result.stderr
-        assert "003 (head)" in result.stdout
+        assert f"{script_head()} (head)" in result.stdout
 
     def test_missing_url_fails_loudly(self, tmp_path):
         result = self._run_alembic({"ANISAKYS_ENV_FILE": str(tmp_path / "missing.env")})
