@@ -3,7 +3,7 @@ import tempfile
 from pathlib import Path
 from pydantic_settings import BaseSettings
 from pydantic import Field, SecretStr
-from typing import Optional
+from typing import Literal, Optional
 
 from src.dns import cloudflare_ranges
 
@@ -107,6 +107,39 @@ class Settings(BaseSettings):
     EMAIL_MONITOR_ALLOWED_MAILBOXES: Optional[str] = None
 
     # --- v2 phase 0: reporting pipeline & process roles ------------------------
+    # Which long-running jobs this process owns. Exactly one process per
+    # deployment should run "scheduler" (or "all" for single-process dev).
+    PROCESS_ROLE: Literal["all", "api", "scanner", "scheduler"] = "all"
+    # Guard the scheduler jobs with a PostgreSQL advisory lock so a second
+    # misconfigured scheduler waits as a hot standby instead of running jobs.
+    SCHEDULER_LEADER_LOCK: bool = True
+    REPORT_CLAIM_BATCH_SIZE: int = Field(default=5, ge=1, le=100)
+    REPORT_CLAIM_LEASE_SECONDS: int = Field(default=1800, ge=60)
+    REPORT_SITE_MAX_ATTEMPTS: int = Field(default=3, ge=1, le=20)
+    REPORT_RESEND_COOLDOWN_HOURS: int = Field(default=48, ge=0)
+    REPORT_MAX_PRIMARY_RECIPIENTS: int = Field(default=5, ge=1, le=20)
+    REPORT_DB_STATEMENT_TIMEOUT_MS: int = Field(default=5000, ge=100)
+    REPORT_DB_LOCK_TIMEOUT_MS: int = Field(default=2000, ge=100)
+    # Brand impersonated by the reported sites, rendered in the report when set.
+    REPORT_BRAND_NAME: Optional[str] = None
+    # Reporting organisation shown in the signature of every report.
+    REPORT_ORGANIZATION: str = "Anisakys phishing takedown"
+    # Default "how to reproduce" guidance (e.g. geo-fencing or mobile-only kits).
+    REPORT_REPRODUCTION_NOTE: Optional[str] = None
+    OUTBOX_MAX_ATTEMPTS: int = Field(default=3, ge=1, le=10)
+    OUTBOX_RETRY_BACKOFF_SECONDS: int = Field(default=900, ge=1)
+    OUTBOX_RATE_LIMIT_DEFER_SECONDS: int = Field(default=300, ge=1)
+    OUTBOX_DISPATCH_INTERVAL_SECONDS: int = Field(default=60, ge=5)
+    OUTBOX_DISPATCH_BATCH_SIZE: int = Field(default=20, ge=1, le=500)
+    # Transport security for SMTP: "auto" = implicit TLS on 465, otherwise
+    # STARTTLS when offered; credentials are never sent without TLS unless
+    # "none" is set explicitly (loopback relays only).
+    SMTP_SECURITY: Literal["auto", "starttls", "ssl", "none"] = "auto"
+    SMTP_TIMEOUT_SECONDS: int = Field(default=30, ge=1, le=600)
+    GSB_SCREENSHOT_MAX_BYTES: int = Field(default=4_000_000, ge=0)
+    FOLLOWUP_INTERVAL_HOURS: int = Field(default=48, ge=1)
+    FOLLOWUP_MAX_COUNT: int = Field(default=3, ge=0, le=10)
+    FOLLOWUP_CHECK_INTERVAL_SECONDS: int = Field(default=3600, ge=60)
 
     # --- v2 phase 0: detection & threat-intel providers ------------------------
     GOOGLE_WEB_RISK_API_KEY: Optional[str] = None
