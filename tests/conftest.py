@@ -238,7 +238,7 @@ def cleanup_specific_records(engine, records):
         # Clean registrar_abuse
         for registrar in records.get("registrar_abuse", []):
             conn.execute(
-                text("DELETE FROM registrar_abuse WHERE registrar = :registrar"),
+                text("DELETE FROM registrar_abuse WHERE registrar_name = :registrar"),
                 {"registrar": registrar},
             )
 
