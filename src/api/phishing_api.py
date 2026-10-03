@@ -1646,7 +1646,17 @@ class PhishingAPI:
         @self.limiter.limit("30 per minute")
         @require_api_key(scope="read")
         def get_sites():
-            """List phishing sites with optional filters and pagination."""
+            """List phishing sites with optional filters and pagination.
+
+            Unknown values are null rather than defaults: ``source``,
+            ``priority`` and ``is_cloudflare`` when the column is NULL, and
+            ``gsb_safe`` until Google Safe Browsing has checked the site
+            (``gsb_last_check`` is NULL). ``first_seen``, ``last_seen`` and
+            ``takedown_date`` are ISO-8601 with an explicit UTC offset.
+
+            Returns:
+                JSON ``{"items": [...], "total": int, "limit": int, "offset": int}``.
+            """
             limit = int_arg(request.args, "limit", default=100, maximum=500)
             offset = _offset_arg()
             status_filter = enum_arg(request.args, "status", SITE_STATUSES)
@@ -1684,9 +1694,10 @@ class PhishingAPI:
                                    first_seen, last_seen, multi_api_threat_level,
                                    api_confidence_score, registrar_name, domain_age_days,
                                    abuse_report_sent, manual_flag, gsb_safe,
-                                   resolved_ip, is_cloudflare, description, assigned_to
+                                   resolved_ip, is_cloudflare, description, assigned_to,
+                                   takedown_date, gsb_last_check
                             FROM phishing_sites {where_sql}
-                            ORDER BY last_seen DESC NULLS LAST
+                            ORDER BY last_seen DESC NULLS LAST, id DESC
                             LIMIT :limit OFFSET :offset
                             """),
                         params,
@@ -1697,19 +1708,20 @@ class PhishingAPI:
                         "id": r[0],
                         "url": r[1],
                         "site_status": r[2] or "unknown",
-                        "priority": r[3] or "medium",
-                        "source": r[4] or "manual",
-                        "first_seen": r[5].isoformat() if r[5] else None,
-                        "last_seen": r[6].isoformat() if r[6] else None,
+                        "priority": r[3],
+                        "source": r[4],
+                        "first_seen": iso_utc(r[5]),
+                        "last_seen": iso_utc(r[6]),
+                        "takedown_date": iso_utc(r[18]),
                         "multi_api_threat_level": r[7],
                         "api_confidence_score": r[8],
                         "registrar_name": r[9],
                         "domain_age_days": r[10],
                         "abuse_report_sent": bool(r[11]),
                         "manual_flag": bool(r[12]),
-                        "gsb_safe": bool(r[13]) if r[13] is not None else True,
+                        "gsb_safe": None if r[13] is None or r[19] is None else bool(r[13]),
                         "resolved_ip": r[14],
-                        "is_cloudflare": bool(r[15]),
+                        "is_cloudflare": None if r[15] is None else bool(r[15]),
                         "description": r[16],
                         "assigned_to": r[17],
                     }
@@ -1723,6 +1735,33 @@ class PhishingAPI:
 
             except Exception as e:
                 return internal_error("get_sites", e)
+
+        # ── GET /api/v1/sites/sources ──────────────────────────────────────────
+        @self.app.route("/api/v1/sites/sources", methods=["GET"])
+        @self.limiter.limit("30 per minute")
+        @require_api_key(scope="read")
+        def get_site_sources():
+            """Count phishing sites per detection source.
+
+            A list (not a mapping) so that sites whose ``source`` is NULL are
+            reported as ``{"source": null, ...}`` instead of under an invented
+            name.
+
+            Returns:
+                JSON ``[{"source": str | null, "count": int}, ...]``, largest
+                count first (NULL last on ties).
+            """
+            try:
+                with self.db_manager.engine.begin() as conn:
+                    rows = conn.execute(text("""
+                        SELECT source, COUNT(*) AS n
+                        FROM phishing_sites
+                        GROUP BY source
+                        ORDER BY n DESC, source NULLS LAST
+                    """)).fetchall()
+                return jsonify([{"source": r[0], "count": int(r[1])} for r in rows]), 200
+            except Exception as e:
+                return internal_error("get_site_sources", e)
 
         # ── GET /api/v1/reports ────────────────────────────────────────────────
         @self.app.route("/api/v1/reports", methods=["GET"])
