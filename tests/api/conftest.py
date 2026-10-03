@@ -55,6 +55,15 @@ def migrated_db_url(create_test_database: str) -> Iterator[str]:
     try:
         with patch.dict(os.environ, {"DATABASE_URL": schema_url}):
             command.upgrade(config, "head")
+        # Columns the app still adds at startup (e.g. phishing_sites.detected_kit_type)
+        # until that runtime DDL moves into Alembic; skipped once it is gone.
+        from src.database.manager import DatabaseManager
+
+        manager = DatabaseManager(db_url=schema_url)
+        init_runtime_columns = getattr(manager, "init_phishing_db", None)
+        if init_runtime_columns is not None:
+            init_runtime_columns()
+        manager.engine.dispose()
         yield schema_url
     finally:
         with admin_engine.begin() as conn:

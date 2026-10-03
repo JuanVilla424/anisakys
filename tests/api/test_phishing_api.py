@@ -447,6 +447,77 @@ class TestGraphEndpoint:
         assert ids == {"ip:203.0.113.10", "domain:brand-alpha.example"}
         assert len(data["edges"]) == 1
 
+    @pytest.mark.parametrize(
+        "focus",
+        ["registrar:Acme Registrar", "registrar:acme registrar", "REGISTRAR:ACME REGISTRAR"],
+    )
+    def test_graph_focus_registrar_is_case_insensitive(self, graph_setup, focus):
+        """Registrar node IDs keep their case; the focus used to be lower-cased
+        and therefore never matched them."""
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, self.SAMPLE_ROWS)
+
+        resp = client.get("/api/v1/graph", query_string={"focus": focus}, headers=headers)
+
+        ids = {n["id"] for n in json.loads(resp.data)["nodes"]}
+        assert ids == {
+            "registrar:Acme Registrar",
+            "domain:brand-alpha.example",
+            "domain:acme-bank.example",
+        }
+
+    def test_graph_focus_is_applied_in_sql_before_limit(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, self.SAMPLE_ROWS)
+
+        client.get(
+            "/api/v1/graph",
+            query_string={"focus": "registrar:Acme Registrar", "limit": 10},
+            headers=headers,
+        )
+
+        conn = mock_db.engine.begin.return_value.__enter__.return_value
+        statement, params = conn.execute.call_args.args
+        sql = str(statement)
+        assert "LOWER(BTRIM(registrar_name)) = :focus_value" in sql
+        assert sql.index(":focus_value") < sql.index("LIMIT :lim")
+        assert params == {"lim": 10, "focus_value": "acme registrar"}
+
+    @pytest.mark.parametrize("focus", ["registrar:", "asn:13335", "nocolon"])
+    def test_graph_malformed_focus_returns_400(self, graph_setup, focus):
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, self.SAMPLE_ROWS)
+
+        resp = client.get("/api/v1/graph", query_string={"focus": focus}, headers=headers)
+
+        assert resp.status_code == 400
+        assert "focus" in json.loads(resp.data)["error"]
+
+    def test_graph_marks_cdn_ips_as_shared_infrastructure(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        rows = self.SAMPLE_ROWS + [
+            # 104.16.0.0/13 is a Cloudflare edge range; not flagged by the scanner.
+            (
+                "cdn-only.example",
+                "104.16.1.1",
+                None,
+                "low",
+                None,
+                False,
+                "2026-01-05",
+                "2026-01-09",
+                1,
+                None,
+            ),
+        ]
+        self._rows(mock_db, rows)
+
+        data = json.loads(client.get("/api/v1/graph", headers=headers).data)
+        ip_nodes = {n["id"]: n for n in data["nodes"] if n["type"] == "ip"}
+        assert ip_nodes["ip:104.16.1.1"]["shared_infrastructure"] is True
+        assert ip_nodes["ip:190.2.3.4"]["shared_infrastructure"] is True  # flagged in DB
+        assert ip_nodes["ip:203.0.113.10"]["shared_infrastructure"] is False
+
     def test_graph_empty_when_no_sites(self, graph_setup):
         client, mock_db, headers = graph_setup
         self._rows(mock_db, [])

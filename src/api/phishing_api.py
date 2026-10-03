@@ -8,13 +8,14 @@ and Grinder integration.
 import base64
 import datetime
 import hmac
+import ipaddress
 import json
 import re
 import socket
 import threading
 import tomllib
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import validators
 from flask import Flask, current_app, jsonify, request
@@ -33,7 +34,7 @@ from src.intelligence import (
     GRINDER_INTEGRATION_ENABLED,
 )
 from src.logger import logger
-from src.dns.network_utils import assess_url_target
+from src.dns.network_utils import assess_url_target, is_cloudflare_ip
 from src.screenshot_service import PLAYWRIGHT_AVAILABLE, SELENIUM_AVAILABLE
 from src.screenshot_client import get_screenshot_service
 from src.monitoring.gsb_rescan import get_gsb_rescan_job
@@ -121,6 +122,64 @@ def parse_recipients(raw: Optional[str]) -> List[str]:
     if not isinstance(decoded, list):
         return []
     return [item.strip() for item in decoded if isinstance(item, str) and item.strip()]
+
+
+# SQL expression (lower-cased, trimmed) matched against each focus type of
+# GET /api/v1/graph. Keys are the node-type prefixes used in node IDs.
+GRAPH_FOCUS_SQL: Dict[str, str] = {
+    "domain": "LOWER(SPLIT_PART(SPLIT_PART(url, '://', 2), '/', 1))",
+    "ip": "LOWER(BTRIM(resolved_ip))",
+    "registrar": "LOWER(BTRIM(registrar_name))",
+    "kit": "LOWER(BTRIM(detected_kit_type))",
+}
+
+
+def parse_graph_focus(raw: Optional[str]) -> Optional[Tuple[str, str]]:
+    """Parse the ``focus`` query parameter of GET /api/v1/graph.
+
+    Both the node type and the value are matched case-insensitively, so the
+    value is lower-cased here and compared against lower-cased columns/IDs.
+
+    Args:
+        raw: Raw parameter such as ``"registrar:Acme Inc"``; empty means no focus.
+
+    Returns:
+        ``(node_type, lowercased_value)`` or None when no focus was requested.
+
+    Raises:
+        ValueError: If the parameter is not ``<type>:<value>`` with a known type.
+    """
+    if raw is None or not raw.strip():
+        return None
+    node_type, _, value = raw.strip().partition(":")
+    node_type, value = node_type.strip().lower(), value.strip().lower()
+    if node_type not in GRAPH_FOCUS_SQL or not value:
+        raise ValueError(
+            "focus must be '<type>:<value>' with type one of: " + ", ".join(sorted(GRAPH_FOCUS_SQL))
+        )
+    return node_type, value
+
+
+def is_shared_infrastructure_ip(ip: str, flagged_cloudflare: bool = False) -> bool:
+    """Tell whether an IP belongs to shared CDN/proxy infrastructure.
+
+    Many unrelated sites resolve to the same Cloudflare edge addresses, so such
+    IPs are hubs that do not imply a relationship between the domains.
+
+    Args:
+        ip: Resolved IP address as stored in ``phishing_sites.resolved_ip``.
+        flagged_cloudflare: Whether the scanner already flagged it as Cloudflare.
+
+    Returns:
+        True when the address is (or was flagged as) shared infrastructure.
+    """
+    if flagged_cloudflare:
+        return True
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return is_cloudflare_ip(ip)
 
 
 class PhishingAPI:
@@ -1835,15 +1894,36 @@ class PhishingAPI:
               limit (<=500, default 200) — cap on source rows.
               focus  (optional) — "domain:foo.com" / "ip:1.2.3.4" /
                                   "registrar:Name" / "kit:evilginx" restricts
-                                  to the 1-hop neighborhood of that node.
+                                  to the 1-hop neighborhood of that node. Type
+                                  and value match case-insensitively and the
+                                  filter is applied in SQL before the limit;
+                                  a malformed focus returns 400.
+
+            IP nodes carry ``shared_infrastructure: true`` when the address is a
+            shared CDN edge (Cloudflare): many unrelated domains resolve there,
+            so clients should not treat it as a campaign hub.
+
+            Returns:
+                JSON ``{"nodes": [...], "edges": [...], "meta": {...}}``.
             """
             try:
                 limit = min(int(request.args.get("limit", 200)), 500)
-                focus = request.args.get("focus", "").strip().lower()
+                try:
+                    focus = parse_graph_focus(request.args.get("focus"))
+                except ValueError as exc:
+                    return jsonify({"error": str(exc)}), 400
+
+                # The focus filter runs in SQL, before LIMIT, so a focused node
+                # is found even when it is not among the most recent rows.
+                params: Dict[str, Any] = {"lim": limit}
+                focus_sql = ""
+                if focus:
+                    focus_sql = f"AND {GRAPH_FOCUS_SQL[focus[0]]} = :focus_value"
+                    params["focus_value"] = focus[1]
 
                 with self.db_manager.engine.begin() as conn:
                     rows = conn.execute(
-                        text("""
+                        text(f"""
                             SELECT
                                 SPLIT_PART(SPLIT_PART(url, '://', 2), '/', 1) AS domain,
                                 resolved_ip,
@@ -1858,12 +1938,13 @@ class PhishingAPI:
                             FROM phishing_sites
                             WHERE url IS NOT NULL
                               AND SPLIT_PART(SPLIT_PART(url, '://', 2), '/', 1) <> ''
+                              {focus_sql}
                             GROUP BY domain, resolved_ip, registrar_name,
                                      multi_api_threat_level, detected_kit_type
                             ORDER BY MAX(last_seen) DESC NULLS LAST
                             LIMIT :lim
                         """),
-                        {"lim": limit},
+                        params,
                     ).fetchall()
 
                 sev_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
@@ -1982,6 +2063,9 @@ class PhishingAPI:
                             "label": ip,
                             "type": "ip",
                             "severity": "medium",
+                            "shared_infrastructure": is_shared_infrastructure_ip(
+                                ip, m["cloudflare"]
+                            ),
                             "meta": meta_without_none(
                                 [
                                     ("Hosting", "Cloudflare" if m["cloudflare"] else "Direct"),
@@ -2036,25 +2120,20 @@ class PhishingAPI:
                     for i, (s, t, rel) in enumerate(sorted(edge_keys))
                 ]
 
-                # Optional focus → 1-hop neighborhood
+                # Optional focus → 1-hop neighborhood. Node IDs keep the stored
+                # case (e.g. registrar names), so match them case-insensitively.
                 if focus:
-                    ftype, _, fval = focus.partition(":")
-                    ftype, fval = ftype.strip(), fval.strip()
-                    fid = (
-                        f"{ftype}:{fval}"
-                        if ftype in ("domain", "ip", "registrar", "kit") and fval
-                        else None
-                    )
-                    if fid:
-                        keep = {fid}
-                        kept_edges = []
-                        for e in edge_list:
-                            if e["source"] == fid or e["target"] == fid:
-                                keep.add(e["source"])
-                                keep.add(e["target"])
-                                kept_edges.append(e)
-                        node_list = [n for n in node_list if n["id"] in keep]
-                        edge_list = kept_edges
+                    focus_key = f"{focus[0]}:{focus[1]}"
+                    focus_ids = {n["id"] for n in node_list if n["id"].lower() == focus_key}
+                    keep = set(focus_ids)
+                    kept_edges = []
+                    for e in edge_list:
+                        if e["source"] in focus_ids or e["target"] in focus_ids:
+                            keep.add(e["source"])
+                            keep.add(e["target"])
+                            kept_edges.append(e)
+                    node_list = [n for n in node_list if n["id"] in keep]
+                    edge_list = kept_edges
 
                 meta = {
                     "domains": len(domains),
