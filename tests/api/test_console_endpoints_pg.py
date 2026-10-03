@@ -137,3 +137,110 @@ class TestSiteSources:
         client, _, _ = pg_api
 
         assert client.get("/api/v1/sites/sources").status_code == 401
+
+
+class TestThreads:
+    def _thread_with_results(self, db_manager) -> int:
+        tag = _tag()
+        thread_id = _insert(
+            db_manager,
+            "analysis_threads",
+            {
+                "thread_type": "google_ads",
+                "label": f"thread-{tag}",
+                "status": "active",
+                "started_at": "2026-03-01 08:00:00",
+                "last_searched_at": "2026-03-02 09:30:00",
+                # The stored counter drifts (feed/CT monitors increment it).
+                "results_count": 42,
+            },
+        )
+        older = _insert(
+            db_manager,
+            "thread_executions",
+            {
+                "thread_id": thread_id,
+                "execution_type": "scheduled",
+                "status": "completed",
+                "started_at": "2026-03-01 08:00:00",
+                "completed_at": "2026-03-01 08:05:00",
+                "results_count": 2,
+            },
+        )
+        _insert(
+            db_manager,
+            "thread_executions",
+            {
+                "thread_id": thread_id,
+                "execution_type": "scheduled",
+                "status": "completed",
+                "started_at": "2026-03-02 09:00:00",
+                "completed_at": "2026-03-02 09:30:00",
+                "results_count": 1,
+            },
+        )
+        _insert(
+            db_manager,
+            "thread_executions",
+            {"thread_id": thread_id, "execution_type": "manual", "status": "running"},
+        )
+        for i, status in enumerate(("new", "threat", "discarded")):
+            _insert(
+                db_manager,
+                "thread_results",
+                {
+                    "thread_id": thread_id,
+                    "result_type": "ad",
+                    "found_url": f"https://r{i}-{tag}.example/",
+                    "status": status,
+                    "execution_id": older,
+                    "first_detected_at": "2026-03-01 08:01:00",
+                    "last_detected_at": f"2026-03-0{i + 1} 08:01:00",
+                },
+            )
+        return thread_id
+
+    def test_counters_are_distinct_and_documented(self, pg_api):
+        client, db_manager, headers = pg_api
+        thread_id = self._thread_with_results(db_manager)
+
+        threads = client.get("/api/v1/threads", headers=headers).get_json()["items"]
+        results = client.get(f"/api/v1/threads/{thread_id}/results", headers=headers).get_json()
+
+        thread = next(t for t in threads if t["id"] == thread_id)
+        # Shown results (discarded one excluded) == the results endpoint's total.
+        assert thread["results_count"] == 2
+        assert thread["results_count"] == results["total"]
+        # Every recorded result, discarded included (not the drifting column).
+        assert thread["total_results"] == 3
+        # The most recent completed execution recorded 1 result.
+        assert thread["last_execution_results"] == 1
+
+    def test_thread_without_executions_has_null_last_execution_results(self, pg_api):
+        client, db_manager, headers = pg_api
+        thread_id = _insert(
+            db_manager,
+            "analysis_threads",
+            {"thread_type": "ct_monitor", "label": f"ct-{_tag()}", "status": "active"},
+        )
+
+        threads = client.get("/api/v1/threads", headers=headers).get_json()["items"]
+
+        thread = next(t for t in threads if t["id"] == thread_id)
+        assert thread["last_execution_results"] is None
+        assert thread["results_count"] == 0 and thread["total_results"] == 0
+        assert thread["completed_at"] is None
+
+    def test_timestamps_carry_a_utc_offset(self, pg_api):
+        client, db_manager, headers = pg_api
+        thread_id = self._thread_with_results(db_manager)
+
+        threads = client.get("/api/v1/threads", headers=headers).get_json()["items"]
+        results = client.get(f"/api/v1/threads/{thread_id}/results", headers=headers).get_json()
+
+        thread = next(t for t in threads if t["id"] == thread_id)
+        assert thread["started_at"] == "2026-03-01T08:00:00+00:00"
+        assert thread["last_searched_at"] == "2026-03-02T09:30:00+00:00"
+        newest = results["items"][0]
+        assert newest["last_detected_at"] == "2026-03-02T08:01:00+00:00"
+        assert newest["first_detected_at"] == "2026-03-01T08:01:00+00:00"

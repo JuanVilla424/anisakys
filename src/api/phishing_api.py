@@ -302,6 +302,24 @@ def _ioc_item(ioc_type: str, row: Any, position: int) -> Dict[str, Any]:
     }
 
 
+# FROM/WHERE clause selecting the thread_results the console shows: not
+# discarded, not from a whitelisted sender, the own Workspace domain
+# (:own_domain, '' when unset) or Google's own domains. Callers append
+# "AND tr.thread_id = ...". GET /threads (results_count) and
+# GET /threads/<id>/results (total) share it so the two always agree.
+VISIBLE_THREAD_RESULTS_SQL = """
+    FROM thread_results tr
+    LEFT JOIN email_sender_reputation esr
+        ON tr.result_type = 'email_threat'
+        AND LOWER(tr.extra_data->>'sender') = esr.sender_email
+    WHERE tr.status != 'discarded'
+    AND (esr.id IS NULL OR esr.whitelisted IS NOT TRUE)
+    AND (:own_domain = '' OR tr.result_type != 'email_threat'
+         OR LOWER(tr.extra_data->>'sender_domain') != :own_domain)
+    AND (tr.result_type != 'email_threat'
+         OR LOWER(tr.extra_data->>'sender_domain') NOT IN ('google.com', 'googlemail.com'))
+"""
+
 # Largest accepted pagination offset (deep OFFSET scans are never legitimate here).
 MAX_OFFSET = 1_000_000
 
@@ -2150,30 +2168,40 @@ class PhishingAPI:
         @self.limiter.limit("20 per minute")
         @require_api_key(scope="read")
         def get_threads():
+            """List analysis threads with their result counters.
+
+            ``results_count`` is the number of results the console shows for
+            the thread right now (not discarded, not from a whitelisted sender,
+            the own Workspace domain or Google) and always equals the ``total``
+            of ``GET /api/v1/threads/<id>/results``. ``total_results`` is every
+            result ever recorded for the thread, including discarded and
+            filtered ones. ``last_execution_results`` is how many results the
+            most recent completed execution recorded (``thread_executions.
+            results_count``), null when the thread has no completed execution
+            (CT and feed monitors do not record executions). Timestamps are
+            ISO-8601 with an explicit UTC offset.
+
+            Returns:
+                JSON ``{"items": [...], "total": int}``.
+            """
             try:
                 with self.db_manager.engine.begin() as conn:
                     own_domain = (getattr(settings, "GOOGLE_WORKSPACE_DOMAIN", None) or "").lower()
                     rows = conn.execute(
-                        text("""
+                        text(f"""
                         SELECT t.id, t.thread_type, t.label, t.status, t.started_at,
-                               t.completed_at, t.results_count, t.details, t.error_message,
+                               t.completed_at, t.details, t.error_message,
                                t.search_interval_hours, t.last_searched_at,
+                               (SELECT COUNT(*) {VISIBLE_THREAD_RESULTS_SQL}
+                                AND tr.thread_id = t.id) AS visible_results,
                                (SELECT COUNT(*) FROM thread_results tr
-                                LEFT JOIN email_sender_reputation esr
-                                    ON tr.result_type = 'email_threat'
-                                    AND LOWER(tr.extra_data->>'sender') = esr.sender_email
-                                WHERE tr.thread_id = t.id
-                                AND tr.status != 'discarded'
-                                AND (esr.id IS NULL OR esr.whitelisted IS NOT TRUE)
-                                AND (:own_domain = '' OR tr.result_type != 'email_threat'
-                                     OR LOWER(tr.extra_data->>'sender_domain') != :own_domain)
-                                AND (tr.result_type != 'email_threat'
-                                     OR LOWER(tr.extra_data->>'sender_domain') NOT IN ('google.com', 'googlemail.com'))) AS total_results,
-                               (SELECT id FROM thread_executions te
-                                WHERE te.thread_id = t.id AND te.status = 'running'
-                                ORDER BY te.started_at DESC LIMIT 1) AS running_execution_id
+                                WHERE tr.thread_id = t.id) AS recorded_results,
+                               (SELECT te.results_count FROM thread_executions te
+                                WHERE te.thread_id = t.id AND te.status = 'completed'
+                                ORDER BY te.completed_at DESC NULLS LAST, te.id DESC
+                                LIMIT 1) AS last_execution_results
                         FROM analysis_threads t
-                        ORDER BY t.started_at DESC NULLS LAST
+                        ORDER BY t.started_at DESC NULLS LAST, t.id DESC
                     """),
                         {"own_domain": own_domain},
                     ).fetchall()
@@ -2193,14 +2221,15 @@ class PhishingAPI:
                             "thread_type": r[1],
                             "label": r[2],
                             "status": effective_status,
-                            "started_at": str(r[4]) if r[4] else None,
-                            "completed_at": str(r[5]) if r[5] else None,
-                            "results_count": int(r[11] or 0),
-                            "details": r[7],
-                            "error_message": r[8],
-                            "search_interval_hours": r[9],
-                            "last_searched_at": str(r[10]) if r[10] else None,
+                            "started_at": iso_utc(r[4]),
+                            "completed_at": iso_utc(r[5]),
+                            "results_count": int(r[10] or 0),
+                            "details": r[6],
+                            "error_message": r[7],
+                            "search_interval_hours": r[8],
+                            "last_searched_at": iso_utc(r[9]),
                             "total_results": int(r[11] or 0),
+                            "last_execution_results": None if r[12] is None else int(r[12]),
                         }
                     )
                 return jsonify({"items": items, "total": len(items)}), 200
@@ -2268,49 +2297,44 @@ class PhishingAPI:
         @self.limiter.limit("120 per minute")
         @require_api_key(scope="read")
         def get_thread_results(thread_id: int):
+            """Page through the results the console shows for a thread.
+
+            Same visibility rules as ``results_count`` of ``GET /api/v1/threads``
+            (see ``VISIBLE_THREAD_RESULTS_SQL``); newest first, stable across
+            pages. Timestamps are ISO-8601 with an explicit UTC offset.
+
+            Args:
+                thread_id: ``analysis_threads.id``.
+
+            Returns:
+                JSON ``{"items": [...], "total": int}``.
+            """
             limit = int_arg(request.args, "limit", default=50, maximum=1000)
             offset = _offset_arg()
             try:
                 own_domain = (getattr(settings, "GOOGLE_WORKSPACE_DOMAIN", None) or "").lower()
+                params = {"tid": thread_id, "lim": limit, "off": offset, "own_domain": own_domain}
                 with self.db_manager.engine.begin() as conn:
                     total = (
                         conn.execute(
-                            text("""
-                        SELECT COUNT(*) FROM thread_results tr
-                        LEFT JOIN email_sender_reputation esr
-                            ON tr.result_type = 'email_threat'
-                            AND LOWER(tr.extra_data->>'sender') = esr.sender_email
-                        WHERE tr.thread_id = :tid
-                        AND tr.status != 'discarded'
-                        AND (esr.id IS NULL OR esr.whitelisted IS NOT TRUE)
-                        AND (:own_domain = '' OR tr.result_type != 'email_threat'
-                             OR LOWER(tr.extra_data->>'sender_domain') != :own_domain)
-                        AND (tr.result_type != 'email_threat'
-                             OR LOWER(tr.extra_data->>'sender_domain') NOT IN ('google.com', 'googlemail.com'))
-                    """),
-                            {"tid": thread_id, "own_domain": own_domain},
+                            text(
+                                f"SELECT COUNT(*) {VISIBLE_THREAD_RESULTS_SQL} "
+                                "AND tr.thread_id = :tid"
+                            ),
+                            params,
                         ).scalar()
                         or 0
                     )
                     rows = conn.execute(
-                        text("""
+                        text(f"""
                         SELECT tr.id, tr.result_type, tr.found_url, tr.title, tr.confidence,
                                tr.source, tr.first_detected_at, tr.last_detected_at,
                                tr.status, tr.details, tr.extra_data
-                        FROM thread_results tr
-                        LEFT JOIN email_sender_reputation esr
-                            ON tr.result_type = 'email_threat'
-                            AND LOWER(tr.extra_data->>'sender') = esr.sender_email
-                        WHERE tr.thread_id = :tid
-                        AND tr.status != 'discarded'
-                        AND (esr.id IS NULL OR esr.whitelisted IS NOT TRUE)
-                        AND (:own_domain = '' OR tr.result_type != 'email_threat'
-                             OR LOWER(tr.extra_data->>'sender_domain') != :own_domain)
-                        AND (tr.result_type != 'email_threat'
-                             OR LOWER(tr.extra_data->>'sender_domain') NOT IN ('google.com', 'googlemail.com'))
-                        ORDER BY tr.last_detected_at DESC LIMIT :lim OFFSET :off
+                        {VISIBLE_THREAD_RESULTS_SQL}
+                        AND tr.thread_id = :tid
+                        ORDER BY tr.last_detected_at DESC, tr.id DESC LIMIT :lim OFFSET :off
                     """),
-                        {"tid": thread_id, "lim": limit, "off": offset, "own_domain": own_domain},
+                        params,
                     ).fetchall()
                 items = [
                     {
@@ -2320,8 +2344,8 @@ class PhishingAPI:
                         "title": r[3],
                         "confidence": r[4],
                         "source": r[5],
-                        "first_detected_at": str(r[6]),
-                        "last_detected_at": str(r[7]),
+                        "first_detected_at": iso_utc(r[6]),
+                        "last_detected_at": iso_utc(r[7]),
                         "status": r[8],
                         "details": r[9],
                         "extra_data": r[10],
