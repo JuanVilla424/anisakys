@@ -156,6 +156,60 @@ def create_test_database(main_module):
     yield db_url
 
 
+def _load_migration(filename: str):
+    """Import an Alembic revision module by file name (they start with digits).
+
+    Args:
+        filename: File name under ``alembic/versions``.
+
+    Returns:
+        The executed module object.
+    """
+    import importlib.util
+
+    path = os.path.join(os.path.dirname(__file__), "..", "alembic", "versions", filename)
+    spec = importlib.util.spec_from_file_location(f"_migration_{filename[:3]}", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def apply_reporting_schema(engine) -> None:
+    """Create the tables the reporting pipeline needs, exactly as Alembic would.
+
+    Runs the baseline revision (001) through a minimal ``op`` stand-in and then
+    the reporting revision's SQL constants (004). Every statement is idempotent,
+    so this is safe on a test database that already has some of the tables.
+
+    Args:
+        engine: SQLAlchemy engine bound to the test database.
+    """
+    baseline = _load_migration("001_baseline_schema.py")
+    reporting = _load_migration("004_reporting_outbox.py")
+    with engine.begin() as conn:
+
+        class _Op:
+            @staticmethod
+            def execute(sql: str) -> None:
+                conn.execute(text(sql))
+
+        baseline.op = _Op()
+        baseline.upgrade()
+        for statement in reporting.UPGRADE_STATEMENTS:
+            conn.execute(text(statement))
+
+
+@pytest.fixture(scope="session", autouse=True)
+def reporting_schema(create_test_database):
+    """Apply migrations 001 + 004 to the test database once per session."""
+    engine = create_engine(create_test_database)
+    try:
+        apply_reporting_schema(engine)
+    finally:
+        engine.dispose()
+    yield
+
+
 @pytest.fixture
 def scratch_database(create_test_database):
     """Factory for throw-away databases on the test server (migration tests).
