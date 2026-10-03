@@ -97,6 +97,32 @@ def rate_limit_key() -> str:
     return get_remote_address()
 
 
+def parse_recipients(raw: Optional[str]) -> List[str]:
+    """Decode the ``abuse_reports.recipients`` column into a list of addresses.
+
+    ReportTracker stores recipients JSON-encoded (``["a@x", "b@y"]``); rows
+    written by older versions hold a plain comma-separated string. Both
+    formats are accepted.
+
+    Args:
+        raw: Raw column value (JSON array, JSON string, legacy CSV or None).
+
+    Returns:
+        The non-empty, whitespace-stripped recipient addresses in stored order.
+    """
+    if not raw:
+        return []
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, ValueError):
+        decoded = raw.split(",")
+    if isinstance(decoded, str):
+        decoded = decoded.split(",")
+    if not isinstance(decoded, list):
+        return []
+    return [item.strip() for item in decoded if isinstance(item, str) and item.strip()]
+
+
 class PhishingAPI:
     """REST API for external phishing reports with multi-API integration and Grinder integration."""
 
@@ -1015,7 +1041,7 @@ class PhishingAPI:
                     {
                         "report_id": r[0],
                         "site_url": r[1],
-                        "recipients": [e.strip() for e in (r[2] or "").split(",") if e.strip()],
+                        "recipients": parse_recipients(r[2]),
                         "status": r[3] or "sent",
                         "report_date": r[4].isoformat() if r[4] else None,
                         "sla_deadline": r[5].isoformat() if r[5] else None,
