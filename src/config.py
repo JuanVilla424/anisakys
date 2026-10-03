@@ -143,6 +143,16 @@ class Settings(BaseSettings):
 
     # --- v2 phase 0: detection & threat-intel providers ------------------------
     GOOGLE_WEB_RISK_API_KEY: Optional[str] = None
+    # Web Risk Submission API (projects/{project}/uris:submit). It needs OAuth
+    # credentials for an allowlisted project; an API key alone cannot submit.
+    # Disabled unless GOOGLE_CLOUD_PROJECT is set. Credentials come from the
+    # service-account JSON at GOOGLE_APPLICATION_CREDENTIALS, or from
+    # Application Default Credentials when that is unset.
+    GOOGLE_CLOUD_PROJECT: Optional[str] = None
+    GOOGLE_APPLICATION_CREDENTIALS: Optional[str] = None
+    # Best-effort submission through the undocumented Safe Browsing crx-report
+    # endpoint; delivery cannot be verified (reported as crx_report_unverified).
+    GSB_CRX_REPORT_ENABLED: bool = True
 
     # --- v2 phase 0: platform, logging & operations ----------------------------
     # Logging (src/observability/structured_logger.py); LOG_LEVEL above sets the
