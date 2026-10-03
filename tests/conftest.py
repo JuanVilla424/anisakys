@@ -4,6 +4,7 @@ import pytest
 import uuid
 from urllib.parse import urlparse
 import psycopg2
+from alembic import command
 from sqlalchemy import create_engine, text
 from contextlib import contextmanager
 
@@ -23,33 +24,86 @@ def main_module():
     return main
 
 
+def maintenance_database_url(db_url: str) -> str:
+    """Return the URL of the ``postgres`` maintenance database on the same server.
+
+    Args:
+        db_url: URL of any database on the server.
+
+    Returns:
+        The same URL pointing at the ``postgres`` database.
+    """
+    parsed = urlparse(db_url)
+    return parsed._replace(path="/postgres").geturl()
+
+
+def upgrade_database_to_head(db_url: str) -> None:
+    """Build or update a database schema exactly like production: ``alembic upgrade head``.
+
+    Args:
+        db_url: URL of the database to migrate.
+    """
+    from src.database.schema import get_alembic_config
+
+    command.upgrade(get_alembic_config(db_url), "head")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def create_test_database(main_module):
-    """
-    Creates the test database if it does not exist.
+    """Create the test database if needed and migrate it to the Alembic head.
+
+    The schema comes only from the migrations (the application has no runtime
+    DDL any more), so the suite exercises the same schema as production.
     """
     db_url = main_module.DATABASE_URL
-    parsed = urlparse(db_url)
-    test_db = parsed.path.lstrip("/")
+    test_db = urlparse(db_url).path.lstrip("/")
 
-    # Build a connection URL to the default database
-    default_db = "postgres"
-    default_db_url = db_url.replace(f"/{test_db}", f"/{default_db}")
-
-    conn = psycopg2.connect(default_db_url)
+    conn = psycopg2.connect(maintenance_database_url(db_url))
     conn.autocommit = True
     cur = conn.cursor()
     cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (test_db,))
-    exists = cur.fetchone()
-    if not exists:
-        cur.execute(f"CREATE DATABASE {test_db}")
-        print(f"Created test database '{test_db}'.")
-    else:
-        print(f"Test database '{test_db}' already exists.")
+    if not cur.fetchone():
+        cur.execute(f'CREATE DATABASE "{test_db}"')
     cur.close()
     conn.close()
 
+    upgrade_database_to_head(db_url)
+
     yield db_url
+
+
+@pytest.fixture
+def scratch_database(create_test_database):
+    """Factory for throw-away databases on the test server (migration tests).
+
+    Each call creates an empty database named ``<test db>_mig_<random>`` and
+    returns its URL; every database created this way is dropped at teardown.
+    """
+    test_db = urlparse(create_test_database).path.lstrip("/")
+    created = []
+
+    def _create() -> str:
+        name = f"{test_db}_mig_{uuid.uuid4().hex[:8]}"
+        conn = psycopg2.connect(maintenance_database_url(create_test_database))
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f'CREATE DATABASE "{name}"')
+        finally:
+            conn.close()
+        created.append(name)
+        return urlparse(create_test_database)._replace(path=f"/{name}").geturl()
+
+    yield _create
+
+    conn = psycopg2.connect(maintenance_database_url(create_test_database))
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            for name in created:
+                cur.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+    finally:
+        conn.close()
 
 
 @pytest.fixture
