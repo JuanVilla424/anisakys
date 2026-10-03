@@ -153,6 +153,9 @@ class Settings(BaseSettings):
     # Best-effort submission through the undocumented Safe Browsing crx-report
     # endpoint; delivery cannot be verified (reported as crx_report_unverified).
     GSB_CRX_REPORT_ENABLED: bool = True
+    # VirusTotal request budget shared by every client in the process (the
+    # public API allows 4 requests/minute; raise it for premium keys).
+    VIRUSTOTAL_REQUESTS_PER_MINUTE: int = Field(default=4, ge=1)
 
     # --- v2 phase 0: platform, logging & operations ----------------------------
     # Logging (src/observability/structured_logger.py); LOG_LEVEL above sets the
