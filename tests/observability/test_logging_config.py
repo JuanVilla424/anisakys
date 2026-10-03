@@ -50,6 +50,20 @@ def _isolated_logging(monkeypatch) -> Iterator[None]:
     sl.configure_logging()  # back to the suite's bootstrap configuration
 
 
+def active_config() -> sl.LoggingConfig:
+    """The current logging configuration (fails the test if there is none)."""
+    config = sl.current_logging_config()
+    assert config is not None, "logging is not configured"
+    return config
+
+
+def active_log_file() -> str:
+    """Path of the current log file (fails the test if logging is console-only)."""
+    log_file = active_config().log_file
+    assert log_file is not None, "no log file configured"
+    return log_file
+
+
 def managed() -> List[logging.Handler]:
     """Handlers installed by configure_logging on the root logger."""
     return [h for h in logging.getLogger().handlers if getattr(h, "_anisakys_managed", False)]
@@ -137,19 +151,17 @@ class TestHandlers:
     def test_file_name_is_per_role_and_pid(self, tmp_path):
         sl.configure_logging(log_dir=str(tmp_path), process_name="threads")
 
-        config = sl.current_logging_config()
-        assert config is not None
-        assert Path(config.log_file) == tmp_path / f"anisakys-threads-{os.getpid()}.log"
+        assert Path(active_log_file()) == tmp_path / f"anisakys-threads-{os.getpid()}.log"
 
     def test_forked_process_reconfigures_to_its_own_file(self, tmp_path, monkeypatch):
         sl.configure_logging(log_dir=str(tmp_path), process_name="api")
-        parent_file = sl.current_logging_config().log_file
+        parent_file = active_log_file()
 
         monkeypatch.setattr(sl.os, "getpid", lambda: 999_999)
         sl.configure_logging(log_dir=str(tmp_path), process_name="api")
 
-        assert sl.current_logging_config().log_file != parent_file
-        assert sl.current_logging_config().log_file.endswith("anisakys-api-999999.log")
+        assert active_log_file() != parent_file
+        assert active_log_file().endswith("anisakys-api-999999.log")
 
     def test_empty_log_dir_means_console_only(self):
         sl.configure_logging(log_dir="")
@@ -212,7 +224,7 @@ class TestProcessName:
 
         sl.configure_logging(log_dir="")
 
-        assert sl.current_logging_config().process_name == "custom"
+        assert active_config().process_name == "custom"
 
 
 class TestRedaction:
