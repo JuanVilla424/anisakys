@@ -1062,14 +1062,25 @@ class PhishingAPI:
                         400,
                     )
 
+                # abuse_reports.response_received is an INTEGER flag (0/1) in every
+                # schema definition (alembic 001, report_tracker), so the CASE
+                # branches must both be integers: mixing TRUE with the column makes
+                # PostgreSQL reject the statement ("CASE types integer and boolean
+                # cannot be matched").
                 with self.db_manager.engine.begin() as conn:
                     result = conn.execute(
                         text("""
                             UPDATE abuse_reports
-                            SET status=:status,
-                                response_date=CASE WHEN :status IN ('resolved','acknowledged') THEN NOW() ELSE response_date END,
-                                response_received=CASE WHEN :status IN ('resolved','acknowledged') THEN TRUE ELSE response_received END
-                            WHERE report_id=:report_id
+                            SET status = :status,
+                                response_date = CASE
+                                    WHEN :status IN ('resolved', 'acknowledged') THEN NOW()
+                                    ELSE response_date
+                                END,
+                                response_received = CASE
+                                    WHEN :status IN ('resolved', 'acknowledged') THEN 1
+                                    ELSE response_received
+                                END
+                            WHERE report_id = :report_id
                         """),
                         {"status": new_status, "report_id": report_id},
                     )
