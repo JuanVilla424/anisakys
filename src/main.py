@@ -340,8 +340,7 @@ class Engine:
 
             if result:
                 conn.execute(
-                    text(
-                        """
+                    text("""
                         UPDATE phishing_sites
                         SET manual_flag=1, last_seen=:timestamp, reported=0,
                             abuse_report_sent=0,
@@ -351,8 +350,7 @@ class Engine:
                             END,
                             whois_info=:whois_info, registrar=:registrar
                         WHERE url=:url
-                    """
-                    ),
+                    """),
                     {
                         "timestamp": timestamp,
                         "abuse_email": json.dumps(abuse_emails),
@@ -368,15 +366,13 @@ class Engine:
                 )
             else:
                 conn.execute(
-                    text(
-                        """
+                    text("""
                         INSERT INTO phishing_sites
                         (url, manual_flag, first_seen, last_seen, abuse_email,
                          whois_info, registrar, reported, abuse_report_sent)
                         VALUES (:url, 1, :timestamp, :timestamp, :abuse_email,
                                 :whois_info, :registrar, 0, 0)
-                    """
-                    ),
+                    """),
                     {
                         "url": url,
                         "timestamp": timestamp,
@@ -479,8 +475,7 @@ class Engine:
 
                     if not existing:
                         conn.execute(
-                            text(
-                                """
+                            text("""
                                 INSERT INTO phishing_sites
                                 (url, manual_flag, first_seen, last_seen, virustotal_result,
                                  urlvoid_result, phishtank_result, multi_api_threat_level,
@@ -488,8 +483,7 @@ class Engine:
                                 VALUES (:url, 1, :timestamp, :timestamp, :vt_result,
                                         :uv_result, :pt_result, :threat_level, :confidence,
                                         'multi_api_scan', :priority)
-                            """
-                            ),
+                            """),
                             {
                                 "url": url,
                                 "timestamp": timestamp,
@@ -1011,17 +1005,13 @@ def show_auto_status():
             ).scalar()
 
             # Threat level breakdown
-            threat_breakdown = conn.execute(
-                text(
-                    """
+            threat_breakdown = conn.execute(text("""
                     SELECT multi_api_threat_level, COUNT(*) as count
                     FROM phishing_sites
                     WHERE auto_analysis_status = 'completed'
                     GROUP BY multi_api_threat_level
                     ORDER BY count DESC
-                """
-                )
-            ).fetchall()
+                """)).fetchall()
 
             print(f"📊 DETECTION STATISTICS:")
             print(f"   🎯 Total Auto-Detected Sites: {total_auto_detected}")
@@ -1093,9 +1083,7 @@ def show_auto_status():
             # Recent pending sites for analysis
             if pending_analysis > 0:
                 print(f"\n🔍 NEXT SITES FOR ANALYSIS:")
-                recent_pending = conn.execute(
-                    text(
-                        """
+                recent_pending = conn.execute(text("""
                         SELECT url, detection_keywords, first_seen, priority
                         FROM phishing_sites
                         WHERE auto_analysis_status = 'pending'
@@ -1108,9 +1096,7 @@ def show_auto_status():
                             END,
                             first_seen ASC
                         LIMIT 5
-                    """
-                    )
-                ).fetchall()
+                    """)).fetchall()
 
                 for i, (url, keywords, first_seen, priority) in enumerate(recent_pending, 1):
                     print(f"   {i}. {url} ({priority}) - Keywords: {keywords}")
@@ -1118,17 +1104,13 @@ def show_auto_status():
             # Recent auto-report eligible sites
             if auto_eligible > 0:
                 print(f"\n🚨 SITES READY FOR AUTO-REPORTING:")
-                recent_eligible = conn.execute(
-                    text(
-                        """
+                recent_eligible = conn.execute(text("""
                         SELECT url, multi_api_threat_level, api_confidence_score
                         FROM phishing_sites
                         WHERE auto_report_eligible = 1 AND abuse_report_sent = 0
                         ORDER BY api_confidence_score DESC, first_seen ASC
                         LIMIT 5
-                    """
-                    )
-                ).fetchall()
+                    """)).fetchall()
 
                 for i, (url, threat_level, confidence) in enumerate(recent_eligible, 1):
                     print(f"   {i}. {url} - {threat_level} ({confidence}% confidence)")

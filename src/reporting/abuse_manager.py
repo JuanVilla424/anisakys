@@ -917,16 +917,14 @@ class AbuseReportManager:
                     try:
                         with self.db_manager.engine.begin() as conn:
                             conn.execute(
-                                text(
-                                    """UPDATE phishing_sites
+                                text("""UPDATE phishing_sites
                                     SET site_status = :status,
                                         last_seen = CURRENT_TIMESTAMP,
                                         takedown_date = CASE
                                             WHEN :status = 'down' THEN CURRENT_TIMESTAMP
                                             ELSE takedown_date
                                         END
-                                    WHERE url = :url"""
-                                ),
+                                    WHERE url = :url"""),
                                 {"status": current_status, "url": site_url},
                             )
                             logger.info(
@@ -1162,28 +1160,22 @@ Phishing Detection Team
         try:
             with self.db_manager.engine.begin() as conn:
                 # Create table if not exists
-                conn.execute(
-                    text(
-                        """
+                conn.execute(text("""
                     CREATE TABLE IF NOT EXISTS system_status (
                         task_name VARCHAR(100) PRIMARY KEY,
                         last_run TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
-                """
-                    )
-                )
+                """))
 
                 # Upsert the follow-up time
                 conn.execute(
-                    text(
-                        """
+                    text("""
                     INSERT INTO system_status (task_name, last_run, updated_at)
                     VALUES ('followup_worker', :last_run, :updated_at)
                     ON CONFLICT (task_name)
                     DO UPDATE SET last_run = :last_run, updated_at = :updated_at
-                """
-                    ),
+                """),
                     {"last_run": datetime.datetime.now(), "updated_at": datetime.datetime.now()},
                 )
 
@@ -1204,9 +1196,7 @@ Phishing Detection Team
             try:
                 with self.db_manager.engine.begin() as conn:
                     # Process both manual flags and auto-detected sites
-                    sites = conn.execute(
-                        text(
-                            """
+                    sites = conn.execute(text("""
                             SELECT url, abuse_email, last_report_sent, site_status, takedown_date, priority,
                                    manual_flag, auto_detected, auto_report_eligible, all_abuse_emails
                             FROM phishing_sites
@@ -1221,9 +1211,7 @@ Phishing Detection Team
                                     ELSE 2
                                 END,
                                 first_seen ASC
-                        """
-                        )
-                    ).fetchall()
+                        """)).fetchall()
 
                     if sites:
                         logger.info(
@@ -1267,13 +1255,11 @@ Phishing Detection Team
                             multi_api_results = None
                             try:
                                 api_data = conn.execute(
-                                    text(
-                                        """
+                                    text("""
                                         SELECT virustotal_result, urlvoid_result, phishtank_result,
                                                multi_api_threat_level, api_confidence_score, detection_keywords
                                         FROM phishing_sites WHERE url = :url
-                                    """
-                                    ),
+                                    """),
                                     {"url": url},
                                 ).fetchone()
 
@@ -1349,8 +1335,7 @@ Phishing Detection Team
                                     # Store fresh results
                                     try:
                                         conn.execute(
-                                            text(
-                                                """
+                                            text("""
                                                 UPDATE phishing_sites
                                                 SET virustotal_result = :vt_result,
                                                     urlvoid_result = :uv_result,
@@ -1358,8 +1343,7 @@ Phishing Detection Team
                                                     multi_api_threat_level = :threat_level,
                                                     api_confidence_score = :confidence_score
                                                 WHERE url = :url
-                                            """
-                                            ),
+                                            """),
                                             {
                                                 "vt_result": json.dumps(
                                                     multi_api_results.get("virustotal", {})
@@ -1404,15 +1388,13 @@ Phishing Detection Team
                             cloudflare_detected = resolved_ip and is_cloudflare_ip(resolved_ip)
 
                             conn.execute(
-                                text(
-                                    """
+                                text("""
                                     UPDATE phishing_sites
                                     SET whois_info=:whois_str, last_seen=:timestamp, reported=1, last_report_sent=:timestamp,
                                         resolved_ip=:resolved_ip, asn_provider=:asn_provider, is_cloudflare=:is_cloudflare,
                                         site_status=:new_status, takedown_date=:new_takedown
                                     WHERE url=:url
-                                """
-                                ),
+                                """),
                                 {
                                     "whois_str": whois_str,
                                     "timestamp": timestamp,
@@ -1519,8 +1501,7 @@ Phishing Detection Team
                                     multi_api_results=multi_api_results,
                                 ):
                                     conn.execute(
-                                        text(
-                                            """
+                                        text("""
                                             UPDATE phishing_sites
                                             SET abuse_report_sent=1,
                                                 abuse_email = CASE
@@ -1529,8 +1510,7 @@ Phishing Detection Team
                                                 END,
                                                 last_report_sent=:timestamp
                                             WHERE url=:url
-                                        """
-                                        ),
+                                        """),
                                         {
                                             "abuse_email": json.dumps(
                                                 abuse_list
@@ -1599,9 +1579,7 @@ Phishing Detection Team
         try:
             with self.db_manager.engine.connect() as conn:
                 logger.info("🔍 Querying for manual sites to process...")
-                result = conn.execute(
-                    text(
-                        """
+                result = conn.execute(text("""
                         SELECT url, reported, abuse_report_sent, abuse_email, priority, site_status, takedown_date
                         FROM phishing_sites
                         WHERE manual_flag = 1 AND reported = 0 AND site_status = 'up'
@@ -1613,9 +1591,7 @@ Phishing Detection Team
                                 ELSE 2
                             END,
                             first_seen ASC
-                    """
-                    )
-                )
+                    """))
                 # Convert to list and close connection immediately
                 sites_to_process = [dict(row._mapping) for row in result]
                 logger.debug("🔒 Initial query connection closed")
@@ -1775,8 +1751,7 @@ Phishing Detection Team
 
                         # Update WHOIS information in database
                         conn.execute(
-                            text(
-                                """
+                            text("""
                                 UPDATE phishing_sites
                                 SET whois_info=:whois_str, last_seen=:timestamp, reported=1,
                                     resolved_ip=:resolved_ip, asn_provider=:asn_provider, is_cloudflare=:is_cloudflare,
@@ -1786,8 +1761,7 @@ Phishing Detection Team
                                         ELSE :abuse_email
                                     END
                                 WHERE url=:url
-                            """
-                            ),
+                            """),
                             {
                                 "whois_str": (
                                     json.dumps(serialize_for_json(whois_info))

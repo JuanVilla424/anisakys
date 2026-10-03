@@ -12,7 +12,6 @@ Methods:
 
 from typing import Dict, List, Optional
 
-
 # Each entry: patterns (lowercase substrings to match against registrar_name),
 # form_url, and method
 REGISTRAR_FORM_DB: List[Dict] = [

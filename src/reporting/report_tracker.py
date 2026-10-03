@@ -115,9 +115,7 @@ class ReportTracker:
                         self._add_missing_columns(conn)
                 else:
                     # Create table from scratch
-                    conn.execute(
-                        text(
-                            """
+                    conn.execute(text("""
                             CREATE TABLE abuse_reports (
                                 id SERIAL PRIMARY KEY,
                                 site_url TEXT NOT NULL,
@@ -141,9 +139,7 @@ class ReportTracker:
                                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                                 FOREIGN KEY (site_id) REFERENCES phishing_sites(id)
                             )
-                        """
-                        )
-                    )
+                        """))
                     logger.info("Created abuse_reports table")
         except Exception as e:
             logger.error(f"Error ensuring abuse_reports table exists: {e}")
@@ -157,16 +153,12 @@ class ReportTracker:
         """Verify if the table schema matches expected structure"""
         try:
             # Get current table columns and their types
-            result = conn.execute(
-                text(
-                    """
+            result = conn.execute(text("""
                     SELECT column_name, data_type, is_nullable, column_default
                     FROM information_schema.columns
                     WHERE table_name = 'abuse_reports'
                     ORDER BY ordinal_position
-                    """
-                )
-            ).fetchall()
+                    """)).fetchall()
 
             current_columns = {
                 row[0]: {"type": row[1], "nullable": row[2], "default": row[3]} for row in result
@@ -206,9 +198,7 @@ class ReportTracker:
             conn.execute(text("ALTER TABLE abuse_reports RENAME TO abuse_reports_backup"))
 
             # Create new table with correct schema
-            conn.execute(
-                text(
-                    """
+            conn.execute(text("""
                     CREATE TABLE abuse_reports (
                         id SERIAL PRIMARY KEY,
                         site_url TEXT NOT NULL,
@@ -232,21 +222,15 @@ class ReportTracker:
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         FOREIGN KEY (site_id) REFERENCES phishing_sites(id)
                     )
-                """
-                )
-            )
+                """))
 
             # Copy data from backup
-            conn.execute(
-                text(
-                    """
+            conn.execute(text("""
                     INSERT INTO abuse_reports (site_url, recipients, status, report_id)
                     SELECT site_url, recipients, COALESCE(status, 'sent'), report_id
                     FROM abuse_reports_backup
                     WHERE site_url IS NOT NULL AND recipients IS NOT NULL
-                    """
-                )
-            )
+                    """))
 
             # Drop backup
             conn.execute(text("DROP TABLE abuse_reports_backup"))
@@ -271,9 +255,7 @@ class ReportTracker:
                 conn.execute(text("DROP TABLE IF EXISTS abuse_reports CASCADE"))
 
                 # Create minimal table
-                conn.execute(
-                    text(
-                        """
+                conn.execute(text("""
                         CREATE TABLE abuse_reports (
                             id SERIAL PRIMARY KEY,
                             site_url TEXT NOT NULL,
@@ -282,9 +264,7 @@ class ReportTracker:
                             status TEXT DEFAULT 'sent',
                             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                         )
-                    """
-                    )
-                )
+                    """))
                 logger.info("Created minimal abuse_reports table")
         except Exception as e:
             logger.error(f"Failed to create minimal table: {e}")
@@ -369,8 +349,7 @@ class ReportTracker:
                 if existing_report:
                     # Update existing report
                     conn.execute(
-                        text(
-                            """
+                        text("""
                             UPDATE abuse_reports SET
                                 site_id = :site_id,
                                 report_date = :report_date,
@@ -387,8 +366,7 @@ class ReportTracker:
                                 follow_up_required = :follow_up_required,
                                 updated_at = :updated_at
                             WHERE id = :existing_id
-                            """
-                        ),
+                            """),
                         {
                             "existing_id": existing_report[0],
                             "site_url": report.site_url,
@@ -420,8 +398,7 @@ class ReportTracker:
                 else:
                     # Insert new report (without specifying id, let SERIAL handle it)
                     conn.execute(
-                        text(
-                            """
+                        text("""
                             INSERT INTO abuse_reports (
                                 site_url, site_id, report_date, recipients, cc_recipients, subject,
                                 report_id, status, sla_deadline, icann_compliant,
@@ -433,8 +410,7 @@ class ReportTracker:
                                 :screenshot_included, :screenshot_path, :attachment_count,
                                 :follow_up_required, :created_at, :updated_at
                             )
-                        """
-                        ),
+                        """),
                         {
                             "site_url": report.site_url,
                             "site_id": site_id,
@@ -466,15 +442,13 @@ class ReportTracker:
 
                 # Update phishing_sites in a separate transaction
                 conn.execute(
-                    text(
-                        """
+                    text("""
                         UPDATE phishing_sites
                         SET abuse_report_sent = 1,
                             reported = 1,
                             last_report_sent = :report_date
                         WHERE url = :site_url
-                    """
-                    ),
+                    """),
                     {
                         "site_url": report.site_url,
                         "report_date": report.report_date,
@@ -686,9 +660,7 @@ class ReportTracker:
         """
         try:
             with self.db_engine.connect() as conn:
-                result = conn.execute(
-                    text(
-                        """
+                result = conn.execute(text("""
                         SELECT ar.* FROM abuse_reports ar
                         INNER JOIN phishing_sites ps ON ar.site_url = ps.url
                         WHERE ar.sla_deadline < CURRENT_TIMESTAMP
@@ -696,9 +668,7 @@ class ReportTracker:
                         AND ar.response_received = 0
                         AND ps.site_status NOT IN ('down', 'timeout', 'resolved')
                         ORDER BY ar.sla_deadline ASC
-                    """
-                    )
-                ).fetchall()
+                    """)).fetchall()
 
                 overdue_reports = []
                 for row in result:
@@ -728,16 +698,12 @@ class ReportTracker:
         """
         try:
             with self.db_engine.connect() as conn:
-                result = conn.execute(
-                    text(
-                        """
+                result = conn.execute(text("""
                         SELECT * FROM abuse_reports
                         WHERE follow_up_required = 1
                         AND status NOT IN ('resolved', 'rejected')
                         ORDER BY updated_at ASC
-                    """
-                    )
-                ).fetchall()
+                    """)).fetchall()
 
                 return [dict(row._mapping) for row in result]
 
@@ -814,27 +780,19 @@ class ReportTracker:
                 ).scalar()
 
                 # Overdue reports
-                overdue_count = conn.execute(
-                    text(
-                        """
+                overdue_count = conn.execute(text("""
                         SELECT COUNT(*) FROM abuse_reports
                         WHERE sla_deadline < CURRENT_TIMESTAMP
                         AND status NOT IN ('resolved', 'rejected', 'timeout')
                         AND response_received = 0
-                    """
-                    )
-                ).scalar()
+                    """)).scalar()
 
                 # Average response time (for reports that got responses)
-                avg_response_time = conn.execute(
-                    text(
-                        """
+                avg_response_time = conn.execute(text("""
                         SELECT AVG(EXTRACT(EPOCH FROM (response_date - report_date))/3600) as avg_hours
                         FROM abuse_reports
                         WHERE response_received = 1 AND response_date IS NOT NULL
-                    """
-                    )
-                ).scalar()
+                    """)).scalar()
 
                 return {
                     "total_reports": total_reports or 0,

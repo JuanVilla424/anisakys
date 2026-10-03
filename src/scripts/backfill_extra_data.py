@@ -51,17 +51,13 @@ def run():
     analyzer = EmailAnalyzer()
 
     with engine.begin() as conn:
-        rows = conn.execute(
-            text(
-                """
+        rows = conn.execute(text("""
             SELECT id, extra_data
             FROM thread_results
             WHERE result_type = 'email_threat'
               AND extra_data->>'reply_to' IS NULL
             ORDER BY id ASC
-        """
-            )
-        ).fetchall()
+        """)).fetchall()
 
     total = len(rows)
     print(f"Found {total} findings to backfill")

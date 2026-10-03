@@ -153,12 +153,10 @@ def temporary_test_data(engine, unique_id, data_type="phishing_site"):
         with engine.begin() as conn:
             if data_type == "phishing_site":
                 conn.execute(
-                    text(
-                        """
+                    text("""
                         INSERT INTO phishing_sites (url, manual_flag, first_seen, description)
                         VALUES (:url, 1, CURRENT_TIMESTAMP, :desc)
-                    """
-                    ),
+                    """),
                     {"url": url, "desc": f"Test record {unique_id}"},
                 )
 
@@ -184,12 +182,10 @@ class TestDataManager:
 
         with self.engine.begin() as conn:
             conn.execute(
-                text(
-                    """
+                text("""
                     INSERT INTO phishing_sites (url, manual_flag, first_seen)
                     VALUES (:url, 1, CURRENT_TIMESTAMP)
-                """
-                ),
+                """),
                 {"url": url},
             )
 
@@ -202,12 +198,10 @@ class TestDataManager:
 
         with self.engine.begin() as conn:
             conn.execute(
-                text(
-                    """
+                text("""
                     INSERT INTO scan_results (url, first_seen, response_code)
                     VALUES (:url, CURRENT_TIMESTAMP, 200)
-                """
-                ),
+                """),
                 {"url": url},
             )
 

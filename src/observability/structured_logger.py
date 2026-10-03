@@ -32,7 +32,6 @@ from typing import Any, Dict, Optional
 from logging.handlers import RotatingFileHandler
 from contextvars import ContextVar
 
-
 # Global context variable for correlation ID (thread-safe)
 correlation_id_var: ContextVar[Optional[str]] = ContextVar("correlation_id", default=None)
 

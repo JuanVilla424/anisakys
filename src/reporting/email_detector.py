@@ -876,7 +876,9 @@ class EnhancedAbuseEmailDetector:
                         logger.info(f"📋 Got WHOIS data for {domain} using {whois_server}")
                         return whois_dict
                     else:
-                        logger.warning(f"⚠️ Invalid WHOIS response from {whois_server} for {domain}")
+                        logger.warning(
+                            f"⚠️ Invalid WHOIS response from {whois_server} for {domain}"
+                        )
         except Exception as e:
             logger.debug(f"Direct WHOIS query failed for {domain}: {e}")
 

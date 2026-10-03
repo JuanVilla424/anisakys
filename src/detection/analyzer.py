@@ -372,13 +372,11 @@ class AutoPhishingAnalyzer:
                         # Mark for manual review instead
                         with self.db_manager.engine.begin() as conn:
                             conn.execute(
-                                text(
-                                    """
+                                text("""
                                     UPDATE phishing_sites
                                     SET auto_report_eligible = 0, requires_manual_review = 1
                                     WHERE url = :url
-                                """
-                                ),
+                                """),
                                 {"url": url},
                             )
                         continue
@@ -386,13 +384,11 @@ class AutoPhishingAnalyzer:
                     # Get enhanced multi-API results for a report
                     with self.db_manager.engine.begin() as conn:
                         api_results = conn.execute(
-                            text(
-                                """
+                            text("""
                                 SELECT virustotal_result, urlvoid_result, phishtank_result,
                                        multi_api_threat_level, api_confidence_score
                                 FROM phishing_sites WHERE url = :url
-                            """
-                            ),
+                            """),
                             {"url": url},
                         ).fetchone()
 
@@ -427,8 +423,7 @@ class AutoPhishingAnalyzer:
                         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         with self.db_manager.engine.begin() as conn:
                             conn.execute(
-                                text(
-                                    """
+                                text("""
                                     UPDATE phishing_sites
                                     SET abuse_report_sent = 1,
                                         last_report_sent = :timestamp,
@@ -438,8 +433,7 @@ class AutoPhishingAnalyzer:
                                         END,
                                         reported = 1
                                     WHERE url = :url
-                                """
-                                ),
+                                """),
                                 {"timestamp": timestamp, "abuse_email": abuse_list[0], "url": url},
                             )
 

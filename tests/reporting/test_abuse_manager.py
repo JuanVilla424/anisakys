@@ -23,7 +23,6 @@ from src import main  # noqa: F401 — side-effect import to seed sys.modules
 import src.reporting.abuse_manager as abuse_manager_module
 from src.reporting.abuse_manager import AbuseReportManager
 
-
 # ---------------------------------------------------------------------------
 # Module-level patches (autouse)
 # ---------------------------------------------------------------------------

@@ -41,7 +41,6 @@ for _pkg, _subdir in [("src.intelligence", "intelligence"), ("src.detection", "d
 
 from src.config import settings  # noqa: E402
 
-
 # ── DNS helpers ───────────────────────────────────────────────────────────────
 
 

@@ -58,12 +58,10 @@ def cmd_create(args) -> None:
             sys.exit(1)
 
         conn.execute(
-            text(
-                """
+            text("""
                 INSERT INTO api_keys (key_hash, key_prefix, name, scopes, allowed_ips, description)
                 VALUES (:h, :p, :n, :s, :ips, :desc)
-                """
-            ),
+                """),
             {
                 "h": key_hash,
                 "p": key_prefix,
@@ -84,16 +82,12 @@ def cmd_create(args) -> None:
 def cmd_list(args) -> None:
     engine = _get_engine()
     with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                """
+        rows = conn.execute(text("""
                 SELECT key_prefix, name, scopes, allowed_ips, active,
                        created_at, last_used_at, description
                 FROM api_keys
                 ORDER BY created_at DESC
-                """
-            )
-        ).fetchall()
+                """)).fetchall()
 
     if not rows:
         print("No API keys found.")

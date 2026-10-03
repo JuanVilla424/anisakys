@@ -349,8 +349,7 @@ class PhishingScanner:
 
                                                 # Insert redirect chain
                                                 conn.execute(
-                                                    text(
-                                                        """
+                                                    text("""
                                                         INSERT INTO redirect_chains (
                                                             site_id, original_url, final_url, hop_count,
                                                             chain_urls, status_codes, risk_score,
@@ -362,8 +361,7 @@ class PhishingScanner:
                                                             :has_cloudflare, :has_suspicious_tld, :has_url_shortener,
                                                             :has_cross_domain, :has_loop, :total_time_ms, NOW()
                                                         )
-                                                    """
-                                                    ),
+                                                    """),
                                                     {
                                                         "site_id": site_id,
                                                         "original_url": redirect_chain.original_url,
@@ -430,8 +428,7 @@ class PhishingScanner:
                                     # Store immediate results
                                     with self.db_manager.engine.begin() as conn:
                                         conn.execute(
-                                            text(
-                                                """
+                                            text("""
                                                 UPDATE phishing_sites
                                                 SET auto_analysis_status = 'completed',
                                                     auto_analysis_timestamp = :timestamp,
@@ -442,8 +439,7 @@ class PhishingScanner:
                                                     api_confidence_score = :confidence_score,
                                                     priority = 'high'
                                                 WHERE url = :url
-                                            """
-                                            ),
+                                            """),
                                             {
                                                 "timestamp": datetime.datetime.now().strftime(
                                                     "%Y-%m-%d %H:%M:%S"

@@ -116,9 +116,7 @@ class EmailMonitorScheduler:
         # Phase 1: quick transaction — cleanup stale + fetch due threads
         with db_engine.begin() as conn:
             self._cleanup_stale_executions(conn)
-            rows = conn.execute(
-                text(
-                    """
+            rows = conn.execute(text("""
                     SELECT id, details FROM analysis_threads
                     WHERE thread_type = 'email_monitor'
                       AND status = 'active'
@@ -127,9 +125,7 @@ class EmailMonitorScheduler:
                           last_searched_at IS NULL
                           OR last_searched_at < NOW() - (search_interval_hours || ' hours')::INTERVAL
                       )
-                    """
-                )
-            ).fetchall()
+                    """)).fetchall()
 
         # Phase 2: each thread runs its own transactions — data visible in real-time
         for row in rows:

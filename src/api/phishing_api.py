@@ -410,8 +410,7 @@ class PhishingAPI:
                         if existing:
                             # Update existing record
                             conn.execute(
-                                text(
-                                    """
+                                text("""
                                     UPDATE phishing_sites SET
                                         last_seen = :timestamp,
                                         virustotal_result = :vt_result,
@@ -429,8 +428,7 @@ class PhishingAPI:
                                         kit_confidence = COALESCE(:kit_confidence, kit_confidence),
                                         kit_indicators = COALESCE(:kit_indicators, kit_indicators)
                                     WHERE url = :url
-                                """
-                                ),
+                                """),
                                 {
                                     "timestamp": timestamp,
                                     "vt_result": json.dumps(scan_result.get("virustotal", {})),
@@ -456,8 +454,7 @@ class PhishingAPI:
                         else:
                             # Insert new record
                             conn.execute(
-                                text(
-                                    """
+                                text("""
                                     INSERT INTO phishing_sites (
                                         url, first_seen, last_seen, source,
                                         virustotal_result, urlvoid_result, phishtank_result,
@@ -471,8 +468,7 @@ class PhishingAPI:
                                         'completed', :reg_date, :registrar, :registrant_org, :domain_age,
                                         :all_abuse_emails, :kit_type, :kit_confidence, :kit_indicators
                                     )
-                                """
-                                ),
+                                """),
                                 {
                                     "url": url,
                                     "timestamp": timestamp,
@@ -499,12 +495,10 @@ class PhishingAPI:
 
                     # Get report status info for response
                     report_info = conn.execute(
-                        text(
-                            """
+                        text("""
                             SELECT last_report_sent, abuse_report_sent, all_abuse_emails
                             FROM phishing_sites WHERE url = :url
-                            """
-                        ),
+                            """),
                         {"url": url},
                     ).fetchone()
                     if report_info:
@@ -534,16 +528,14 @@ class PhishingAPI:
 
                 with self.db_manager.engine.begin() as conn:
                     result = conn.execute(
-                        text(
-                            """
+                        text("""
                             SELECT url, manual_flag, first_seen, last_seen,
                                    reported, abuse_report_sent, site_status,
                                    takedown_date, abuse_email, source, priority,
                                    last_report_sent, all_abuse_emails
                             FROM phishing_sites
                             WHERE url = :url
-                        """
-                        ),
+                        """),
                         {"url": url},
                     ).fetchone()
 
@@ -983,8 +975,7 @@ class PhishingAPI:
                     ).scalar()
 
                     rows = conn.execute(
-                        text(
-                            f"""
+                        text(f"""
                             SELECT id, url, site_status, priority, source,
                                    first_seen, last_seen, multi_api_threat_level,
                                    api_confidence_score, registrar_name, domain_age_days,
@@ -993,8 +984,7 @@ class PhishingAPI:
                             FROM phishing_sites {where_sql}
                             ORDER BY last_seen DESC NULLS LAST
                             LIMIT :limit OFFSET :offset
-                            """
-                        ),
+                            """),
                         params,
                     ).fetchall()
 
@@ -1053,8 +1043,7 @@ class PhishingAPI:
                     ).scalar()
 
                     rows = conn.execute(
-                        text(
-                            f"""
+                        text(f"""
                             SELECT ar.report_id, ar.site_url, ar.recipients, ar.status,
                                    ar.report_date, ar.sla_deadline, ar.response_received,
                                    ar.response_date, ar.icann_compliant, ar.screenshot_included,
@@ -1065,8 +1054,7 @@ class PhishingAPI:
                             {where_sql}
                             ORDER BY ar.report_date DESC NULLS LAST
                             LIMIT :limit OFFSET :offset
-                            """
-                        ),
+                            """),
                         params,
                     ).fetchall()
 
@@ -1124,15 +1112,13 @@ class PhishingAPI:
 
                 with self.db_manager.engine.begin() as conn:
                     result = conn.execute(
-                        text(
-                            """
+                        text("""
                             UPDATE abuse_reports
                             SET status=:status,
                                 response_date=CASE WHEN :status IN ('resolved','acknowledged') THEN NOW() ELSE response_date END,
                                 response_received=CASE WHEN :status IN ('resolved','acknowledged') THEN TRUE ELSE response_received END
                             WHERE report_id=:report_id
-                        """
-                        ),
+                        """),
                         {"status": new_status, "report_id": report_id},
                     )
                     if result.rowcount == 0:
@@ -1393,9 +1379,7 @@ class PhishingAPI:
         def get_nav_counts():
             try:
                 with self.db_manager.engine.begin() as conn:
-                    row = conn.execute(
-                        text(
-                            """
+                    row = conn.execute(text("""
                         SELECT
                             (SELECT COUNT(*) FROM phishing_sites WHERE site_status = 'up') AS threats,
                             (SELECT COUNT(*) FROM analysis_threads WHERE status = 'running') AS threads,
@@ -1406,9 +1390,7 @@ class PhishingAPI:
                                  WHERE registrar_name IS NOT NULL
                                  GROUP BY registrar_name HAVING COUNT(*) >= 2
                              )) AS campaigns
-                    """
-                        )
-                    ).fetchone()
+                    """)).fetchone()
                 return (
                     jsonify(
                         {
@@ -1432,8 +1414,7 @@ class PhishingAPI:
                 with self.db_manager.engine.begin() as conn:
                     own_domain = (getattr(settings, "GOOGLE_WORKSPACE_DOMAIN", None) or "").lower()
                     rows = conn.execute(
-                        text(
-                            """
+                        text("""
                         SELECT t.id, t.thread_type, t.label, t.status, t.started_at,
                                t.completed_at, t.results_count, t.details, t.error_message,
                                t.search_interval_hours, t.last_searched_at,
@@ -1453,8 +1434,7 @@ class PhishingAPI:
                                 ORDER BY te.started_at DESC LIMIT 1) AS running_execution_id
                         FROM analysis_threads t
                         ORDER BY t.started_at DESC NULLS LAST
-                    """
-                        ),
+                    """),
                         {"own_domain": own_domain},
                     ).fetchall()
                 items = []
@@ -1498,8 +1478,7 @@ class PhishingAPI:
                 with self.db_manager.engine.begin() as conn:
                     own_domain = (getattr(settings, "GOOGLE_WORKSPACE_DOMAIN", None) or "").lower()
                     row = conn.execute(
-                        text(
-                            """
+                        text("""
                         SELECT
                             (SELECT COUNT(*) FROM analysis_threads WHERE status = 'active'),
                             (SELECT COUNT(*) FROM analysis_threads WHERE status = 'idle'),
@@ -1527,8 +1506,7 @@ class PhishingAPI:
                                   OR LOWER(tr.extra_data->>'sender_domain') != :own_domain)
                              AND (tr.result_type != 'email_threat'
                                   OR LOWER(tr.extra_data->>'sender_domain') NOT IN ('google.com', 'googlemail.com')))
-                    """
-                        ),
+                    """),
                         {"own_domain": own_domain},
                     ).fetchone()
                 return (
@@ -1559,8 +1537,7 @@ class PhishingAPI:
                 with self.db_manager.engine.begin() as conn:
                     total = (
                         conn.execute(
-                            text(
-                                """
+                            text("""
                         SELECT COUNT(*) FROM thread_results tr
                         LEFT JOIN email_sender_reputation esr
                             ON tr.result_type = 'email_threat'
@@ -1572,15 +1549,13 @@ class PhishingAPI:
                              OR LOWER(tr.extra_data->>'sender_domain') != :own_domain)
                         AND (tr.result_type != 'email_threat'
                              OR LOWER(tr.extra_data->>'sender_domain') NOT IN ('google.com', 'googlemail.com'))
-                    """
-                            ),
+                    """),
                             {"tid": thread_id, "own_domain": own_domain},
                         ).scalar()
                         or 0
                     )
                     rows = conn.execute(
-                        text(
-                            """
+                        text("""
                         SELECT tr.id, tr.result_type, tr.found_url, tr.title, tr.confidence,
                                tr.source, tr.first_detected_at, tr.last_detected_at,
                                tr.status, tr.details, tr.extra_data
@@ -1596,8 +1571,7 @@ class PhishingAPI:
                         AND (tr.result_type != 'email_threat'
                              OR LOWER(tr.extra_data->>'sender_domain') NOT IN ('google.com', 'googlemail.com'))
                         ORDER BY tr.last_detected_at DESC LIMIT :lim OFFSET :off
-                    """
-                        ),
+                    """),
                         {"tid": thread_id, "lim": limit, "off": offset, "own_domain": own_domain},
                     ).fetchall()
                 items = [
@@ -1652,9 +1626,7 @@ class PhishingAPI:
 
             try:
                 with self.db_manager.engine.begin() as conn:
-                    groups = conn.execute(
-                        text(
-                            """
+                    groups = conn.execute(text("""
                         SELECT registrar_name,
                                COUNT(*) AS site_count,
                                COUNT(*) FILTER (WHERE site_status = 'up') AS active_count,
@@ -1671,9 +1643,7 @@ class PhishingAPI:
                         HAVING COUNT(*) >= 2
                         ORDER BY COUNT(*) FILTER (WHERE site_status = 'up') DESC,
                                  MAX(last_seen) DESC
-                    """
-                        )
-                    ).fetchall()
+                    """)).fetchall()
 
                     items = []
                     now = _dt.datetime.utcnow()
@@ -1691,13 +1661,11 @@ class PhishingAPI:
                             status = "closed"
 
                         threats_rows = conn.execute(
-                            text(
-                                """
+                            text("""
                             SELECT url, site_status, first_seen, multi_api_threat_level
                             FROM phishing_sites WHERE registrar_name = :r
                             ORDER BY first_seen DESC LIMIT 20
-                        """
-                            ),
+                        """),
                             {"r": g[0]},
                         ).fetchall()
 
@@ -1749,8 +1717,7 @@ class PhishingAPI:
                 with self.db_manager.engine.begin() as conn:
                     if ioc_type == "ip":
                         rows = conn.execute(
-                            text(
-                                """
+                            text("""
                             SELECT resolved_ip AS value,
                                    MIN(first_seen)::text AS first_seen,
                                    MAX(last_seen)::text AS last_seen,
@@ -1760,8 +1727,7 @@ class PhishingAPI:
                             FROM phishing_sites WHERE resolved_ip IS NOT NULL
                             GROUP BY resolved_ip
                             ORDER BY COUNT(*) DESC LIMIT :lim OFFSET :off
-                        """
-                            ),
+                        """),
                             {"lim": limit, "off": offset},
                         ).fetchall()
                         items = [
@@ -1780,8 +1746,7 @@ class PhishingAPI:
                         ]
                     elif ioc_type == "email":
                         rows = conn.execute(
-                            text(
-                                """
+                            text("""
                             SELECT email, COUNT(*) AS hits
                             FROM (
                                 SELECT UNNEST(STRING_TO_ARRAY(all_abuse_emails, ', ')) AS email
@@ -1789,8 +1754,7 @@ class PhishingAPI:
                                 WHERE all_abuse_emails IS NOT NULL AND all_abuse_emails != ''
                             ) sub
                             GROUP BY email ORDER BY COUNT(*) DESC LIMIT :lim OFFSET :off
-                        """
-                            ),
+                        """),
                             {"lim": limit, "off": offset},
                         ).fetchall()
                         items = [
@@ -1809,8 +1773,7 @@ class PhishingAPI:
                         ]
                     else:  # domain (default)
                         rows = conn.execute(
-                            text(
-                                """
+                            text("""
                             SELECT SPLIT_PART(SPLIT_PART(url, '://', 2), '/', 1) AS value,
                                    MIN(first_seen)::text AS first_seen,
                                    MAX(last_seen)::text AS last_seen,
@@ -1819,8 +1782,7 @@ class PhishingAPI:
                             FROM phishing_sites WHERE url IS NOT NULL
                             GROUP BY value, multi_api_threat_level, source
                             ORDER BY MAX(last_seen) DESC LIMIT :lim OFFSET :off
-                        """
-                            ),
+                        """),
                             {"lim": limit, "off": offset},
                         ).fetchall()
                         items = [
@@ -1838,9 +1800,7 @@ class PhishingAPI:
                             for i, r in enumerate(rows)
                         ]
 
-                    counts_row = conn.execute(
-                        text(
-                            """
+                    counts_row = conn.execute(text("""
                         SELECT
                             COUNT(DISTINCT SPLIT_PART(SPLIT_PART(url,'://',2),'/',1)),
                             COUNT(DISTINCT resolved_ip),
@@ -1850,9 +1810,7 @@ class PhishingAPI:
                                    WHERE all_abuse_emails IS NOT NULL
                                    AND all_abuse_emails != '') sub)
                         FROM phishing_sites
-                    """
-                        )
-                    ).fetchone()
+                    """)).fetchone()
 
                 return (
                     jsonify(
@@ -1895,8 +1853,7 @@ class PhishingAPI:
 
                 with self.db_manager.engine.begin() as conn:
                     rows = conn.execute(
-                        text(
-                            """
+                        text("""
                             SELECT
                                 SPLIT_PART(SPLIT_PART(url, '://', 2), '/', 1) AS domain,
                                 resolved_ip,
@@ -1915,8 +1872,7 @@ class PhishingAPI:
                                      multi_api_threat_level, detected_kit_type
                             ORDER BY MAX(last_seen) DESC NULLS LAST
                             LIMIT :lim
-                        """
-                        ),
+                        """),
                         {"lim": limit},
                     ).fetchall()
 
@@ -2656,8 +2612,7 @@ class PhishingAPI:
                         return jsonify({"error": "Thread not found"}), 404
 
                     rows = conn.execute(
-                        text(
-                            """
+                        text("""
                             SELECT
                                 extra_data->>'inbox' AS inbox,
                                 COUNT(*) AS threat_count,
@@ -2669,8 +2624,7 @@ class PhishingAPI:
                               AND extra_data->>'inbox' IS NOT NULL
                             GROUP BY extra_data->>'inbox'
                             ORDER BY max_score DESC, threat_count DESC
-                            """
-                        ),
+                            """),
                         {"tid": thread_id},
                     ).fetchall()
 
@@ -2983,15 +2937,13 @@ class PhishingAPI:
                 if is_new:
                     needs_resolution = not abuse_email
                     conn.execute(
-                        text(
-                            """
+                        text("""
                             INSERT INTO phishing_sites
                             (url, manual_flag, first_seen, last_seen, abuse_email, all_abuse_emails,
                              reported, abuse_report_sent, source, priority, description)
                             VALUES (:url, 1, :timestamp, :timestamp, :abuse_email, NULL,
                                     0, 0, :source, :priority, :description)
-                        """
-                        ),
+                        """),
                         {
                             "url": url,
                             "timestamp": timestamp,
@@ -3005,15 +2957,13 @@ class PhishingAPI:
                 else:
                     needs_resolution = (not abuse_email and not existing[0]) or not existing[1]
                     conn.execute(
-                        text(
-                            """
+                        text("""
                             UPDATE phishing_sites
                             SET manual_flag = 1, last_seen = :timestamp,
                                 abuse_email = COALESCE(:abuse_email, abuse_email),
                                 source = :source, priority = :priority, description = :description
                             WHERE url = :url
-                        """
-                        ),
+                        """),
                         {
                             "timestamp": timestamp,
                             "abuse_email": abuse_email,
@@ -3082,14 +3032,12 @@ class PhishingAPI:
                     all_abuse_emails = ", ".join(abuse_emails)
                     with self.db_manager.engine.begin() as conn:
                         conn.execute(
-                            text(
-                                """
+                            text("""
                                 UPDATE phishing_sites
                                 SET abuse_email = COALESCE(:abuse_email, abuse_email),
                                     all_abuse_emails = COALESCE(:all_abuse_emails, all_abuse_emails)
                                 WHERE url = :url
-                                """
-                            ),
+                                """),
                             {
                                 "abuse_email": abuse_emails[0],
                                 "all_abuse_emails": all_abuse_emails,
@@ -3110,13 +3058,11 @@ class PhishingAPI:
                 if self.report_manager.send_abuse_report(recipients, url, str(whois_info)):
                     with self.db_manager.engine.begin() as conn:
                         conn.execute(
-                            text(
-                                """
+                            text("""
                                 UPDATE phishing_sites
                                 SET abuse_report_sent = 1, last_report_sent = :timestamp, reported = 1
                                 WHERE url = :url
-                                """
-                            ),
+                                """),
                             {"timestamp": timestamp, "url": url},
                         )
                     logger.info(f"✅ Immediate abuse report sent for {url}")
@@ -3139,7 +3085,9 @@ class PhishingAPI:
         if self.api_key:
             logger.info("🔑 API endpoints require Bearer token authentication")
         else:
-            logger.warning("⚠️  API running without authentication - not recommended for production")
+            logger.warning(
+                "⚠️  API running without authentication - not recommended for production"
+            )
 
         self.app.run(host=host, port=port, debug=debug)
 
@@ -3180,9 +3128,7 @@ def upgrade_phishing_db():
     def create_abuse_reports_table():
         """Create table for tracking sent abuse reports"""
         with db_engine.connect() as conn:
-            conn.execute(
-                text(
-                    """
+            conn.execute(text("""
                     CREATE TABLE IF NOT EXISTS abuse_reports (
                         id SERIAL PRIMARY KEY,
                         site_url TEXT NOT NULL,
@@ -3205,9 +3151,7 @@ def upgrade_phishing_db():
                         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                         updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                     )
-                """
-                )
-            )
+                """))
             conn.commit()
             logger.info("✅ Created or verified abuse_reports table")
 
@@ -3215,30 +3159,22 @@ def upgrade_phishing_db():
 
     with db_engine.connect() as conn:
         # First check existing columns
-        result = conn.execute(
-            text(
-                """
+        result = conn.execute(text("""
             SELECT column_name
             FROM information_schema.columns
             WHERE table_name = 'phishing_sites'
-        """
-            )
-        )
+        """))
         existing_columns = {row[0] for row in result}
 
         # Fix api_confidence_score column if it has wrong type
         if "api_confidence_score" in existing_columns:
             try:
                 # Check if it's the wrong numeric type
-                result = conn.execute(
-                    text(
-                        """
+                result = conn.execute(text("""
                     SELECT data_type, numeric_precision, numeric_scale
                     FROM information_schema.columns
                     WHERE table_name = 'phishing_sites' AND column_name = 'api_confidence_score'
-                """
-                    )
-                )
+                """))
                 col_info = result.fetchone()
                 if col_info and col_info[0] == "numeric" and col_info[1] == 5 and col_info[2] == 4:
                     logger.info("🔧 Fixing api_confidence_score column type...")

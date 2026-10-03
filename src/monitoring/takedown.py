@@ -72,13 +72,11 @@ class TakedownMonitor:
                             # Update database if status changed
                             if new_status != current_status or new_takedown != current_takedown:
                                 conn.execute(
-                                    text(
-                                        """
+                                    text("""
                                         UPDATE phishing_sites
                                         SET site_status=:new_status, takedown_date=:new_takedown, last_seen=:timestamp
                                         WHERE url=:url
-                                    """
-                                    ),
+                                    """),
                                     {
                                         "new_status": new_status,
                                         "new_takedown": new_takedown,
@@ -93,14 +91,12 @@ class TakedownMonitor:
                                 # Auto-resolve abuse reports when site goes down
                                 if new_status == "down" and current_status != "down":
                                     conn.execute(
-                                        text(
-                                            """
+                                        text("""
                                             UPDATE abuse_reports
                                             SET status='resolved', response_date=NOW()
                                             WHERE site_url=:url
                                             AND status NOT IN ('resolved', 'rejected')
-                                            """
-                                        ),
+                                            """),
                                         {"url": url},
                                     )
                                     logger.info(

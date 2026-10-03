@@ -215,17 +215,13 @@ class TestFunctionalE2E:
                     "WHERE url IN ('https://test-phish1.com', 'https://test-phish2.com')"
                 )
             )
-            conn.execute(
-                main.text(
-                    """
+            conn.execute(main.text("""
                 INSERT INTO phishing_sites
                 (url, manual_flag, auto_detected, first_seen, auto_analysis_status, priority)
                 VALUES
                 ('https://test-phish1.com', 0, 1, CURRENT_TIMESTAMP, 'pending', 'high'),
                 ('https://test-phish2.com', 0, 1, CURRENT_TIMESTAMP, 'pending', 'medium')
-            """
-                )
-            )
+            """))
 
         # Mock multi-API scan
         with patch.object(engine, "perform_multi_api_scan") as mock_scan:
@@ -249,14 +245,10 @@ class TestFunctionalE2E:
 
         # Check status
         with engine.db_manager.engine.connect() as conn:
-            result = conn.execute(
-                main.text(
-                    """
+            result = conn.execute(main.text("""
                 SELECT COUNT(*) FROM phishing_sites
                 WHERE auto_analysis_status = 'pending'
-            """
-                )
-            ).scalar()
+            """)).scalar()
 
             # Should have pending sites
             assert result >= 0

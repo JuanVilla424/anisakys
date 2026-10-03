@@ -45,14 +45,12 @@ class PhishingUtils:
             if result:
                 new_count = result[2] + 1
                 conn.execute(
-                    text(
-                        """
+                    text("""
                         UPDATE scan_results
                         SET last_seen=:timestamp, response_code=:response_code,
                             found_keywords=:keywords_str, count=:new_count
                         WHERE url=:url
-                    """
-                    ),
+                    """),
                     {
                         "timestamp": timestamp,
                         "response_code": response_code,
@@ -63,13 +61,11 @@ class PhishingUtils:
                 )
             else:
                 conn.execute(
-                    text(
-                        """
+                    text("""
                         INSERT INTO scan_results
                         (url, first_seen, last_seen, response_code, found_keywords, count)
                         VALUES (:url, :timestamp, :timestamp, :response_code, :keywords_str, 1)
-                    """
-                    ),
+                    """),
                     {
                         "url": url,
                         "timestamp": timestamp,
@@ -92,13 +88,11 @@ class PhishingUtils:
             if result:
                 new_count = result[1] + 1
                 conn.execute(
-                    text(
-                        """
+                    text("""
                         UPDATE scan_results
                         SET last_seen=:timestamp, response_code=:response_code, count=:new_count
                         WHERE url=:url
-                    """
-                    ),
+                    """),
                     {
                         "timestamp": timestamp,
                         "response_code": response_code,
@@ -108,13 +102,11 @@ class PhishingUtils:
                 )
             else:
                 conn.execute(
-                    text(
-                        """
+                    text("""
                         INSERT INTO scan_results
                         (url, first_seen, last_seen, response_code, found_keywords, count)
                         VALUES (:url, :timestamp, :timestamp, :response_code, '', 1)
-                    """
-                    ),
+                    """),
                     {"url": url, "timestamp": timestamp, "response_code": response_code},
                 )
             logger.info(f"💾 Updated scan result response code for {url}")

@@ -38,8 +38,7 @@ class SenderReputationTracker:
 
         # Upsert sender
         conn.execute(
-            text(
-                """
+            text("""
                 INSERT INTO email_sender_reputation
                     (sender_email, sender_domain, display_name,
                      report_count, automated_count,
@@ -65,8 +64,7 @@ class SenderReputationTracker:
                     ),
                     display_name    = COALESCE(EXCLUDED.display_name, email_sender_reputation.display_name),
                     last_seen_at    = NOW()
-                """
-            ),
+                """),
             {
                 "email": sender_email.lower(),
                 "domain": sender_domain.lower(),
@@ -79,8 +77,7 @@ class SenderReputationTracker:
 
         # Upsert domain
         conn.execute(
-            text(
-                """
+            text("""
                 INSERT INTO email_domain_reputation
                     (domain, sender_count, report_count, automated_count,
                      threat_score_avg, last_seen_at)
@@ -99,8 +96,7 @@ class SenderReputationTracker:
                         email_domain_reputation.report_count + email_domain_reputation.automated_count + 1
                     ),
                     last_seen_at    = NOW()
-                """
-            ),
+                """),
             {
                 "domain": sender_domain.lower(),
                 "rc": 1 if is_user_report else 0,

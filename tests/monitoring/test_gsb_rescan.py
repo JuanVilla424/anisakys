@@ -11,7 +11,6 @@ from unittest.mock import MagicMock, patch
 import src.monitoring.gsb_rescan as gsb_rescan_module
 from src.monitoring.gsb_rescan import GSBRescanJob, get_gsb_rescan_job, stop_gsb_rescan_job
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

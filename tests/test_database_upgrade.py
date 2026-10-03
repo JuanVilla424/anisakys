@@ -34,9 +34,7 @@ class TestDatabaseUpgrade:
         engine = create_engine(main.DATABASE_URL)
         with engine.begin() as conn:
             conn.execute(text("DROP TABLE IF EXISTS phishing_sites CASCADE"))
-            conn.execute(
-                text(
-                    """
+            conn.execute(text("""
                 CREATE TABLE phishing_sites (
                     id SERIAL PRIMARY KEY,
                     url TEXT UNIQUE,
@@ -44,9 +42,7 @@ class TestDatabaseUpgrade:
                     first_seen TIMESTAMP,
                     last_seen TIMESTAMP
                 )
-            """
-                )
-            )
+            """))
         yield engine
         with engine.begin() as conn:
             conn.execute(text("DROP TABLE IF EXISTS phishing_sites CASCADE"))

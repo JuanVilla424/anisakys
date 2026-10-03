@@ -190,14 +190,12 @@ class TestWhoisResolution(unittest.TestCase):
 
     def test_resolve_whois_with_raw_text(self):
         """Test WHOIS resolution by parsing raw text."""
-        whois_data = {
-            "raw_whois": """
+        whois_data = {"raw_whois": """
             Domain Name: example.com
             Registrar: Example Registrar
             Abuse Contact: abuse@example.com
             Abuse-Mailbox: security@example.com
-            """
-        }
+            """}
         result = self.resolver.resolve(whois_data=whois_data)
         self.assertGreaterEqual(len(result), 1)
         # Should find at least one abuse email in the raw text

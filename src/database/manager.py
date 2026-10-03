@@ -39,9 +39,7 @@ class DatabaseManager:
     def init_db(self):
         """Initialize scan results table."""
         with self.engine.connect() as conn:
-            conn.execute(
-                text(
-                    """
+            conn.execute(text("""
                     CREATE TABLE IF NOT EXISTS scan_results (
                         id SERIAL PRIMARY KEY,
                         url TEXT UNIQUE,
@@ -51,18 +49,14 @@ class DatabaseManager:
                         found_keywords TEXT,
                         count INTEGER
                     )
-                """
-                )
-            )
+                """))
             conn.commit()
             logger.info("🗄️  Initialized scan_results table.")
 
     def init_phishing_db(self):
         """Initialize phishing sites table with enhanced multi-API support."""
         with self.engine.connect() as conn:
-            conn.execute(
-                text(
-                    """
+            conn.execute(text("""
                     CREATE TABLE IF NOT EXISTS phishing_sites (
                         id SERIAL PRIMARY KEY,
                         url TEXT UNIQUE,
@@ -106,9 +100,7 @@ class DatabaseManager:
                         status TEXT DEFAULT 'new',
                         assigned_to TEXT
                     )
-                """
-                )
-            )
+                """))
             conn.execute(
                 text("ALTER TABLE phishing_sites ADD COLUMN IF NOT EXISTS detected_kit_type TEXT")
             )
@@ -141,7 +133,9 @@ class DatabaseManager:
                     conn.commit()
                 except Exception:
                     pass  # Column already exists
-            logger.info("🗄️  Migration complete: Added registration info columns to phishing_sites.")
+            logger.info(
+                "🗄️  Migration complete: Added registration info columns to phishing_sites."
+            )
 
     def migrate_gsb_columns(self):
         """Add Google Safe Browsing columns to phishing_sites table (v3 migration)."""
@@ -185,8 +179,7 @@ class DatabaseManager:
         try:
             with self.engine.connect() as conn:
                 results = conn.execute(
-                    text(
-                        """
+                    text("""
                         SELECT url, gsb_last_check, gsb_safe, gsb_threat_type,
                                multi_api_threat_level, api_confidence_score
                         FROM phishing_sites
@@ -199,8 +192,7 @@ class DatabaseManager:
                             gsb_last_check ASC NULLS FIRST,
                             api_confidence_score DESC
                         LIMIT :limit
-                        """
-                    ),
+                        """),
                     {"max_age_hours": max_age_hours, "limit": limit},
                 ).fetchall()
 
@@ -251,16 +243,14 @@ class DatabaseManager:
             with self.engine.begin() as conn:
                 # Update GSB columns
                 conn.execute(
-                    text(
-                        """
+                    text("""
                         UPDATE phishing_sites
                         SET gsb_result = :gsb_result,
                             gsb_threat_type = :threat_type,
                             gsb_last_check = :timestamp,
                             gsb_safe = :is_safe
                         WHERE url = :url
-                        """
-                    ),
+                        """),
                     {
                         "gsb_result": json.dumps(gsb_result),
                         "threat_type": threat_type,
@@ -276,16 +266,14 @@ class DatabaseManager:
                     # Escalate threat level if GSB now shows threat
                     new_threat_level = "critical" if threat_type == "MALWARE" else "high"
                     conn.execute(
-                        text(
-                            """
+                        text("""
                             UPDATE phishing_sites
                             SET multi_api_threat_level = :threat_level,
                                 priority = 'high'
                             WHERE url = :url
                             AND (multi_api_threat_level NOT IN ('critical', 'high')
                                  OR multi_api_threat_level IS NULL)
-                            """
-                        ),
+                            """),
                         {"threat_level": new_threat_level, "url": url},
                     )
 
@@ -325,8 +313,7 @@ class DatabaseManager:
         try:
             with self.engine.connect() as conn:
                 results = conn.execute(
-                    text(
-                        """
+                    text("""
                         SELECT url, gsb_threat_type, first_seen,
                                multi_api_threat_level, api_confidence_score
                         FROM phishing_sites
@@ -337,8 +324,7 @@ class DatabaseManager:
                         AND site_status != 'down'
                         ORDER BY first_seen DESC
                         LIMIT 20
-                        """
-                    ),
+                        """),
                     {"since_hours": since_hours},
                 ).fetchall()
 
@@ -360,9 +346,7 @@ class DatabaseManager:
     def init_registrar_abuse_db(self):
         """Initialize registrar abuse table with enhanced fields."""
         with self.engine.connect() as conn:
-            conn.execute(
-                text(
-                    """
+            conn.execute(text("""
                     CREATE TABLE IF NOT EXISTS registrar_abuse (
                         id SERIAL PRIMARY KEY,
                         registrar_name TEXT UNIQUE NOT NULL,
@@ -372,18 +356,14 @@ class DatabaseManager:
                         notes TEXT,
                         manual_override INTEGER DEFAULT 0
                     )
-                """
-                )
-            )
+                """))
             conn.commit()
             logger.info("🗄️  Initialized registrar_abuse table.")
 
     def init_hosting_abuse_db(self):
         """Initialize hosting provider abuse table."""
         with self.engine.connect() as conn:
-            conn.execute(
-                text(
-                    """
+            conn.execute(text("""
                     CREATE TABLE IF NOT EXISTS hosting_abuse (
                         id SERIAL PRIMARY KEY,
                         provider_name TEXT NOT NULL,
@@ -395,9 +375,7 @@ class DatabaseManager:
                         manual_override INTEGER DEFAULT 0,
                         UNIQUE(provider_name, asn)
                     )
-                """
-                )
-            )
+                """))
             conn.commit()
             logger.info("🗄️  Initialized hosting_abuse table.")
 
@@ -463,15 +441,13 @@ class DatabaseManager:
                 if existing:
                     # Update existing record with new detection
                     conn.execute(
-                        text(
-                            """
+                        text("""
                             UPDATE phishing_sites
                             SET auto_detected = 1, last_seen = :timestamp,
                                 detection_keywords = :keywords, source = :source,
                                 auto_analysis_status = 'pending'
                             WHERE url = :url
-                        """
-                        ),
+                        """),
                         {
                             "timestamp": timestamp,
                             "keywords": keywords_str,
@@ -484,15 +460,13 @@ class DatabaseManager:
                 else:
                     # Insert new detection
                     conn.execute(
-                        text(
-                            """
+                        text("""
                             INSERT INTO phishing_sites
                             (url, auto_detected, first_seen, last_seen, detection_keywords,
                              source, auto_analysis_status, priority)
                             VALUES (:url, 1, :timestamp, :timestamp, :keywords,
                                     :source, 'pending', 'high')
-                        """
-                        ),
+                        """),
                         {
                             "url": url,
                             "timestamp": timestamp,
@@ -540,8 +514,7 @@ class DatabaseManager:
         try:
             with self.engine.begin() as conn:
                 results = conn.execute(
-                    text(
-                        """
+                    text("""
                         SELECT url, detection_keywords, first_seen, source, priority
                         FROM phishing_sites
                         WHERE (
@@ -564,8 +537,7 @@ class DatabaseManager:
                             END,
                             first_seen ASC
                         LIMIT :limit
-                    """
-                    ),
+                    """),
                     {"limit": limit},
                 ).fetchall()
 
@@ -622,8 +594,7 @@ class DatabaseManager:
                         gsb_threat_type = threats[0].get("threat_type", "UNKNOWN")
 
                 conn.execute(
-                    text(
-                        """
+                    text("""
                         UPDATE phishing_sites
                         SET auto_analysis_status = :status,
                             auto_analysis_timestamp = :timestamp,
@@ -644,8 +615,7 @@ class DatabaseManager:
                             gsb_threat_type = :gsb_threat_type,
                             gsb_last_check = :timestamp
                         WHERE url = :url
-                    """
-                    ),
+                    """),
                     {
                         "status": "completed",
                         "timestamp": timestamp,
@@ -692,8 +662,7 @@ class DatabaseManager:
         try:
             with self.engine.begin() as conn:
                 results = conn.execute(
-                    text(
-                        """
+                    text("""
                         SELECT url, multi_api_threat_level, api_confidence_score,
                                detection_keywords, auto_analysis_timestamp, priority
                         FROM phishing_sites
@@ -710,8 +679,7 @@ class DatabaseManager:
                             api_confidence_score DESC,
                             auto_analysis_timestamp ASC
                         LIMIT :limit
-                    """
-                    ),
+                    """),
                     {"limit": limit},
                 ).fetchall()
 
@@ -737,9 +705,7 @@ class DatabaseManager:
     def init_threads_db(self):
         """Initialize analysis_threads and thread_results tables."""
         with self.engine.connect() as conn:
-            conn.execute(
-                text(
-                    """
+            conn.execute(text("""
                     CREATE TABLE IF NOT EXISTS analysis_threads (
                         id SERIAL PRIMARY KEY,
                         thread_type VARCHAR(50) NOT NULL,
@@ -758,12 +724,8 @@ class DatabaseManager:
                         search_interval_hours INTEGER,
                         last_searched_at TIMESTAMP
                     )
-                """
-                )
-            )
-            conn.execute(
-                text(
-                    """
+                """))
+            conn.execute(text("""
                     CREATE TABLE IF NOT EXISTS thread_results (
                         id SERIAL PRIMARY KEY,
                         thread_id INTEGER NOT NULL REFERENCES analysis_threads(id),
@@ -779,9 +741,7 @@ class DatabaseManager:
                         assigned_to VARCHAR(100),
                         details JSONB
                     )
-                """
-                )
-            )
+                """))
             conn.execute(
                 text("CREATE INDEX IF NOT EXISTS idx_threads_type ON analysis_threads(thread_type)")
             )
@@ -794,9 +754,7 @@ class DatabaseManager:
             conn.execute(
                 text("CREATE INDEX IF NOT EXISTS idx_results_status ON thread_results(status)")
             )
-            conn.execute(
-                text(
-                    """
+            conn.execute(text("""
                     CREATE TABLE IF NOT EXISTS thread_executions (
                         id SERIAL PRIMARY KEY,
                         thread_id INTEGER NOT NULL REFERENCES analysis_threads(id),
@@ -808,9 +766,7 @@ class DatabaseManager:
                         error_message TEXT,
                         details JSONB
                     )
-                    """
-                )
-            )
+                    """))
             conn.execute(
                 text(
                     "CREATE INDEX IF NOT EXISTS idx_executions_thread ON thread_executions(thread_id)"
@@ -846,9 +802,7 @@ class DatabaseManager:
     def init_blocklist_db(self):
         """Initialize blocklist table for Google Workspace blocked senders."""
         with self.engine.connect() as conn:
-            conn.execute(
-                text(
-                    """
+            conn.execute(text("""
                     CREATE TABLE IF NOT EXISTS blocklist (
                         id SERIAL PRIMARY KEY,
                         entry TEXT NOT NULL,
@@ -858,18 +812,14 @@ class DatabaseManager:
                         created_at TIMESTAMP DEFAULT NOW(),
                         UNIQUE(entry)
                     )
-                    """
-                )
-            )
+                    """))
             conn.commit()
             logger.info("🗄️  Initialized blocklist table.")
 
     def _init_email_reputation_db(self):
         """Initialize email sender and domain reputation tables."""
         with self.engine.connect() as conn:
-            conn.execute(
-                text(
-                    """
+            conn.execute(text("""
                     CREATE TABLE IF NOT EXISTS email_sender_reputation (
                         id SERIAL PRIMARY KEY,
                         sender_email VARCHAR(320) NOT NULL,
@@ -886,12 +836,8 @@ class DatabaseManager:
                         block_reason TEXT,
                         UNIQUE(sender_email)
                     )
-                    """
-                )
-            )
-            conn.execute(
-                text(
-                    """
+                    """))
+            conn.execute(text("""
                     CREATE TABLE IF NOT EXISTS email_domain_reputation (
                         id SERIAL PRIMARY KEY,
                         domain VARCHAR(255) NOT NULL,
@@ -906,9 +852,7 @@ class DatabaseManager:
                         block_reason TEXT,
                         UNIQUE(domain)
                     )
-                    """
-                )
-            )
+                    """))
             conn.execute(
                 text(
                     "CREATE INDEX IF NOT EXISTS idx_sender_rep_domain "

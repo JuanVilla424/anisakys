@@ -15,7 +15,6 @@ from unittest.mock import MagicMock, patch
 import src.monitoring.takedown as takedown_module
 from src.monitoring.takedown import TakedownMonitor, save_offset, get_offset
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
