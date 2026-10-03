@@ -153,24 +153,37 @@ class DatabaseManager:
         """
         Update Google Safe Browsing result for a site.
 
+        Only a checked lookup (HTTP 200 with a parseable body) is persisted; an
+        errored or unconfigured lookup leaves the stored columns untouched so
+        it can neither mark the site safe nor reset its rescan clock.
+
         Args:
             url (str): Site URL
-            gsb_result (Dict[str, Any]): GSB API response
+            gsb_result (Dict[str, Any]): Result from GoogleSafeBrowsingIntegration
             previous_safe (bool): Previous GSB safe status
 
         Returns:
-            Dict with update status and alert info if status changed
+            Dict with update status and alert info if status changed;
+            ``updated`` is ``False`` when the result was not checked.
         """
+        if not gsb_result.get("checked"):
+            # An unchecked lookup is not a verdict: never overwrite the stored
+            # result (or reset its 24h rescan clock) with an implicit "safe".
+            logger.warning(f"⚠️ Ignoring unchecked GSB result for {url}")
+            return {"url": url, "updated": False, "error": gsb_result.get("error") or "not checked"}
+
         try:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            is_safe = gsb_result.get("safe", True)
+            is_safe = gsb_result.get("safe") is True
             threat_type = None
 
             if not is_safe and gsb_result.get("threats_found"):
                 # Get the most severe threat type
                 threats = gsb_result.get("threats_found", [])
+                severity = {"MALWARE": 0, "SOCIAL_ENGINEERING": 1}
                 if threats:
-                    threat_type = threats[0].get("threat_type", "UNKNOWN")
+                    worst = min(threats, key=lambda t: severity.get(t.get("threat_type"), 2))
+                    threat_type = worst.get("threat_type", "UNKNOWN")
 
             with self.engine.begin() as conn:
                 # Update GSB columns
@@ -480,11 +493,14 @@ class DatabaseManager:
                 registrar_name = urlvoid_data.get("registrar_name")
                 registrant_org = urlvoid_data.get("registrant_org")
 
-                # Extract GSB results
-                gsb_data = multi_api_results.get("google_safe_browsing", {})
-                gsb_safe = gsb_data.get("safe", True)
+                # Extract GSB results. An unchecked lookup (API error, timeout,
+                # unconfigured key) carries no verdict: keep the stored GSB
+                # columns, including gsb_last_check, instead of writing "safe".
+                gsb_data = multi_api_results.get("google_safe_browsing", {}) or {}
+                gsb_checked = bool(gsb_data.get("checked"))
+                gsb_safe = gsb_data.get("safe") is True
                 gsb_threat_type = None
-                if not gsb_safe and gsb_data.get("threats_found"):
+                if gsb_checked and not gsb_safe and gsb_data.get("threats_found"):
                     threats = gsb_data.get("threats_found", [])
                     if threats:
                         gsb_threat_type = threats[0].get("threat_type", "UNKNOWN")
@@ -506,10 +522,14 @@ class DatabaseManager:
                             registrar_name = COALESCE(:registrar_name, registrar_name),
                             registrant_org = COALESCE(:registrant_org, registrant_org),
                             domain_age_days = COALESCE(:domain_age_days, domain_age_days),
-                            gsb_result = :gsb_result,
-                            gsb_safe = :gsb_safe,
-                            gsb_threat_type = :gsb_threat_type,
-                            gsb_last_check = :timestamp
+                            gsb_result = CASE WHEN :gsb_checked THEN :gsb_result
+                                              ELSE gsb_result END,
+                            gsb_safe = CASE WHEN :gsb_checked THEN :gsb_safe ELSE gsb_safe END,
+                            gsb_threat_type = CASE WHEN :gsb_checked THEN :gsb_threat_type
+                                                   ELSE gsb_threat_type END,
+                            gsb_last_check = CASE WHEN :gsb_checked THEN
+                                                  CAST(:timestamp AS TIMESTAMP)
+                                                  ELSE gsb_last_check END
                         WHERE url = :url
                     """),
                     {
@@ -529,6 +549,7 @@ class DatabaseManager:
                         "registrar_name": registrar_name,
                         "registrant_org": registrant_org,
                         "domain_age_days": domain_age_days,
+                        "gsb_checked": gsb_checked,
                         "gsb_result": json.dumps(gsb_data) if gsb_data else None,
                         "gsb_safe": 1 if gsb_safe else 0,
                         "gsb_threat_type": gsb_threat_type,
