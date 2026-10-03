@@ -21,7 +21,7 @@ from src.database import DatabaseManager
 from src.detection import PhishingUtils
 from src.dns.network_utils import get_ip_info
 from src.logger import logger
-from src.shutdown import shutdown_requested
+from src.shutdown import is_shutdown_requested, wait_for_shutdown
 
 # Offset file path used by get_offset/save_offset (same source as src.main)
 OFFSET_FILE = getattr(settings, "OFFSET_FILE")
@@ -46,7 +46,7 @@ class TakedownMonitor:
         """Main monitoring loop."""
         first_cycle_done = False
 
-        while not shutdown_requested:
+        while not is_shutdown_requested():
             try:
                 with self.db_manager.engine.begin() as conn:
                     sites = conn.execute(
@@ -119,7 +119,7 @@ class TakedownMonitor:
             except Exception as e:
                 logger.error(f"❌ Error in monitoring loop: {e}")
 
-            time.sleep(self.check_interval)
+            wait_for_shutdown(self.check_interval)
 
 
 def save_offset(offset: int):

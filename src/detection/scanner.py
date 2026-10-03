@@ -39,7 +39,7 @@ from src.models import DynamicBatchConfig
 from src.monitoring.takedown import get_offset, save_offset
 from src.observability.metrics import increment_counter, METRIC_REDIRECT_CHAINS_TOTAL
 from src.observability.structured_logger import log_error, log_with_context
-from src.shutdown import shutdown_requested
+from src.shutdown import is_shutdown_requested, wait_for_shutdown
 
 QUERIES_FILE = getattr(settings, "QUERIES_FILE", None)
 ENABLE_REDIRECT_ANALYSIS = getattr(settings, "ENABLE_REDIRECT_ANALYSIS", True)
@@ -503,7 +503,7 @@ class PhishingScanner:
         logger.debug(f"📊 Total queries to process: {self.total_queries}")
 
         cycle_count = 0
-        while not shutdown_requested:
+        while not is_shutdown_requested():
             cycle_count += 1
             logger.debug(f"🔄 Starting scan cycle #{cycle_count}")
 
@@ -556,4 +556,4 @@ class PhishingScanner:
             gc.collect()
 
             # Very short pause to prevent overwhelming (1 second)
-            time.sleep(1)
+            wait_for_shutdown(1)

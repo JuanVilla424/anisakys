@@ -164,7 +164,14 @@ ABUSE_EMAIL_PATTERNS = [
 ]
 
 # Import shared shutdown state
-from src.shutdown import shutdown_requested, signal_handler
+from src.shutdown import (
+    install_signal_handlers,
+    request_shutdown,
+    is_shutdown_requested,
+    join_registered_threads,
+    register_thread,
+    wait_for_shutdown,
+)
 
 
 class Engine:
@@ -556,10 +563,12 @@ class Engine:
                 target=self.report_manager.report_phishing_sites, daemon=True
             )
             reporting_thread.start()
+            register_thread(reporting_thread)
             logger.info("📧 Abuse reporting thread started")
 
             takedown_thread = threading.Thread(target=self.takedown_monitor.run, daemon=True)
             takedown_thread.start()
+            register_thread(takedown_thread)
             logger.info("📡 Takedown monitoring thread started")
 
             # Start GSB rescan background job
@@ -649,15 +658,18 @@ class Engine:
             target=self.report_manager.report_phishing_sites, daemon=True
         )
         reporting_thread.start()
+        register_thread(reporting_thread)
         logger.debug("📧 Abuse reporting thread started")
 
         takedown_thread = threading.Thread(target=self.takedown_monitor.run, daemon=True)
         takedown_thread.start()
+        register_thread(takedown_thread)
         logger.debug("🔍 Takedown monitoring thread started")
 
         # Start follow-up worker for ICANN compliance (every 24 hours)
         followup_thread = threading.Thread(target=self.report_manager.followup_worker, daemon=True)
         followup_thread.start()
+        register_thread(followup_thread)
         logger.debug("🔄 ICANN follow-up worker started (checks every 24 hours)")
 
         # Start auto-analysis worker if APIs are configured
@@ -713,8 +725,8 @@ class Engine:
 
             logger.info("✅ System ready. Press Ctrl+C to stop.")
 
-            while not shutdown_requested:
-                time.sleep(60)
+            while not wait_for_shutdown(60):
+                pass
 
         elif self.mode.scanning_mode:
             # SCANNING MODE - This should always work regardless of API keys
@@ -1271,13 +1283,19 @@ def main():
         engine_instance = Engine(args)
         logger.debug("✅ Engine instance created successfully")
         logger.debug("🚀 Starting engine with enhanced threat intelligence...")
+        install_signal_handlers(interrupt_main=bool(getattr(args, "start_api", False)))
         engine_instance.start()
+    except KeyboardInterrupt:
+        logger.info("🛑 Interrupt received, stopping background workers...")
     except Exception as e:
         logger.error(f"❌ Failed to create or start engine: {e}")
         import traceback
 
         logger.debug(f"Full traceback: {traceback.format_exc()}")
         raise
+    finally:
+        request_shutdown()
+        join_registered_threads()
 
 
 if __name__ == "__main__":

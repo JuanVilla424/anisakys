@@ -127,7 +127,7 @@ class TestSaveAndGetOffset:
 class TestTakedownMonitorRun:
     def test_exits_immediately_when_shutdown_requested(self, monitor, mock_db, monkeypatch):
         """Should return without touching DB when shutdown_requested is True at entry."""
-        monkeypatch.setattr(takedown_module, "shutdown_requested", True)
+        monkeypatch.setattr(takedown_module, "is_shutdown_requested", lambda: True)
 
         monitor.run()
 
@@ -135,13 +135,13 @@ class TestTakedownMonitorRun:
 
     def test_queries_phishing_sites_table(self, monitor, mock_db, monkeypatch):
         """Should execute a SELECT on phishing_sites during each loop iteration."""
-        monkeypatch.setattr(takedown_module, "shutdown_requested", False)
+        monkeypatch.setattr(takedown_module, "is_shutdown_requested", lambda: False)
 
         mock_conn = MagicMock()
         mock_conn.execute.return_value.fetchall.return_value = []
         mock_db.engine.begin.return_value.__enter__ = MagicMock(return_value=mock_conn)
 
-        with patch("src.monitoring.takedown.time.sleep", side_effect=StopIteration):
+        with patch("src.monitoring.takedown.wait_for_shutdown", side_effect=StopIteration):
             try:
                 monitor.run()
             except StopIteration:
@@ -151,7 +151,7 @@ class TestTakedownMonitorRun:
 
     def test_updates_db_when_status_changes(self, monitor, mock_db, monkeypatch):
         """Should execute UPDATE when PhishingUtils returns a different status."""
-        monkeypatch.setattr(takedown_module, "shutdown_requested", False)
+        monkeypatch.setattr(takedown_module, "is_shutdown_requested", lambda: False)
 
         mock_conn = MagicMock()
         mock_conn.execute.return_value.fetchall.return_value = [
@@ -165,7 +165,7 @@ class TestTakedownMonitorRun:
                 "src.monitoring.takedown.PhishingUtils.determine_site_status",
                 return_value=("down", "2026-01-01 00:00:00"),
             ),
-            patch("src.monitoring.takedown.time.sleep", side_effect=StopIteration),
+            patch("src.monitoring.takedown.wait_for_shutdown", side_effect=StopIteration),
         ):
             try:
                 monitor.run()
@@ -177,7 +177,7 @@ class TestTakedownMonitorRun:
 
     def test_skips_update_when_status_unchanged(self, monitor, mock_db, monkeypatch):
         """Should not call UPDATE when the new status matches the current status."""
-        monkeypatch.setattr(takedown_module, "shutdown_requested", False)
+        monkeypatch.setattr(takedown_module, "is_shutdown_requested", lambda: False)
 
         mock_conn = MagicMock()
         mock_conn.execute.return_value.fetchall.return_value = [
@@ -191,7 +191,7 @@ class TestTakedownMonitorRun:
                 "src.monitoring.takedown.PhishingUtils.determine_site_status",
                 return_value=("active", None),  # same status
             ),
-            patch("src.monitoring.takedown.time.sleep", side_effect=StopIteration),
+            patch("src.monitoring.takedown.wait_for_shutdown", side_effect=StopIteration),
         ):
             try:
                 monitor.run()
@@ -203,7 +203,7 @@ class TestTakedownMonitorRun:
 
     def test_continues_after_per_site_exception(self, monitor, mock_db, monkeypatch):
         """Should process the second site even when the first site raises an exception."""
-        monkeypatch.setattr(takedown_module, "shutdown_requested", False)
+        monkeypatch.setattr(takedown_module, "is_shutdown_requested", lambda: False)
 
         mock_conn = MagicMock()
         mock_conn.execute.return_value.fetchall.return_value = [
@@ -226,7 +226,7 @@ class TestTakedownMonitorRun:
                 "src.monitoring.takedown.PhishingUtils.determine_site_status",
                 return_value=("active", None),
             ),
-            patch("src.monitoring.takedown.time.sleep", side_effect=StopIteration),
+            patch("src.monitoring.takedown.wait_for_shutdown", side_effect=StopIteration),
         ):
             try:
                 monitor.run()
@@ -238,7 +238,7 @@ class TestTakedownMonitorRun:
 
     def test_sets_monitoring_event_after_first_cycle(self, mock_db, monkeypatch):
         """Should set monitoring_event after the first loop cycle completes."""
-        monkeypatch.setattr(takedown_module, "shutdown_requested", False)
+        monkeypatch.setattr(takedown_module, "is_shutdown_requested", lambda: False)
 
         event = threading.Event()
         mon = TakedownMonitor(db_manager=mock_db, timeout=10, monitoring_event=event)
@@ -247,7 +247,7 @@ class TestTakedownMonitorRun:
         mock_conn.execute.return_value.fetchall.return_value = []
         mock_db.engine.begin.return_value.__enter__ = MagicMock(return_value=mock_conn)
 
-        with patch("src.monitoring.takedown.time.sleep", side_effect=StopIteration):
+        with patch("src.monitoring.takedown.wait_for_shutdown", side_effect=StopIteration):
             try:
                 mon.run()
             except StopIteration:

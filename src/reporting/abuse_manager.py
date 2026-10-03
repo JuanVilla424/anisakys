@@ -49,7 +49,7 @@ from src.screenshot_client import get_screenshot_service
 from src.reporting.report_tracker import ReportTracker, create_report_record
 from src.utils.serialization import serialize_for_json
 from src.utils.timeouts import timeout
-from src.shutdown import shutdown_requested
+from src.shutdown import is_shutdown_requested, wait_for_shutdown
 
 if TYPE_CHECKING:
     from src.database import DatabaseManager
@@ -1120,11 +1120,10 @@ Phishing Detection Team
                 )
                 # Wait until 48 hours have passed since last follow-up
                 for _ in range(int(wait_hours * 60)):  # Convert hours to minutes
-                    if not self.running:
+                    if not self.running or wait_for_shutdown(60):
                         return
-                    time.sleep(60)
 
-        while self.running:
+        while self.running and not is_shutdown_requested():
             try:
                 # Process overdue reports
                 self.process_overdue_followups()
@@ -1133,13 +1132,12 @@ Phishing Detection Team
 
                 # Wait 48 hours before next check
                 for _ in range(2880):  # 2880 minutes = 48 hours
-                    if not self.running:
+                    if not self.running or wait_for_shutdown(60):
                         break
-                    time.sleep(60)  # Sleep 1 minute at a time for responsive shutdown
 
             except Exception as e:
                 logger.error(f"❌ Error in follow-up worker: {e}")
-                time.sleep(300)  # Wait 5 minutes before retrying on error
+                wait_for_shutdown(300)  # Wait 5 minutes before retrying on error
 
     def stop_followup_worker(self):
         """Stop the follow-up worker gracefully"""
@@ -1198,7 +1196,7 @@ Phishing Detection Team
             self.monitoring_event.wait()
             logger.info("✅ Monitoring thread initial cycle complete. Starting abuse reporting.")
 
-        while not shutdown_requested:
+        while not is_shutdown_requested():
             try:
                 with self.db_manager.engine.begin() as conn:
                     # Process both manual flags and auto-detected sites
@@ -1549,7 +1547,7 @@ Phishing Detection Team
             except Exception as e:
                 logger.error(f"❌ Error in enhanced abuse reporting loop: {e}")
 
-            time.sleep(settings.REPORT_INTERVAL)
+            wait_for_shutdown(settings.REPORT_INTERVAL)
 
     def process_manual_reports(self, attachment_paths: Optional[List[str]] = None):
         """Process manual reports that haven't been processed yet with multi-API validation."""
