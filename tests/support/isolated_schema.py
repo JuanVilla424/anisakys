@@ -13,7 +13,7 @@ import uuid
 from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
-from typing import Iterable, Iterator, Tuple
+from typing import Iterable, Iterator, Optional, Tuple
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection, Engine, make_url
@@ -67,13 +67,14 @@ def run_upgrade(conn: Connection, filename: str) -> None:
         filename: Migration file name.
     """
     module = load_migration(filename)
-    module.op = _SqlOp(conn)
+    # Rebind the module-level ``op`` the migration imported from alembic.
+    setattr(module, "op", _SqlOp(conn))
     module.upgrade()
 
 
 @contextmanager
 def isolated_schema(
-    base_url: str, migrations: Iterable[str] = ("001_baseline_schema.py",)
+    base_url: Optional[str], migrations: Iterable[str] = ("001_baseline_schema.py",)
 ) -> Iterator[Tuple[Engine, str]]:
     """Create a temporary schema, apply migrations and yield an engine bound to it.
 
@@ -84,7 +85,12 @@ def isolated_schema(
     Yields:
         ``(engine, url)`` where both target the temporary schema through
         ``search_path``.
+
+    Raises:
+        RuntimeError: If no database URL is configured.
     """
+    if not base_url:
+        raise RuntimeError("DATABASE_URL is not configured for tests")
     schema = f"wsc_{uuid.uuid4().hex[:12]}"
     admin = create_engine(base_url, poolclass=NullPool)
     with admin.begin() as conn:
