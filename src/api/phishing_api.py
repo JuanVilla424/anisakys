@@ -28,6 +28,12 @@ from src.config import settings
 from sqlalchemy import text
 from src.database import db_engine
 from src.auth import require_api_key, _hash_key
+from src.api.errors import (
+    current_request_id,
+    install_request_ids,
+    internal_error,
+    scrub_provider_errors,
+)
 from src.api.params import (
     InvalidParameterError,
     bool_arg,
@@ -297,6 +303,7 @@ class PhishingAPI:
             storage_uri=(getattr(settings, "RATELIMIT_STORAGE_URL", None) or "memory://"),
         )
 
+        install_request_ids(self.app)
         self.app.register_error_handler(InvalidParameterError, _invalid_parameter_response)
         self.setup_routes()
 
@@ -355,13 +362,11 @@ class PhishingAPI:
                         url, abuse_email, source, priority, description
                     )
                 except Exception as e:
-                    logger.error(f"❌ Error processing report: {e}")
-                    return (
-                        jsonify({"error": f"Failed to process report: {str(e)}", "url": url}),
-                        500,
+                    return internal_error(
+                        "report_phishing", e, message="Failed to process report", extra={"url": url}
                     )
                 if result.get("status") == "error":
-                    return jsonify(result), 500
+                    return jsonify({**result, "request_id": current_request_id()}), 500
 
                 # If successful, also try to report the IP to Grinder
                 # IMPORTANT: Don't report back to Grinder if this report came from Grinder
@@ -394,17 +399,25 @@ class PhishingAPI:
                             )
                         else:
                             logger.warning(f"⚠️  Failed to report IP to Grinder: {grinder_result}")
-                            result["grinder_report"] = grinder_result
+                            result["grinder_report"] = {
+                                "status": grinder_result.get("status", "error"),
+                                "message": "Grinder report failed",
+                            }
 
                     except Exception as e:
-                        logger.warning(f"⚠️  Could not report IP to Grinder: {e}")
-                        result["grinder_report"] = {"status": "error", "message": str(e)}
+                        logger.warning(
+                            f"⚠️  Could not report IP to Grinder "
+                            f"[request_id={current_request_id()}]: {e}"
+                        )
+                        result["grinder_report"] = {
+                            "status": "error",
+                            "message": "Grinder report failed",
+                        }
 
                 return jsonify(result), 200
 
             except Exception as e:
-                logger.error(f"❌ API error in report_phishing: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("report_phishing", e)
 
         @self.app.route("/api/v1/multi-scan", methods=["POST"])
         # Key-based bucketing (see rate_limit_key) means one leaked/shared key
@@ -613,11 +626,11 @@ class PhishingAPI:
                 except Exception as db_error:
                     logger.error(f"❌ Failed to save scan results: {db_error}")
 
-                return jsonify(scan_result), 200
+                # Provider clients embed raw exception text in their results.
+                return jsonify(scrub_provider_errors(scan_result)), 200
 
             except Exception as e:
-                logger.error(f"❌ API error in multi_api_scan: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("multi_api_scan", e)
 
         @self.app.route("/api/v1/status/<path:url>", methods=["GET"])
         @self.limiter.limit("10 per minute")
@@ -666,8 +679,7 @@ class PhishingAPI:
                     )
 
             except Exception as e:
-                logger.error(f"❌ API error in get_report_status: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("get_report_status", e)
 
         @self.app.route("/api/v1/grinder/test", methods=["POST"])
         @self.limiter.limit("5 per minute")
@@ -685,12 +697,25 @@ class PhishingAPI:
 
                 connection_test = self.grinder_client.test_connection()
 
-                status_code = 200 if connection_test["status"] == "success" else 500
-                return jsonify(connection_test), status_code
+                if connection_test.get("status") == "success":
+                    return jsonify(connection_test), 200
+                logger.warning(
+                    f"⚠️  Grinder connection test failed [request_id={current_request_id()}]: "
+                    f"{connection_test.get('message')}"
+                )
+                return (
+                    jsonify(
+                        {
+                            "status": connection_test.get("status", "error"),
+                            "message": "Grinder connection test failed",
+                            "request_id": current_request_id(),
+                        }
+                    ),
+                    500,
+                )
 
             except Exception as e:
-                logger.error(f"❌ API error in test_grinder_integration: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("test_grinder_integration", e)
 
         @self.app.route("/api/v1/stats", methods=["GET"])
         @self.limiter.limit("20 per minute")
@@ -743,8 +768,7 @@ class PhishingAPI:
                     return jsonify(stats), 200
 
             except Exception as e:
-                logger.error(f"❌ API error in get_stats: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("get_stats", e)
 
         @self.app.route("/api/v1/gsb/rescan", methods=["POST"])
         @self.limiter.limit("2 per minute")
@@ -793,8 +817,7 @@ class PhishingAPI:
                 )
 
             except Exception as e:
-                logger.error(f"❌ API error in gsb_rescan: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("gsb_rescan", e)
 
         @self.app.route("/api/v1/gsb/status", methods=["GET"])
         @self.limiter.limit("10 per minute")
@@ -820,8 +843,7 @@ class PhishingAPI:
                 )
 
             except Exception as e:
-                logger.error(f"❌ API error in gsb_status: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("gsb_status", e)
 
         @self.app.route("/api/v1/gsb/check", methods=["POST"])
         @self.limiter.limit("5 per minute")
@@ -871,15 +893,15 @@ class PhishingAPI:
                             "threats_found": result.get("threats_found", []),
                             "threat_count": result.get("threat_count", 0),
                             "timestamp": result.get("timestamp"),
-                            "error": result.get("error"),
+                            # The provider's error text can embed the request URL.
+                            "error": "Safe Browsing lookup failed" if result.get("error") else None,
                         }
                     ),
                     200,
                 )
 
             except Exception as e:
-                logger.error(f"❌ API error in gsb_check_url: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("gsb_check_url", e)
 
         @self.app.route("/api/v1/gsb/report", methods=["POST"])
         @self.limiter.limit("10 per minute")
@@ -924,8 +946,7 @@ class PhishingAPI:
                 ), (200 if result.get("success") else 500)
 
             except Exception as e:
-                logger.error(f"❌ API error in gsb_report_url: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("gsb_report_url", e)
 
         # ── GET /api/v1/alerts/google ──────────────────────────────────────────
         @self.app.route("/api/v1/alerts/google", methods=["GET"])
@@ -976,8 +997,7 @@ class PhishingAPI:
                 return jsonify({"alerts": cleaned, "total": len(cleaned)}), 200
 
             except Exception as e:
-                logger.error(f"❌ google_alerts error: {e}")
-                return jsonify({"error": str(e)}), 500
+                return internal_error("google_alerts", e)
 
         # ── GET /api/v1/alerts/google/<id> ─────────────────────────────────────
         @self.app.route("/api/v1/alerts/google/<alert_id>", methods=["GET"])
@@ -1004,8 +1024,7 @@ class PhishingAPI:
                 return jsonify({"alert": alert, "feedback": feedback}), 200
 
             except Exception as e:
-                logger.error(f"❌ google_alert_detail error: {e}")
-                return jsonify({"error": str(e)}), 500
+                return internal_error("google_alert_detail", e)
 
         # ── POST /api/v1/scan/domain ───────────────────────────────────────────
         @self.app.route("/api/v1/scan/domain", methods=["POST"])
@@ -1036,8 +1055,7 @@ class PhishingAPI:
                 return jsonify(result), 200
 
             except Exception as e:
-                logger.error(f"❌ scan_domain error: {e}")
-                return jsonify({"error": str(e)}), 500
+                return internal_error("scan_domain", e)
 
         # ── GET /api/v1/sites ──────────────────────────────────────────────────
         @self.app.route("/api/v1/sites", methods=["GET"])
@@ -1120,8 +1138,7 @@ class PhishingAPI:
                 )
 
             except Exception as e:
-                logger.error(f"❌ API error in get_sites: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("get_sites", e)
 
         # ── GET /api/v1/reports ────────────────────────────────────────────────
         @self.app.route("/api/v1/reports", methods=["GET"])
@@ -1182,8 +1199,7 @@ class PhishingAPI:
                 return jsonify({"items": items, "total": total}), 200
 
             except Exception as e:
-                logger.error(f"❌ API error in get_reports: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("get_reports", e)
 
         # ── PATCH /api/v1/reports/<report_id> ─────────────────────────────────
         @self.app.route("/api/v1/reports/<report_id>", methods=["PATCH"])
@@ -1233,8 +1249,7 @@ class PhishingAPI:
                 return jsonify({"report_id": report_id, "status": new_status}), 200
 
             except Exception as e:
-                logger.error(f"❌ API error in update_report: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("update_report", e)
 
         # ── GET /api/v1/reports/stats ──────────────────────────────────────────
         @self.app.route("/api/v1/reports/stats", methods=["GET"])
@@ -1292,8 +1307,7 @@ class PhishingAPI:
                 )
 
             except Exception as e:
-                logger.error(f"❌ API error in get_reports_stats: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("get_reports_stats", e)
 
         # ── GET /api/v1/integrations ───────────────────────────────────────────
         @self.app.route("/api/v1/integrations", methods=["GET"])
@@ -1385,8 +1399,7 @@ class PhishingAPI:
                 return jsonify(integrations), 200
 
             except Exception as e:
-                logger.error(f"❌ API error in get_integrations: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("get_integrations", e)
 
         # ── GET /api/v1/activity ───────────────────────────────────────────────
         @self.app.route("/api/v1/activity", methods=["GET"])
@@ -1475,8 +1488,7 @@ class PhishingAPI:
                 return jsonify(activity[:limit]), 200
 
             except Exception as e:
-                logger.error(f"❌ API error in get_activity: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("get_activity", e)
 
         # ── GET /api/v1/nav/counts ─────────────────────────────────────────────
         @self.app.route("/api/v1/nav/counts", methods=["GET"])
@@ -1508,8 +1520,7 @@ class PhishingAPI:
                     200,
                 )
             except Exception as e:
-                logger.error(f"❌ API error in get_nav_counts: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("get_nav_counts", e)
 
         # ── GET /api/v1/threads ────────────────────────────────────────────────
         @self.app.route("/api/v1/threads", methods=["GET"])
@@ -1572,8 +1583,7 @@ class PhishingAPI:
                     )
                 return jsonify({"items": items, "total": len(items)}), 200
             except Exception as e:
-                logger.error(f"❌ API error in get_threads: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("get_threads", e)
 
         # ── GET /api/v1/threads/stats ──────────────────────────────────────────
         @self.app.route("/api/v1/threads/stats", methods=["GET"])
@@ -1628,8 +1638,7 @@ class PhishingAPI:
                     200,
                 )
             except Exception as e:
-                logger.error(f"❌ API error in get_threads_stats: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("get_threads_stats", e)
 
         # ── GET /api/v1/threads/<id>/results ──────────────────────────────────
         @self.app.route("/api/v1/threads/<int:thread_id>/results", methods=["GET"])
@@ -1698,8 +1707,7 @@ class PhishingAPI:
                 ]
                 return jsonify({"items": items, "total": int(total)}), 200
             except Exception as e:
-                logger.error(f"❌ API error in get_thread_results: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("get_thread_results", e)
 
         # ── PATCH /api/v1/threads/<id>/results/<result_id>/discard ────────────
         @self.app.route(
@@ -1720,8 +1728,7 @@ class PhishingAPI:
                         return jsonify({"error": "Thread result not found"}), 404
                 return jsonify({"discarded": result_id}), 200
             except Exception as e:
-                logger.error(f"❌ API error in discard_thread_result: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("discard_thread_result", e)
 
         # ── GET /api/v1/campaigns ──────────────────────────────────────────────
         @self.app.route("/api/v1/campaigns", methods=["GET"])
@@ -1834,8 +1841,7 @@ class PhishingAPI:
                 }
                 return jsonify({"items": items, "total": len(items), "kpi": kpi}), 200
             except Exception as e:
-                logger.error(f"❌ API error in get_campaigns: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("get_campaigns", e)
 
         # ── GET /api/v1/intelligence/iocs ──────────────────────────────────────
         @self.app.route("/api/v1/intelligence/iocs", methods=["GET"])
@@ -1942,8 +1948,7 @@ class PhishingAPI:
                     200,
                 )
             except Exception as e:
-                logger.error(f"❌ API error in get_iocs: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("get_iocs", e)
 
         # ── GET /api/v1/graph ──────────────────────────────────────────────────
         @self.app.route("/api/v1/graph", methods=["GET"])
@@ -2213,8 +2218,7 @@ class PhishingAPI:
                     200,
                 )
             except Exception as e:
-                logger.error(f"❌ API error in get_graph: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("get_graph", e)
 
         # ── GET /api/v1/intelligence/brands ───────────────────────────────────
         @self.app.route("/api/v1/intelligence/brands", methods=["GET"])
@@ -2256,8 +2260,7 @@ class PhishingAPI:
                 results.sort(key=lambda x: x["sites"], reverse=True)
                 return jsonify(results), 200
             except Exception as e:
-                logger.error(f"❌ API error in get_brands: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("get_brands", e)
 
         # ── POST /api/v1/intelligence/stix/validate ───────────────────────────
         @self.app.route("/api/v1/intelligence/stix/validate", methods=["POST"])
@@ -2274,8 +2277,7 @@ class PhishingAPI:
                 valid, errors = validate_stix_bundle(bundle)
                 return jsonify({"valid": valid, "errors": errors}), 200
             except Exception as e:
-                logger.error(f"❌ API error in validate_stix: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("validate_stix", e)
 
         # ── POST /api/v1/intelligence/taxii/push ──────────────────────────────
         @self.app.route("/api/v1/intelligence/taxii/push", methods=["POST"])
@@ -2285,7 +2287,11 @@ class PhishingAPI:
             if not getattr(settings, "TAXII_BASE_URL", None):
                 return jsonify({"error": "TAXII not configured"}), 503
 
-            from src.intelligence.stix_export import add_tlp_marking, validate_stix_bundle
+            from src.intelligence.stix_export import (
+                TLP_MARKING_IDS,
+                add_tlp_marking,
+                validate_stix_bundle,
+            )
             from src.intelligence.taxii_client import TAXIIClient
 
             data = request.get_json(silent=True) or {}
@@ -2299,10 +2305,15 @@ class PhishingAPI:
             if not api_root or not collection_id:
                 return jsonify({"error": "api_root and collection_id required"}), 400
 
+            tlp = data.get("tlp")
+            if tlp is not None and str(tlp).lower() not in TLP_MARKING_IDS:
+                return (
+                    jsonify({"error": f"tlp must be one of: {', '.join(sorted(TLP_MARKING_IDS))}"}),
+                    400,
+                )
             try:
-                tlp = data.get("tlp")
                 if tlp:
-                    bundle = add_tlp_marking(bundle, tlp)
+                    bundle = add_tlp_marking(bundle, str(tlp))
                 valid, errors = validate_stix_bundle(bundle)
                 if not valid:
                     return jsonify({"error": "Invalid STIX bundle", "details": errors}), 400
@@ -2310,11 +2321,8 @@ class PhishingAPI:
                 client = TAXIIClient()
                 result = client.push_objects(api_root, collection_id, bundle["objects"])
                 return jsonify(result), 200
-            except ValueError as e:
-                return jsonify({"error": str(e)}), 400
             except Exception as e:
-                logger.error(f"❌ API error in push_taxii: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("push_taxii", e)
 
         # ── GET /api/v1/intelligence/taxii/pull ───────────────────────────────
         @self.app.route("/api/v1/intelligence/taxii/pull", methods=["GET"])
@@ -2340,8 +2348,7 @@ class PhishingAPI:
                 objects = client.pull_objects(api_root, collection_id)
                 return jsonify({"objects": objects}), 200
             except Exception as e:
-                logger.error(f"❌ API error in pull_taxii: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("pull_taxii", e)
 
         # ── POST /api/v1/intelligence/misp/push ───────────────────────────────
         @self.app.route("/api/v1/intelligence/misp/push", methods=["POST"])
@@ -2366,8 +2373,7 @@ class PhishingAPI:
                     return jsonify({"error": "MISP push failed"}), 502
                 return jsonify(result), 200
             except Exception as e:
-                logger.error(f"❌ API error in push_misp: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("push_misp", e)
 
         # ── POST /api/v1/threads/image-tracking ───────────────────────────────
         @self.app.route("/api/v1/threads/image-tracking", methods=["POST"])
@@ -2400,8 +2406,7 @@ class PhishingAPI:
                     ).start()
                 return jsonify({"id": thread_id, "status": "active"}), 201
             except Exception as e:
-                logger.error(f"❌ create_image_tracking_thread: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("create_image_tracking_thread", e)
 
         # ── POST /api/v1/threads/google-ads ───────────────────────────────────
         @self.app.route("/api/v1/threads/google-ads", methods=["POST"])
@@ -2445,8 +2450,7 @@ class PhishingAPI:
                     ).start()
                 return jsonify({"id": thread_id, "status": "active"}), 201
             except Exception as e:
-                logger.error(f"❌ create_google_ads_thread: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("create_google_ads_thread", e)
 
         # ── POST /api/v1/threads/ct-monitor ───────────────────────────────────
         @self.app.route("/api/v1/threads/ct-monitor", methods=["POST"])
@@ -2484,8 +2488,7 @@ class PhishingAPI:
                     thread_id = row[0]
                 return jsonify({"id": thread_id, "status": "active"}), 201
             except Exception as e:
-                logger.error(f"❌ create_ct_monitor_thread: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("create_ct_monitor_thread", e)
 
         # ── POST /api/v1/threads/<id>/search ──────────────────────────────────
         @self.app.route("/api/v1/threads/<int:thread_id>/search", methods=["POST"])
@@ -2563,8 +2566,7 @@ class PhishingAPI:
                     )
                 return jsonify({"status": "search_triggered", "thread_id": thread_id}), 202
             except Exception as e:
-                logger.error(f"❌ trigger_thread_search: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("trigger_thread_search", e)
 
         # ── PATCH /api/v1/threads/<id> ─────────────────────────────────────────
         @self.app.route("/api/v1/threads/<int:thread_id>", methods=["PATCH"])
@@ -2593,8 +2595,7 @@ class PhishingAPI:
                         return jsonify({"error": "Thread not found"}), 404
                 return jsonify({"status": "updated"}), 200
             except Exception as e:
-                logger.error(f"❌ update_thread: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("update_thread", e)
 
         # ── PATCH /api/v1/threads/<id>/results/<rid> ──────────────────────────
         @self.app.route(
@@ -2625,8 +2626,7 @@ class PhishingAPI:
                         return jsonify({"error": "Thread result not found"}), 404
                 return jsonify({"status": "updated"}), 200
             except Exception as e:
-                logger.error(f"❌ update_thread_result: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("update_thread_result", e)
 
         # ── GET /api/v1/threads/<id>/executions ───────────────────────────────
         @self.app.route("/api/v1/threads/<int:thread_id>/executions", methods=["GET"])
@@ -2674,8 +2674,7 @@ class PhishingAPI:
                 ]
                 return jsonify({"items": items, "total": int(total)}), 200
             except Exception as e:
-                logger.error(f"❌ get_thread_executions: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("get_thread_executions", e)
 
         # ── POST /api/v1/threads/email-monitor ───────────────────────────────
         @self.app.route("/api/v1/threads/email-monitor", methods=["POST"])
@@ -2731,8 +2730,7 @@ class PhishingAPI:
                     ).start()
                 return jsonify({"id": thread_id, "status": "active"}), 201
             except Exception as e:
-                logger.error(f"❌ create_email_monitor_thread: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("create_email_monitor_thread", e)
 
         # ── GET /api/v1/threads/<id>/email-inboxes ───────────────────────────
         @self.app.route("/api/v1/threads/<int:thread_id>/email-inboxes", methods=["GET"])
@@ -2778,8 +2776,7 @@ class PhishingAPI:
                     ]
                     return jsonify({"items": items, "total": len(items)}), 200
             except Exception as e:
-                logger.error(f"❌ get_thread_email_inboxes: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("get_thread_email_inboxes", e)
 
         # ── GET /api/v1/email/senders ─────────────────────────────────────────
         @self.app.route("/api/v1/email/senders", methods=["GET"])
@@ -2804,8 +2801,7 @@ class PhishingAPI:
                     )
                 return jsonify({"items": items, "total": total}), 200
             except Exception as e:
-                logger.error(f"❌ list_email_senders: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("list_email_senders", e)
 
         # ── GET /api/v1/email/senders/<email>/reputation ──────────────────────
         @self.app.route("/api/v1/email/senders/<path:sender_email>/reputation", methods=["GET"])
@@ -2822,8 +2818,7 @@ class PhishingAPI:
                     return jsonify({"error": "Sender not found"}), 404
                 return jsonify(rep), 200
             except Exception as e:
-                logger.error(f"❌ get_sender_reputation: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("get_sender_reputation", e)
 
         # ── PATCH /api/v1/email/senders/<email>/block ─────────────────────────
         @self.app.route("/api/v1/email/senders/<path:sender_email>/block", methods=["PATCH"])
@@ -2846,8 +2841,7 @@ class PhishingAPI:
                     tracker.mark_blocked(conn, sender_email, reason)
                 return jsonify({"status": "blocked", "sender": sender_email}), 200
             except Exception as e:
-                logger.error(f"❌ block_sender: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("block_sender", e)
 
         # ── PATCH /api/v1/email/senders/<email>/unblock ───────────────────────
         @self.app.route("/api/v1/email/senders/<path:sender_email>/unblock", methods=["PATCH"])
@@ -2868,8 +2862,7 @@ class PhishingAPI:
                     tracker.mark_unblocked(conn, sender_email)
                 return jsonify({"status": "unblocked", "sender": sender_email}), 200
             except Exception as e:
-                logger.error(f"❌ unblock_sender: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("unblock_sender", e)
 
         # ── PATCH /api/v1/email/senders/<email>/whitelist ─────────────────────
         @self.app.route("/api/v1/email/senders/<path:sender_email>/whitelist", methods=["PATCH"])
@@ -2912,8 +2905,7 @@ class PhishingAPI:
                         tracker.mark_whitelisted(conn, sender_email, reason)
                 return jsonify({"status": "whitelisted", "sender": sender_email}), 200
             except Exception as e:
-                logger.error(f"❌ whitelist_sender: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("whitelist_sender", e)
 
         # ── GET /api/v1/email/domains ─────────────────────────────────────────
         @self.app.route("/api/v1/email/domains", methods=["GET"])
@@ -2933,8 +2925,7 @@ class PhishingAPI:
                     )
                 return jsonify({"items": items, "total": total}), 200
             except Exception as e:
-                logger.error(f"❌ list_email_domains: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("list_email_domains", e)
 
         # ── POST /api/v1/blocklist ────────────────────────────────────────────
         @self.app.route("/api/v1/blocklist", methods=["POST"])
@@ -2968,8 +2959,7 @@ class PhishingAPI:
                 logger.info(f"blocklist: added {entry} ({entry_type})")
                 return jsonify({"status": "blocked", "entry": entry, "type": entry_type}), 201
             except Exception as e:
-                logger.error(f"❌ add_blocklist_entry({entry}): {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("add_blocklist_entry", e)
 
         # ── GET /api/v1/blocklist ─────────────────────────────────────────────
         @self.app.route("/api/v1/blocklist", methods=["GET"])
@@ -2994,8 +2984,7 @@ class PhishingAPI:
                 ]
                 return jsonify({"items": items, "total": len(items)}), 200
             except Exception as e:
-                logger.error(f"❌ get_blocklist: {e}")
-                return jsonify({"error": "Internal server error"}), 500
+                return internal_error("get_blocklist", e)
 
         @self.app.route("/api/v1/health", methods=["GET"])
         @self.limiter.exempt
@@ -3144,7 +3133,7 @@ class PhishingAPI:
 
         except Exception as e:
             logger.error(f"❌ Failed to process phishing report for {url}: {e}")
-            return {"status": "error", "message": f"Failed to process report: {str(e)}", "url": url}
+            return {"status": "error", "message": "Failed to process report", "url": url}
 
     def _resolve_and_send_report(
         self, url: str, needs_resolution: bool, stored_emails: List[str], timestamp: str
