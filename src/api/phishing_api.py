@@ -46,6 +46,7 @@ from src.api.params import (
     int_arg,
     str_arg,
 )
+from src.api.serializers import iso_utc, severest_threat_level
 from src.intelligence import (
     MultiAPIValidator,
     GrinderReportClient,
@@ -250,6 +251,248 @@ def is_shared_infrastructure_ip(ip: str, flagged_cloudflare: bool = False) -> bo
     except ValueError:
         return False
     return is_cloudflare_ip(ip)
+
+
+def _merge_flag(current: Optional[bool], candidate: Optional[bool]) -> Optional[bool]:
+    """Combine two tri-state flags (True wins; None only when nothing is known).
+
+    Args:
+        current: Flag accumulated so far.
+        candidate: Flag of the next row (None = unknown).
+
+    Returns:
+        The combined flag.
+    """
+    if candidate is None:
+        return current
+    return candidate if current is None else (current or candidate)
+
+
+def _hosting_label(cloudflare: Optional[bool]) -> Optional[str]:
+    """Render the ``Hosting`` meta of a graph node.
+
+    Args:
+        cloudflare: Whether the scanner flagged the address as Cloudflare
+            (None when ``is_cloudflare`` was never recorded).
+
+    Returns:
+        ``"Cloudflare"``, ``"Direct"`` or None when unknown.
+    """
+    if cloudflare is None:
+        return None
+    return "Cloudflare" if cloudflare else "Direct"
+
+
+def _widen_span(entity: Dict[str, Any], first: Any, last: Any) -> None:
+    """Extend an entity's first/last-seen span with a row's span (None = unknown).
+
+    Args:
+        entity: Accumulator with ``first`` and ``last`` keys.
+        first: The row's earliest ``first_seen``.
+        last: The row's latest ``last_seen``.
+    """
+    if first is not None and (entity["first"] is None or first < entity["first"]):
+        entity["first"] = first
+    if last is not None and (entity["last"] is None or last > entity["last"]):
+        entity["last"] = last
+
+
+def _without_none(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+    """Build a node ``meta`` mapping, dropping unknown (None) values.
+
+    Args:
+        pairs: ``(label, value)`` pairs in display order.
+
+    Returns:
+        The pairs whose value is known.
+    """
+    return {k: v for k, v in pairs if v is not None}
+
+
+def _kit_edge_confidence(kit_confidence: Any) -> Optional[float]:
+    """Scale a stored kit-fingerprint score (0-100) to an edge confidence (0-1).
+
+    Args:
+        kit_confidence: ``phishing_sites.kit_confidence`` (None when not scored).
+
+    Returns:
+        The score divided by 100 (two decimals), or None when not recorded.
+    """
+    if kit_confidence is None:
+        return None
+    return round(min(max(float(kit_confidence), 0.0), 100.0) / 100, 2)
+
+
+def build_graph(rows: List[Any], focus: Optional[Tuple[str, str]]) -> Dict[str, Any]:
+    """Build the nodes, edges and entity counts of GET /api/v1/graph.
+
+    Only stored facts are reported; anything the database does not record is
+    ``null`` or omitted, never a placeholder:
+
+    * domain ``severity`` is the severest stored ``multi_api_threat_level`` of
+      its rows (``unknown`` is no verdict -> null); IP, registrar and kit nodes
+      have no stored severity, so theirs is null;
+    * ``detected_as`` edges carry the stored kit-fingerprint confidence
+      (``kit_confidence`` / 100); no confidence is recorded for DNS or WHOIS
+      relations, so ``resolves_to`` and ``registered_with`` carry null;
+    * ``meta`` timestamps are ISO-8601 with an explicit UTC offset
+      (see ``src.api.serializers``) and ``Hosting`` is omitted when
+      ``is_cloudflare`` was never recorded.
+
+    Args:
+        rows: Source rows ``(domain, resolved_ip, registrar_name, threat_level,
+            avg_confidence, cloudflare, first_seen, last_seen, hits, kit_type,
+            kit_confidence, ...)``.
+        focus: Parsed ``focus`` parameter; restricts the result to the 1-hop
+            neighbourhood of that node.
+
+    Returns:
+        ``{"nodes": [...], "edges": [...], "meta": {"domains", "ips",
+        "registrars", "kits"}}``; the counts are of the returned nodes.
+    """
+    domains: Dict[str, Dict[str, Any]] = {}
+    ips: Dict[str, Dict[str, Any]] = {}
+    registrars: Dict[str, Dict[str, Any]] = {}
+    kits: Dict[str, Dict[str, Any]] = {}
+    edges: Dict[Tuple[str, str, str], Optional[float]] = {}
+
+    for r in rows:
+        domain = (r[0] or "").strip()
+        if not domain:
+            continue
+        ip = (r[1] or "").strip() or None
+        reg = (r[2] or "").strip() or None
+        conf = round(float(r[4])) if r[4] is not None else None
+        cloud = None if r[5] is None else bool(r[5])
+        first, last, hits = r[6], r[7], int(r[8] or 0)
+        kit = (r[9] or "").strip() or None
+
+        d = domains.setdefault(
+            domain,
+            {
+                "severity": None,
+                "conf": None,
+                "cloudflare": None,
+                "first": None,
+                "last": None,
+                "hits": 0,
+            },
+        )
+        d["severity"] = severest_threat_level([d["severity"], r[3]])
+        if conf is not None:
+            d["conf"] = conf if d["conf"] is None else max(d["conf"], conf)
+        d["cloudflare"] = _merge_flag(d["cloudflare"], cloud)
+        d["hits"] += hits
+        _widen_span(d, first, last)
+
+        if ip:
+            ipp = ips.setdefault(ip, {"cloudflare": None, "first": None, "last": None, "hits": 0})
+            ipp["cloudflare"] = _merge_flag(ipp["cloudflare"], cloud)
+            ipp["hits"] += hits
+            _widen_span(ipp, first, last)
+            edges.setdefault((f"domain:{domain}", f"ip:{ip}", "resolves_to"), None)
+
+        if reg:
+            rg = registrars.setdefault(reg, {"sites": 0, "first": None, "last": None})
+            rg["sites"] += hits
+            _widen_span(rg, first, last)
+            edges.setdefault((f"domain:{domain}", f"registrar:{reg}", "registered_with"), None)
+
+        if kit:
+            kt = kits.setdefault(kit, {"sites": 0, "first": None, "last": None})
+            kt["sites"] += hits
+            _widen_span(kt, first, last)
+            key = (f"domain:{domain}", f"kit:{kit}", "detected_as")
+            score = _kit_edge_confidence(r[10])
+            previous = edges.get(key)
+            if previous is None or (score is not None and score > previous):
+                edges[key] = score
+
+    node_list: List[Dict[str, Any]] = []
+    for dom, m in domains.items():
+        node_list.append(
+            {
+                "id": f"domain:{dom}",
+                "label": dom,
+                "type": "domain",
+                "severity": m["severity"],
+                "meta": _without_none(
+                    [
+                        ("Hosting", _hosting_label(m["cloudflare"])),
+                        ("Hits", m["hits"]),
+                        ("Confidence", f"{m['conf']}%" if m["conf"] is not None else None),
+                        ("First seen", iso_utc(m["first"])),
+                        ("Last seen", iso_utc(m["last"])),
+                    ]
+                ),
+            }
+        )
+    for ip, m in ips.items():
+        node_list.append(
+            {
+                "id": f"ip:{ip}",
+                "label": ip,
+                "type": "ip",
+                "severity": None,
+                "shared_infrastructure": is_shared_infrastructure_ip(ip, bool(m["cloudflare"])),
+                "meta": _without_none(
+                    [
+                        ("Hosting", _hosting_label(m["cloudflare"])),
+                        ("Hits", m["hits"]),
+                        ("First seen", iso_utc(m["first"])),
+                        ("Last seen", iso_utc(m["last"])),
+                    ]
+                ),
+            }
+        )
+    for node_type, entities in (("registrar", registrars), ("kit", kits)):
+        for name, m in entities.items():
+            node_list.append(
+                {
+                    "id": f"{node_type}:{name}",
+                    "label": name,
+                    "type": node_type,
+                    "severity": None,
+                    "meta": _without_none(
+                        [
+                            ("Sites", m["sites"]),
+                            ("First seen", iso_utc(m["first"])),
+                            ("Last seen", iso_utc(m["last"])),
+                        ]
+                    ),
+                }
+            )
+
+    edge_list = [
+        {"id": f"e{i}", "source": s, "target": t, "relation": rel, "confidence": edges[(s, t, rel)]}
+        for i, (s, t, rel) in enumerate(sorted(edges))
+    ]
+
+    # Optional focus → 1-hop neighborhood. Node IDs keep the stored case
+    # (e.g. registrar names), so match them case-insensitively.
+    if focus:
+        focus_key = f"{focus[0]}:{focus[1]}"
+        focus_ids = {n["id"] for n in node_list if n["id"].lower() == focus_key}
+        keep = set(focus_ids)
+        kept_edges = []
+        for e in edge_list:
+            if e["source"] in focus_ids or e["target"] in focus_ids:
+                keep.add(e["source"])
+                keep.add(e["target"])
+                kept_edges.append(e)
+        node_list = [n for n in node_list if n["id"] in keep]
+        edge_list = kept_edges
+
+    meta = {
+        plural: sum(1 for n in node_list if n["type"] == node_type)
+        for node_type, plural in (
+            ("domain", "domains"),
+            ("ip", "ips"),
+            ("registrar", "registrars"),
+            ("kit", "kits"),
+        )
+    }
+    return {"nodes": node_list, "edges": edge_list, "meta": meta}
 
 
 def campaign_id(kind: str, key: str) -> str:
@@ -2165,9 +2408,11 @@ class PhishingAPI:
                                   filter is applied in SQL before the limit;
                                   a malformed focus returns 400.
 
-            IP nodes carry ``shared_infrastructure: true`` when the address is a
-            shared CDN edge (Cloudflare): many unrelated domains resolve there,
-            so clients should not treat it as a campaign hub.
+            A source row is one distinct (domain, IP, registrar, threat level,
+            kit) combination of ``phishing_sites``. ``meta.total_rows`` is the
+            number of such rows matching the query before ``LIMIT`` (same
+            query, window count) and ``meta.limited`` is true when it exceeds
+            the rows returned. See :func:`build_graph` for node and edge fields.
 
             Returns:
                 JSON ``{"nodes": [...], "edges": [...], "meta": {...}}``.
@@ -2197,221 +2442,37 @@ class PhishingAPI:
                                 multi_api_threat_level,
                                 AVG(api_confidence_score) AS avg_conf,
                                 bool_or(is_cloudflare = 1) AS cloudflare,
-                                MIN(first_seen)::text AS first_seen,
-                                MAX(last_seen)::text AS last_seen,
+                                MIN(first_seen) AS first_seen,
+                                MAX(last_seen) AS last_seen,
                                 COUNT(*) AS hits,
-                                detected_kit_type
+                                detected_kit_type,
+                                MAX(kit_confidence) AS kit_conf,
+                                COUNT(*) OVER () AS total_rows
                             FROM phishing_sites
                             WHERE url IS NOT NULL
                               AND SPLIT_PART(SPLIT_PART(url, '://', 2), '/', 1) <> ''
                               {focus_sql}
                             GROUP BY domain, resolved_ip, registrar_name,
                                      multi_api_threat_level, detected_kit_type
-                            ORDER BY MAX(last_seen) DESC NULLS LAST
+                            ORDER BY MAX(last_seen) DESC NULLS LAST, domain,
+                                     resolved_ip NULLS LAST, registrar_name NULLS LAST,
+                                     multi_api_threat_level NULLS LAST,
+                                     detected_kit_type NULLS LAST
                             LIMIT :lim
                         """),
                         params,
                     ).fetchall()
 
-                sev_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1}
-
-                def severer(current, candidate):
-                    if candidate is None:
-                        return current
-                    if current is None or sev_rank.get(candidate, 0) > sev_rank.get(current, 0):
-                        return candidate
-                    return current
-
-                def meta_without_none(pairs):
-                    return {k: v for k, v in pairs if v is not None}
-
-                domains: Dict[str, Dict[str, Any]] = {}
-                ips: Dict[str, Dict[str, Any]] = {}
-                registrars: Dict[str, Dict[str, Any]] = {}
-                kits: Dict[str, Dict[str, Any]] = {}
-                edge_keys = set()  # (source, target, relation)
-
-                for r in rows:
-                    domain = (r[0] or "").strip()
-                    if not domain:
-                        continue
-                    ip = (r[1] or "").strip() if r[1] else None
-                    reg = (r[2] or "").strip() if r[2] else None
-                    threat = r[3]
-                    conf = round(float(r[4])) if r[4] is not None else None
-                    cloud = bool(r[5])
-                    first, last, hits = r[6], r[7], int(r[8] or 0)
-                    kit = (r[9] or "").strip() if r[9] else None
-
-                    d = domains.setdefault(
-                        domain,
-                        {
-                            "severity": None,
-                            "conf": None,
-                            "cloudflare": False,
-                            "first": first,
-                            "last": last,
-                            "hits": 0,
-                        },
-                    )
-                    d["severity"] = severer(d["severity"], threat)
-                    if conf is not None:
-                        d["conf"] = max(d["conf"] or 0, conf)
-                    d["cloudflare"] = d["cloudflare"] or cloud
-                    d["hits"] += hits
-                    if first and (d["first"] is None or first < d["first"]):
-                        d["first"] = first
-                    if last and (d["last"] is None or last > d["last"]):
-                        d["last"] = last
-
-                    if ip:
-                        ipp = ips.setdefault(
-                            ip,
-                            {
-                                "cloudflare": cloud,
-                                "first": first,
-                                "last": last,
-                                "hits": 0,
-                            },
-                        )
-                        ipp["cloudflare"] = ipp["cloudflare"] or cloud
-                        ipp["hits"] += hits
-                        if first and (ipp["first"] is None or first < ipp["first"]):
-                            ipp["first"] = first
-                        if last and (ipp["last"] is None or last > ipp["last"]):
-                            ipp["last"] = last
-                        edge_keys.add((f"domain:{domain}", f"ip:{ip}", "resolves_to"))
-
-                    if reg:
-                        rg = registrars.setdefault(reg, {"sites": 0, "first": first, "last": last})
-                        rg["sites"] += hits
-                        if first and (rg["first"] is None or first < rg["first"]):
-                            rg["first"] = first
-                        if last and (rg["last"] is None or last > rg["last"]):
-                            rg["last"] = last
-                        edge_keys.add((f"domain:{domain}", f"registrar:{reg}", "registered_with"))
-
-                    if kit:
-                        kt = kits.setdefault(kit, {"sites": 0, "first": first, "last": last})
-                        kt["sites"] += hits
-                        if first and (kt["first"] is None or first < kt["first"]):
-                            kt["first"] = first
-                        if last and (kt["last"] is None or last > kt["last"]):
-                            kt["last"] = last
-                        edge_keys.add((f"domain:{domain}", f"kit:{kit}", "detected_as"))
-
-                node_list = []
-                for dom, m in domains.items():
-                    node_list.append(
-                        {
-                            "id": f"domain:{dom}",
-                            "label": dom,
-                            "type": "domain",
-                            "severity": m["severity"] or "low",
-                            "meta": meta_without_none(
-                                [
-                                    ("Hosting", "Cloudflare" if m["cloudflare"] else "Direct"),
-                                    ("Hits", m["hits"]),
-                                    (
-                                        "Confidence",
-                                        f"{m['conf']}%" if m["conf"] is not None else None,
-                                    ),
-                                    ("First seen", m["first"]),
-                                    ("Last seen", m["last"]),
-                                ]
-                            ),
-                        }
-                    )
-                for ip, m in ips.items():
-                    node_list.append(
-                        {
-                            "id": f"ip:{ip}",
-                            "label": ip,
-                            "type": "ip",
-                            "severity": "medium",
-                            "shared_infrastructure": is_shared_infrastructure_ip(
-                                ip, m["cloudflare"]
-                            ),
-                            "meta": meta_without_none(
-                                [
-                                    ("Hosting", "Cloudflare" if m["cloudflare"] else "Direct"),
-                                    ("Hits", m["hits"]),
-                                    ("First seen", m["first"]),
-                                    ("Last seen", m["last"]),
-                                ]
-                            ),
-                        }
-                    )
-                for reg, m in registrars.items():
-                    node_list.append(
-                        {
-                            "id": f"registrar:{reg}",
-                            "label": reg,
-                            "type": "registrar",
-                            "severity": "high" if m["sites"] >= 5 else "medium",
-                            "meta": meta_without_none(
-                                [
-                                    ("Sites", m["sites"]),
-                                    ("First seen", m["first"]),
-                                    ("Last seen", m["last"]),
-                                ]
-                            ),
-                        }
-                    )
-                for kit, m in kits.items():
-                    node_list.append(
-                        {
-                            "id": f"kit:{kit}",
-                            "label": kit,
-                            "type": "kit",
-                            "severity": "critical",
-                            "meta": meta_without_none(
-                                [
-                                    ("Sites", m["sites"]),
-                                    ("First seen", m["first"]),
-                                    ("Last seen", m["last"]),
-                                ]
-                            ),
-                        }
-                    )
-
-                edge_list = [
+                graph = build_graph(rows, focus)
+                total_rows = int(rows[0][11] or 0) if rows else 0
+                graph["meta"].update(
                     {
-                        "id": f"e{i}",
-                        "source": s,
-                        "target": t,
-                        "relation": rel,
-                        "confidence": 1.0,
+                        "total_rows": total_rows,
+                        "limit": limit,
+                        "limited": total_rows > len(rows),
                     }
-                    for i, (s, t, rel) in enumerate(sorted(edge_keys))
-                ]
-
-                # Optional focus → 1-hop neighborhood. Node IDs keep the stored
-                # case (e.g. registrar names), so match them case-insensitively.
-                if focus:
-                    focus_key = f"{focus[0]}:{focus[1]}"
-                    focus_ids = {n["id"] for n in node_list if n["id"].lower() == focus_key}
-                    keep = set(focus_ids)
-                    kept_edges = []
-                    for e in edge_list:
-                        if e["source"] in focus_ids or e["target"] in focus_ids:
-                            keep.add(e["source"])
-                            keep.add(e["target"])
-                            kept_edges.append(e)
-                    node_list = [n for n in node_list if n["id"] in keep]
-                    edge_list = kept_edges
-
-                meta = {
-                    "domains": len(domains),
-                    "ips": len(ips),
-                    "registrars": len(registrars),
-                    "kits": len(kits),
-                    "limited": len(rows) >= limit,
-                }
-                return (
-                    jsonify({"nodes": node_list, "edges": edge_list, "meta": meta}),
-                    200,
                 )
+                return jsonify(graph), 200
             except Exception as e:
                 return internal_error("get_graph", e)
 

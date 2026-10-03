@@ -57,6 +57,71 @@ class TestGraphFocusOnPostgres:
         ids = {n["id"] for n in resp.get_json()["nodes"]}
         assert ids == {f"registrar:{registrar}", f"domain:old-{tag}.example"}
 
+    def test_old_entity_beyond_the_limit_can_be_pivoted(self, pg_api):
+        """More rows than the limit: the unfocused graph misses the oldest domain
+        (and says so via total_rows/limited), while a focus on it or on its IP
+        still finds it because the focus filter runs before LIMIT."""
+        client, db_manager, headers = pg_api
+        tag = uuid.uuid4().hex[:8]
+        old = f"pivot-old-{tag}.example"
+        old_ip = "192.0.2.77"
+        _insert_site(db_manager, f"https://{old}/login", ip=old_ip, last_seen="2019-01-01")
+        for i in range(5):
+            _insert_site(
+                db_manager, f"https://pivot-new-{i}-{tag}.example/", last_seen=f"2026-09-0{i + 1}"
+            )
+
+        unfocused = client.get("/api/v1/graph", query_string={"limit": 3}, headers=headers)
+        body = unfocused.get_json()
+        assert unfocused.status_code == 200, body
+        assert f"domain:{old}" not in {n["id"] for n in body["nodes"]}
+        assert body["meta"]["limit"] == 3
+        assert body["meta"]["total_rows"] >= 6
+        assert body["meta"]["limited"] is True
+
+        by_domain = client.get(
+            "/api/v1/graph",
+            query_string={"focus": f"domain:{old.upper()}", "limit": 3},
+            headers=headers,
+        ).get_json()
+        assert {n["id"] for n in by_domain["nodes"]} == {f"domain:{old}", f"ip:{old_ip}"}
+        assert by_domain["meta"]["total_rows"] == 1
+        assert by_domain["meta"]["limited"] is False
+
+        by_ip = client.get(
+            "/api/v1/graph", query_string={"focus": f"ip:{old_ip}", "limit": 1}, headers=headers
+        ).get_json()
+        assert f"domain:{old}" in {n["id"] for n in by_ip["nodes"]}
+
+    def test_graph_values_come_from_stored_data(self, pg_api):
+        client, db_manager, headers = pg_api
+        tag = uuid.uuid4().hex[:8]
+        domain = f"stored-{tag}.example"
+        _insert_site(db_manager, f"https://{domain}/", ip="192.0.2.88", registrar=f"Reg {tag}")
+        with db_manager.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE phishing_sites SET detected_kit_type = 'evilginx', "
+                    "kit_confidence = 60, is_cloudflare = NULL WHERE url = :url"
+                ),
+                {"url": f"https://{domain}/"},
+            )
+
+        body = client.get(
+            "/api/v1/graph", query_string={"focus": f"domain:{domain}"}, headers=headers
+        ).get_json()
+
+        nodes = {n["id"]: n for n in body["nodes"]}
+        assert nodes[f"domain:{domain}"]["severity"] == "high"
+        assert nodes["ip:192.0.2.88"]["severity"] is None
+        assert nodes["kit:evilginx"]["severity"] is None
+        meta = nodes[f"domain:{domain}"]["meta"]
+        assert meta["First seen"] == "2026-01-01T00:00:00+00:00"
+        assert meta["Last seen"] == "2026-01-02T00:00:00+00:00"
+        assert "Hosting" not in meta
+        confidences = {e["relation"]: e["confidence"] for e in body["edges"]}
+        assert confidences == {"resolves_to": None, "registered_with": None, "detected_as": 0.6}
+
 
 class TestCampaignsOnPostgres:
     def test_clusters_come_from_one_query_with_recent_threats(self, pg_api):

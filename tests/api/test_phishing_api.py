@@ -314,7 +314,8 @@ class TestGraphEndpoint:
     """Tests for GET /api/v1/graph — builds nodes/edges from real sites."""
 
     SAMPLE_ROWS = [
-        # domain, resolved_ip, registrar, threat, avg_conf, cloudflare, first, last, hits, detected_kit_type
+        # domain, resolved_ip, registrar, threat, avg_conf, cloudflare, first, last, hits,
+        # detected_kit_type, kit_confidence, total_rows (window count before LIMIT)
         (
             "brand-alpha.example",
             "203.0.113.10",
@@ -326,6 +327,8 @@ class TestGraphEndpoint:
             "2026-01-05",
             3,
             "evilginx",
+            70,
+            4,
         ),
         (
             "brand-alpha.example",
@@ -338,6 +341,8 @@ class TestGraphEndpoint:
             "2026-01-06",
             1,
             "evilginx",
+            85,
+            4,
         ),
         (
             "acme-bank.example",
@@ -350,8 +355,23 @@ class TestGraphEndpoint:
             "2026-01-07",
             2,
             None,
+            None,
+            4,
         ),
-        ("solo.example", None, None, None, None, False, "2026-01-04", "2026-01-08", 1, None),
+        (
+            "solo.example",
+            None,
+            None,
+            None,
+            None,
+            None,
+            "2026-01-04",
+            "2026-01-08",
+            1,
+            None,
+            None,
+            4,
+        ),
     ]
 
     @pytest.fixture
@@ -405,7 +425,8 @@ class TestGraphEndpoint:
         data = json.loads(client.get("/api/v1/graph", headers=headers).data)
         kit_node = next(n for n in data["nodes"] if n["id"] == "kit:evilginx")
         assert kit_node["type"] == "kit"
-        assert kit_node["severity"] == "critical"
+        # No severity is stored for a kit; it used to be a constant "critical".
+        assert kit_node["severity"] is None
 
         kit_edges = [e for e in data["edges"] if e["target"] == "kit:evilginx"]
         assert len(kit_edges) == 1
@@ -510,6 +531,8 @@ class TestGraphEndpoint:
                 "2026-01-09",
                 1,
                 None,
+                None,
+                5,
             ),
         ]
         self._rows(mock_db, rows)
@@ -520,6 +543,91 @@ class TestGraphEndpoint:
         assert ip_nodes["ip:190.2.3.4"]["shared_infrastructure"] is True  # flagged in DB
         assert ip_nodes["ip:203.0.113.10"]["shared_infrastructure"] is False
 
+    def test_graph_meta_reports_total_rows_and_limit(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, self.SAMPLE_ROWS)
+
+        meta = json.loads(client.get("/api/v1/graph?limit=4", headers=headers).data)["meta"]
+
+        assert meta["total_rows"] == 4
+        assert meta["limit"] == 4
+        assert meta["limited"] is False
+
+    def test_graph_is_limited_when_more_rows_exist_than_returned(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        # Two rows returned, while the window count says 9 matched before LIMIT.
+        rows = [row[:11] + (9,) for row in self.SAMPLE_ROWS[:2]]
+        self._rows(mock_db, rows)
+
+        meta = json.loads(client.get("/api/v1/graph?limit=2", headers=headers).data)["meta"]
+
+        assert meta == {
+            "domains": 1,
+            "ips": 1,
+            "registrars": 1,
+            "kits": 1,
+            "total_rows": 9,
+            "limit": 2,
+            "limited": True,
+        }
+
+    def test_graph_does_not_invent_severities_or_edge_confidence(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, self.SAMPLE_ROWS)
+
+        data = json.loads(client.get("/api/v1/graph", headers=headers).data)
+        nodes = {n["id"]: n for n in data["nodes"]}
+        edges = {(e["source"], e["target"]): e for e in data["edges"]}
+
+        # Unknown threat level: null, not "low".
+        assert nodes["domain:solo.example"]["severity"] is None
+        # No stored severity for IPs (was "medium") or registrars (was a heuristic).
+        assert nodes["ip:203.0.113.10"]["severity"] is None
+        assert nodes["registrar:Acme Registrar"]["severity"] is None
+        # DNS/WHOIS relations have no recorded confidence (was a constant 1.0) ...
+        resolves = edges[("domain:brand-alpha.example", "ip:203.0.113.10")]
+        assert resolves["confidence"] is None
+        # ... the kit relation carries the best stored kit_confidence (85 / 100).
+        assert edges[("domain:brand-alpha.example", "kit:evilginx")]["confidence"] == 0.85
+
+    def test_graph_unknown_hosting_is_omitted_instead_of_direct(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, self.SAMPLE_ROWS)
+
+        nodes = {
+            n["id"]: n
+            for n in json.loads(client.get("/api/v1/graph", headers=headers).data)["nodes"]
+        }
+
+        assert "Hosting" not in nodes["domain:solo.example"]["meta"]
+        assert nodes["domain:brand-alpha.example"]["meta"]["Hosting"] == "Direct"
+        assert nodes["domain:acme-bank.example"]["meta"]["Hosting"] == "Cloudflare"
+
+    def test_graph_timestamps_carry_an_explicit_utc_offset(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, self.SAMPLE_ROWS)
+
+        nodes = {
+            n["id"]: n
+            for n in json.loads(client.get("/api/v1/graph", headers=headers).data)["nodes"]
+        }
+
+        meta = nodes["domain:brand-alpha.example"]["meta"]
+        assert meta["First seen"] == "2026-01-01T00:00:00+00:00"
+        assert meta["Last seen"] == "2026-01-06T00:00:00+00:00"
+
+    def test_graph_focus_meta_counts_only_returned_nodes(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, self.SAMPLE_ROWS)
+
+        data = json.loads(client.get("/api/v1/graph?focus=ip:203.0.113.10", headers=headers).data)
+
+        # The 2-hop registrar/kit of the domain are dropped, and not counted.
+        assert data["meta"]["domains"] == 1
+        assert data["meta"]["ips"] == 1
+        assert data["meta"]["registrars"] == 0
+        assert data["meta"]["kits"] == 0
+
     def test_graph_empty_when_no_sites(self, graph_setup):
         client, mock_db, headers = graph_setup
         self._rows(mock_db, [])
@@ -528,6 +636,8 @@ class TestGraphEndpoint:
         assert data["nodes"] == []
         assert data["edges"] == []
         assert data["meta"]["domains"] == 0
+        assert data["meta"]["total_rows"] == 0
+        assert data["meta"]["limited"] is False
 
     def test_graph_requires_auth(self, graph_setup):
         client, mock_db, _ = graph_setup
