@@ -306,14 +306,14 @@ class TestSendAbuseReport:
     def test_returns_false_when_template_rendering_fails(self, manager, mock_settings):
         """Should return False immediately when Jinja2 template rendering raises."""
         with (
-            patch("src.reporting.abuse_manager.Environment") as mock_env,
+            patch(
+                "src.reporting.abuse_manager.render_initial_report",
+                side_effect=Exception("template not found"),
+            ),
             patch(
                 "src.reporting.abuse_manager.AttachmentConfig.get_all_attachments", return_value=[]
             ),
         ):
-            mock_env.return_value.get_template.return_value.render.side_effect = Exception(
-                "template not found"
-            )
             manager.screenshot_service.capture_screenshot.return_value = {"success": False}
 
             result = manager.send_abuse_report(
@@ -330,7 +330,6 @@ class TestSendAbuseReport:
         mock_server = MagicMock()
 
         with (
-            patch("src.reporting.abuse_manager.Environment") as mock_env,
             patch("src.reporting.abuse_manager.smtplib.SMTP") as mock_smtp_class,
             patch(
                 "src.reporting.abuse_manager.AttachmentConfig.get_all_attachments", return_value=[]
@@ -338,9 +337,6 @@ class TestSendAbuseReport:
         ):
             mock_smtp_class.return_value.__enter__ = MagicMock(return_value=mock_server)
             mock_smtp_class.return_value.__exit__ = MagicMock(return_value=False)
-            mock_env.return_value.get_template.return_value.render.return_value = (
-                "<html>report</html>"
-            )
             manager.screenshot_service.capture_screenshot.return_value = {"success": False}
             manager.abuse_detector.validate_email.return_value = True
             manager.abuse_detector.validate_abuse_email_domain.return_value = True
@@ -364,7 +360,6 @@ class TestSendAbuseReport:
         mock_server = MagicMock()
 
         with (
-            patch("src.reporting.abuse_manager.Environment") as mock_env,
             patch("src.reporting.abuse_manager.smtplib.SMTP") as mock_smtp_class,
             patch(
                 "src.reporting.abuse_manager.AttachmentConfig.get_all_attachments", return_value=[]
@@ -372,9 +367,6 @@ class TestSendAbuseReport:
         ):
             mock_smtp_class.return_value.__enter__ = MagicMock(return_value=mock_server)
             mock_smtp_class.return_value.__exit__ = MagicMock(return_value=False)
-            mock_env.return_value.get_template.return_value.render.return_value = (
-                "<html>report</html>"
-            )
             manager.screenshot_service.capture_screenshot.return_value = {"success": False}
             manager.abuse_detector.validate_email.return_value = True
             manager.abuse_detector.validate_abuse_email_domain.return_value = True
@@ -394,7 +386,6 @@ class TestSendAbuseReport:
     def test_returns_false_when_smtp_raises(self, manager, mock_settings):
         """Should return False (not raise) when SMTP connection fails."""
         with (
-            patch("src.reporting.abuse_manager.Environment") as mock_env,
             patch(
                 "src.reporting.abuse_manager.smtplib.SMTP",
                 side_effect=ConnectionRefusedError("SMTP unavailable"),
@@ -403,9 +394,6 @@ class TestSendAbuseReport:
                 "src.reporting.abuse_manager.AttachmentConfig.get_all_attachments", return_value=[]
             ),
         ):
-            mock_env.return_value.get_template.return_value.render.return_value = (
-                "<html>report</html>"
-            )
             manager.screenshot_service.capture_screenshot.return_value = {"success": False}
             manager.abuse_detector.validate_email.return_value = True
             manager.abuse_detector.validate_abuse_email_domain.return_value = True
@@ -424,15 +412,11 @@ class TestSendAbuseReport:
         manager.abuse_detector.validate_email.return_value = False
 
         with (
-            patch("src.reporting.abuse_manager.Environment") as mock_env,
             patch("src.reporting.abuse_manager.smtplib.SMTP"),
             patch(
                 "src.reporting.abuse_manager.AttachmentConfig.get_all_attachments", return_value=[]
             ),
         ):
-            mock_env.return_value.get_template.return_value.render.return_value = (
-                "<html>report</html>"
-            )
             manager.screenshot_service.capture_screenshot.return_value = {"success": False}
 
             result = manager.send_abuse_report(

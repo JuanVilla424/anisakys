@@ -15,12 +15,10 @@ import re
 import smtplib
 import socket
 import threading
-from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from jinja2 import Environment, FileSystemLoader, select_autoescape
 from sqlalchemy import text
 
 from src.config import settings
@@ -44,7 +42,9 @@ from src.reporting.smtp_rate_limiter import DatabaseSmtpRateLimiter
 from src.models import AttachmentConfig
 from src.reporting.abuse_contact_validator import AbuseContactValidator
 from src.screenshot_client import get_screenshot_service
-from src.reporting.report_tracker import ReportTracker, create_report_record
+from src.reporting.db import utc_now
+from src.reporting.message_builder import build_email, build_evidence, render_initial_report
+from src.reporting.report_tracker import ReportTracker, create_report_record, generate_report_id
 from src.utils.serialization import serialize_for_json
 from src.utils.timeouts import timeout
 from src.shutdown import is_shutdown_requested, wait_for_shutdown
@@ -428,11 +428,6 @@ class AbuseReportManager:
                 logger.warning(f"⚠️  Could not report IP to Grinder during abuse report: {e}")
                 grinder_report_result = {"status": "error", "message": str(e)}
 
-        # Prepare attachment filenames for template
-        attachment_filenames = (
-            [os.path.basename(path) for path in attachment_paths] if attachment_paths else []
-        )
-
         # Prepare CC list with development protection
         if test_mode:
             final_cc = []
@@ -476,109 +471,39 @@ class AbuseReportManager:
                                 if email and email not in final_cc:
                                     final_cc.append(email)
 
-        # Prepare multi-API results summary for template
-        api_summary = ""
         threat_level = "unknown"
         confidence_score = 0
-
         if multi_api_results:
             threat_level = multi_api_results.get("aggregated_threat_level", "unknown")
             confidence_score = multi_api_results.get("confidence_score", 0)
 
-            # Create human-readable API summary
-            api_summary += "🤖 **Multi-API Threat Assessment**\n"
-            api_summary += f"📊 **Threat Level**: {threat_level.upper()}\n"
-            api_summary += f"🎯 **Confidence Score**: {confidence_score}%\n\n"
-
-            # VirusTotal results
-            vt_result = multi_api_results.get("virustotal", {})
-            if not vt_result.get("error"):
-                malicious = vt_result.get("malicious", 0)
-                total = vt_result.get("total_engines", 0)
-                if total > 0:
-                    api_summary += (
-                        f"🛡️ **VirusTotal**: {malicious}/{total} engines detected threats\n"
-                    )
-
-            # URLVoid results
-            uv_result = multi_api_results.get("urlvoid", {})
-            if not uv_result.get("error"):
-                safety_score = uv_result.get("safety_score", 100)
-                blacklists = uv_result.get("blacklists", [])
-                api_summary += f"🔍 **URLVoid**: Safety score {safety_score}/100"
-                if blacklists:
-                    api_summary += f", found on {len(blacklists)} blacklist(s)"
-                api_summary += "\n"
-
-            # PhishTank results
-            pt_result = multi_api_results.get("phishtank", {})
-            if not pt_result.get("error"):
-                if pt_result.get("is_phishing"):
-                    status = (
-                        "VERIFIED PHISHING" if pt_result.get("verified") else "Reported as phishing"
-                    )
-                    api_summary += f"🚨 **PhishTank**: {status}\n"
-                else:
-                    api_summary += "✅ **PhishTank**: Not in phishing database\n"
-
-            # Recommendations
-            recommendations = multi_api_results.get("recommendations", [])
-            if recommendations:
-                api_summary += "\n📋 **Recommendations**:\n"
-                for rec in recommendations[:5]:  # Limit to top 5 recommendations
-                    api_summary += f"• {rec}\n"
-
-            api_summary += "\n"
-
-        # Add Grinder integration information to API summary
-        if grinder_report_result and GRINDER_INTEGRATION_ENABLED:
-            api_summary += "🔗 **Threat Intelligence Integration**\n"
-            if grinder_report_result.get("status") == "success":
-                categories = grinder_report_result.get("categories", [])
-                api_summary += "✅ **IP reported to threat intelligence system**\n"
-                api_summary += f"📊 **Categories**: {', '.join(map(str, categories))}\n"
-                api_summary += f"🎯 **Confidence**: {grinder_report_result.get('confidence', 0)}%\n"
-            elif grinder_report_result.get("status") == "rate_limited":
-                api_summary += "⏰ **Rate limited** - IP will be reported later\n"
-            else:
-                api_summary += f"⚠️ **IP reporting failed**: {grinder_report_result.get('message', 'Unknown error')}\n"
-            api_summary += "\n"
-
-        # Render email template
+        # Render the report: brand-neutral templates, text/plain + HTML parts,
+        # defanged URL, and the tracked report id in body and subject.
+        report_id = generate_report_id()
         try:
-            env_jinja = Environment(
-                loader=FileSystemLoader("templates"), autoescape=select_autoescape(["html", "xml"])
-            )
-            # Generate temporary report ID for template
-            temp_report_id = f"ANISAKYS-{datetime.datetime.now().strftime('%Y%m%d')}-{hash(site_url) % 10000:04d}"
-
-            # Calculate SLA deadline
-            from datetime import timedelta
-
-            report_date = datetime.datetime.now()
-            sla_deadline = report_date + timedelta(days=2)  # 2 business days
-
-            html_content = env_jinja.get_template("abuse_report.html").render(
-                site_url=site_url,
-                whois_info=whois_str,
-                attachment_filenames=attachment_filenames,
-                attachment_count=len(attachment_filenames),
-                cc_emails=final_cc,
-                timestamp=report_date.strftime("%Y-%m-%d %H:%M:%S"),
-                api_summary=api_summary,
-                threat_level=threat_level,
-                confidence_score=confidence_score,
+            evidence = build_evidence(
+                site_url,
+                origin="automated",
+                brand_name=settings.REPORT_BRAND_NAME,
                 multi_api_results=multi_api_results,
-                grinder_integration=GRINDER_INTEGRATION_ENABLED,
-                grinder_report=grinder_report_result,
-                report_id=temp_report_id,
-                report_date=report_date.strftime("%Y-%m-%d %H:%M:%S"),
-                sla_deadline=sla_deadline.strftime("%Y-%m-%d %H:%M:%S"),
+                whois_text=whois_str,
+                attachments=attachment_paths or [],
+                reproduction_note=settings.REPORT_REPRODUCTION_NOTE,
             )
-            logger.debug("📧 Rendered email content (first 300 chars): " + html_content[:300])
+            rendered = render_initial_report(
+                evidence,
+                report_id=report_id,
+                report_time=utc_now(),
+                subject_base=settings.ABUSE_EMAIL_SUBJECT,
+                organization=settings.REPORT_ORGANIZATION,
+                followup_hours=settings.FOLLOWUP_INTERVAL_HOURS,
+                cc_disclosure=[email for email in final_cc if email != sender_email],
+                is_test=test_mode,
+            )
         except Exception as render_err:
-            logger.error(f"❌ Template rendering failed: {render_err}")
+            logger.error(f"Template rendering failed for {site_url}: {render_err}")
             return False
+        subject = rendered.subject
 
         # Filter out non-primary abuse emails
         primary_candidates = [
@@ -609,16 +534,9 @@ class AbuseReportManager:
                     )
                     continue
 
-                logger.info(f"📝 CREATING EMAIL MESSAGE for {primary}")
-                msg = MIMEMultipart("mixed")
-                msg["Subject"] = subject
-                msg["From"] = sender_email
-                msg["To"] = primary
-
                 # SECURITY: Never send CCs in testing mode
                 # IS_TESTING_MODE is independent of test_mode (which controls screenshots)
                 if not test_mode and final_cc and not IS_TESTING_MODE:
-                    msg["Cc"] = ", ".join(final_cc)
                     recipients = [primary] + final_cc
                 else:
                     recipients = [primary]
@@ -627,56 +545,15 @@ class AbuseReportManager:
                             f"🧪 TESTING MODE: CCs blocked for security - only sending to {primary}"
                         )
 
-                msg.attach(MIMEText(html_content, "html"))
-
-                # Attach multiple files if provided
-                attached_files = []
-                if attachment_paths:
-                    for attachment_path in attachment_paths:
-                        try:
-                            if os.path.exists(attachment_path) and os.path.isfile(attachment_path):
-                                with open(attachment_path, "rb") as f:
-                                    file_data = f.read()
-
-                                # Check file size (limit to 25MB per file).
-                                # settings declares the field as Optional=None, so
-                                # getattr always finds it — fall back with `or`.
-                                max_size_mb = (
-                                    getattr(settings, "MAX_ATTACHMENT_SIZE_MB", None) or 25
-                                )
-                                max_size = max_size_mb * 1024 * 1024
-                                if len(file_data) > max_size:
-                                    logger.warning(
-                                        f"⚠️  Skipping large attachment: {attachment_path} "
-                                        f"({len(file_data) / 1024 / 1024:.1f}MB > {max_size / 1024 / 1024}MB)"
-                                    )
-                                    continue
-
-                                filename = os.path.basename(attachment_path)
-                                part = MIMEApplication(file_data, Name=filename)
-                                part["Content-Disposition"] = f'attachment; filename="{filename}"'
-                                msg.attach(part)
-                                attached_files.append(filename)
-                                logger.debug(
-                                    f"📎 Attached file: {filename} ({len(file_data)} bytes)"
-                                )
-                            else:
-                                logger.warning(
-                                    f"⚠️  Attachment file not found or not a file: {attachment_path}"
-                                )
-                        except Exception as e:
-                            logger.error(f"❌ Failed to attach file {attachment_path}: {e}")
-                            continue
-
-                # Check total email size
-                total_size = len(msg.as_string())
-                max_email_size_mb = getattr(settings, "MAX_EMAIL_SIZE_MB", None) or 50
-                max_email_size = max_email_size_mb * 1024 * 1024
-                if total_size > max_email_size:
-                    logger.error(
-                        f"❌ Email too large ({total_size / 1024 / 1024:.1f}MB), skipping send to {primary}"
-                    )
-                    continue
+                msg, attached_files = build_email(
+                    rendered.to_payload(attachment_paths or []),
+                    sender=sender_email,
+                    to_addrs=[primary],
+                    max_attachment_bytes=(settings.MAX_ATTACHMENT_SIZE_MB or 25) * 1024 * 1024,
+                    max_total_bytes=(settings.MAX_EMAIL_SIZE_MB or 50) * 1024 * 1024,
+                )
+                if len(recipients) > 1:
+                    msg["Cc"] = ", ".join(recipients[1:])
 
                 # Send email
                 logger.info(f"📤 ABOUT TO SEND EMAIL to {primary}")
@@ -712,7 +589,7 @@ class AbuseReportManager:
                         logger.info("🔐 LOGGING IN TO SMTP SERVER")
                         server.login(smtp_user, smtp_pass)
                     logger.info(f"📬 SENDING EMAIL MESSAGE to {primary}")
-                    server.sendmail(sender_email, recipients, msg.as_string())
+                    server.sendmail(sender_email, recipients, msg.as_bytes())
                     logger.info(f"✅ EMAIL SENT SUCCESSFULLY to {primary}")
 
                 logger.info(
@@ -817,6 +694,7 @@ class AbuseReportManager:
                         cc_recipients=final_cc,
                         multi_api_results=multi_api_results,
                         screenshot_included=screenshot_included,
+                        report_id=report_id,
                     )
 
                     # Track report with timeout to prevent hanging

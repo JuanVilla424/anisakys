@@ -1,0 +1,21 @@
+{% if notified_recipients %}Copy for information. This follow-up was sent to: {{ notified_recipients | join(', ') }}.
+
+{% endif %}FOLLOW-UP {{ followup_seq }} TO PHISHING REPORT {{ report_id }}
+
+Dear abuse team,
+
+On {{ original_report_time_utc }} we reported the phishing website below (report
+{{ report_id }}). When we checked again at {{ report_time_utc }} it was still
+reachable{% if site_status %} (status: {{ site_status }}){% endif %}. Please let us know the status of this
+case, or take the action requested in the original report.
+
+{% include "_report_evidence.txt" %}{% if escalation_contacts %}
+ESCALATION
+Because the site remains online despite our report and earlier follow-up,
+this notice is also being shared with: {{ escalation_contacts | join(', ') }}.
+{% endif %}
+Please quote {{ report_id }} in any reply.
+
+--
+Sent by {{ organization }} using Anisakys, an open-source phishing detection
+and takedown tool. Replies to this address are read by our team.

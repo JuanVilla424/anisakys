@@ -141,7 +141,6 @@ class TestFunctionalE2E:
         # Test 3: Abuse reporting (send_abuse_report lives in report_manager)
         with (
             patch("src.reporting.abuse_manager.smtplib.SMTP") as mock_smtp,
-            patch("src.reporting.abuse_manager.Environment") as mock_env_tpl,
             patch(
                 "src.reporting.abuse_manager.AttachmentConfig.get_all_attachments",
                 return_value=[],
@@ -150,9 +149,6 @@ class TestFunctionalE2E:
             mock_server = MagicMock()
             mock_smtp.return_value.__enter__ = MagicMock(return_value=mock_server)
             mock_smtp.return_value.__exit__ = MagicMock(return_value=False)
-            mock_env_tpl.return_value.get_template.return_value.render.return_value = (
-                "<html>Phishing Report</html>"
-            )
 
             with (
                 patch.object(

@@ -6,13 +6,27 @@ Tracks sent abuse reports and their responses
 import uuid
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Any
 from sqlalchemy import create_engine, text
 from dataclasses import dataclass
 from enum import Enum
 
 logger = logging.getLogger(__name__)
+
+
+def generate_report_id() -> str:
+    """Generate a unique, stable report id.
+
+    The same id is tracked in ``abuse_reports`` and carried in the e-mail
+    subject and body, so replies and follow-ups can be matched to it.
+
+    Returns:
+        ``ANISAKYS-YYYYMMDD-XXXXXXXX`` (UTC date).
+    """
+    return (
+        f"ANISAKYS-{datetime.now(timezone.utc).strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+    )
 
 
 class ReportStatus(Enum):
@@ -94,7 +108,7 @@ class ReportTracker:
 
     def generate_report_id(self) -> str:
         """Generate unique report ID"""
-        return f"ANISAKYS-{datetime.now().strftime('%Y%m%d')}-{uuid.uuid4().hex[:8].upper()}"
+        return generate_report_id()
 
     def track_report(self, report: AbuseReportRecord) -> bool:
         """
@@ -602,6 +616,7 @@ def create_report_record(
     cc_recipients: List[str] = None,
     multi_api_results: Dict = None,
     screenshot_included: bool = False,
+    report_id: Optional[str] = None,
 ) -> AbuseReportRecord:
     """
     Create a new AbuseReportRecord
@@ -613,12 +628,12 @@ def create_report_record(
         cc_recipients: Optional CC recipients
         multi_api_results: Optional API scan results
         screenshot_included: Whether screenshot was included
+        report_id: Id already used in the e-mail; generated when omitted
 
     Returns:
         AbuseReportRecord instance
     """
-    tracker = ReportTracker(None)  # We'll set engine when tracking
-    report_id = tracker.generate_report_id()
+    report_id = report_id or generate_report_id()
 
     confidence_score = None
     threat_level = None
