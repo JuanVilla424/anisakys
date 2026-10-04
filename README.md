@@ -471,10 +471,48 @@ threads, limited to `EMAIL_MONITOR_ALLOWED_MAILBOXES`), `metrics` and `admin`.
 - `POST /api/v1/report` - Submit phishing reports (202 pending approval without `report_send`)
 - `POST /api/v1/multi-scan` - Perform multi-API validation
 - `GET /api/v1/status/<url>` - Check report status
-- `GET /api/v1/stats` - System statistics
+- `GET /api/v1/stats` - System statistics, incl. `reports_by_status` and `outbox_by_status`
+- `GET /api/v1/session` - The calling key: `key_type`, `key_name`, `key_prefix` (8 chars),
+  usable `scopes` and `rate_limit_storage` (`shared`/`per-process`); never the secret
+- `GET /api/v1/sites/sources` - `[{"source": str|null, "count": int}]`
+- `GET /api/v1/reports/tasks` - Open analyst tasks (web-form providers, sites without a contact)
+- `POST /api/v1/reports/tasks/<id>/complete` - Close one: `{"outcome": "submitted"|"not_applicable", "note"?}`
 - `POST /api/v2/stix/bundle` - Build a STIX 2.1 indicator bundle (TLP 2.0, AMBER by default)
 - `GET /api/v1/health` - Health check with a database ping (503 when unhealthy)
 - `GET /metrics` - Prometheus metrics (`METRICS_TOKEN` or a `metrics`/`read` API key)
+
+**Response conventions** (console endpoints):
+
+- Unknown is `null`, never a default: no invented severities, confidences, statuses,
+  sources, priorities, `gsb_safe`/`is_cloudflare` flags or "now" timestamps.
+- Timestamps are ISO-8601 with an explicit offset (`2026-01-02T03:04:05+00:00`).
+  Database columns without time zone are read as UTC (the images and CI run the
+  database and the application in UTC); see `src/api/serializers.py`.
+- Every response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining`,
+  `X-RateLimit-Reset` and `Retry-After`; a 429 is
+  `{"error": "...", "retry_after": <seconds>}` with the same `Retry-After`.
+  `/threads/<id>/results` is limited per API key *and* thread (30/min, 120/min per key).
+- Lists report the real `total` across pages (`/sites`, `/intelligence/iocs`,
+  `/campaigns`, `/reports/tasks`); `/graph` reports `meta.total_rows`, `meta.limit`
+  and `meta.limited`.
+
+**Compatibility notes** (fields that were lying now say so; names are unchanged):
+
+- `/graph`: node `severity` is null except for domains (severest stored threat level);
+  edge `confidence` is null except `detected_as` (stored kit confidence / 100);
+  `meta` counts count the returned nodes.
+- `/intelligence/iocs`: new `search` and `threat` filters; IP `threat` is the severest
+  level of its sites; IP `tags` is empty when the Cloudflare flag is unknown.
+- `/sites`: new `takedown_date`; `source`, `priority`, `is_cloudflare` and `gsb_safe`
+  (until GSB checked the site) can be null.
+- `/threads`: `results_count` = results shown (same as `/threads/<id>/results` total),
+  `total_results` = all recorded results incl. discarded, new `last_execution_results`.
+- `/integrations`: `status` is `unknown` without breaker data; `circuit_breaker` and
+  `error_rate` can be null; `last_success` is null (not recorded), new `state_changed_at`.
+- `/campaigns`: `confidence` can be null; new `limit`/`offset` (default 100, max 500).
+- `/activity`: `timestamp` and `severity` can be null; undated events sort last.
+- `/reports`: `status` can be null; `?status=` accepts `queued`, `failed`, `pending_manual`.
+- `/report`: `processing` can be `scheduled` (the scheduler role reports the site).
 
 ### 🕸️ **Manual Phishing Site Reporting**
 
