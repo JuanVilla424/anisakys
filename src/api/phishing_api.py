@@ -73,6 +73,7 @@ from src.observability.health import (
     check_database,
     create_health_checker,
 )
+from src.shutdown import register_thread
 from src.utils.timeouts import OperationTimeoutError, timeout
 from src.dns.network_utils import assess_url_target, is_cloudflare_ip
 from src.screenshot_service import PLAYWRIGHT_AVAILABLE, SELENIUM_AVAILABLE
@@ -3940,10 +3941,27 @@ class PhishingAPI:
     ) -> Dict[str, Any]:
         """Persist a phishing report from the API and return right away.
 
-        Abuse-contact resolution (WHOIS) and the immediate abuse report (SMTP) can take
-        well over 10 s for domains that don't resolve, so they run afterwards in a
-        background thread (_resolve_and_send_report). If the process restarts first, the
-        anisakys-threads reporting loop still picks the site up (manual_flag=1, reported=0).
+        With a ``report_manager`` (the single-process ``--start-api`` mode),
+        abuse-contact resolution (WHOIS) and the immediate abuse report can take
+        well over 10 s for domains that don't resolve, so they run afterwards in
+        a background thread (:meth:`_resolve_and_send_report`) registered with
+        ``src.shutdown`` so a graceful shutdown waits for it. Without one (the
+        gunicorn API role), nothing runs here: the scheduler role's reporting
+        loop resolves the contacts and reports the site (``manual_flag = 1``,
+        not yet reported). The same loop also picks the site up if this
+        process stops before its thread finishes.
+
+        Args:
+            url: Submitted URL (already validated and SSRF-checked).
+            abuse_email: Abuse contact suggested by the submitter, if any.
+            source: Submitter-provided source label.
+            priority: Submitter-provided priority.
+            description: Free-text description.
+
+        Returns:
+            The response body; ``processing`` is ``queued`` (background work
+            started here), ``scheduled`` (left to the scheduler role) or
+            ``done`` (the site was already reported).
         """
         try:
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -3953,11 +3971,14 @@ class PhishingAPI:
             with self.db_manager.engine.begin() as conn:
                 existing = conn.execute(
                     text(
-                        "SELECT abuse_email, all_abuse_emails FROM phishing_sites WHERE url = :url"
+                        "SELECT abuse_email, all_abuse_emails, "
+                        "COALESCE(abuse_report_sent, 0) = 1 OR COALESCE(reported, 0) = 1 "
+                        "FROM phishing_sites WHERE url = :url"
                     ),
                     {"url": url},
                 ).fetchone()
                 is_new = existing is None
+                already_reported = bool(existing[2]) if existing is not None else False
 
                 if is_new:
                     needs_resolution = not abuse_email
@@ -4004,13 +4025,21 @@ class PhishingAPI:
                     elif existing[0]:
                         stored_emails = [existing[0]]
 
-            queued = needs_resolution or bool(self.report_manager and stored_emails)
+            queued = self.report_manager is not None and (needs_resolution or bool(stored_emails))
             if queued:
-                threading.Thread(
+                worker = threading.Thread(
                     target=self._resolve_and_send_report,
-                    args=(url, needs_resolution, stored_emails, timestamp),
+                    args=(url, needs_resolution, stored_emails),
                     daemon=True,
-                ).start()
+                    name="api-report",
+                )
+                worker.start()
+                register_thread(worker)
+                processing = "queued"
+            elif self.report_manager is None and not already_reported:
+                processing = "scheduled"
+            else:
+                processing = "done"
 
             result = {
                 "status": "created" if is_new else "updated",
@@ -4021,7 +4050,7 @@ class PhishingAPI:
                 "report_sent": False,
                 "report_recipients": [],
                 "last_report_sent": None,
-                "processing": "queued" if queued else "done",
+                "processing": processing,
             }
             if is_new:
                 result["abuse_email"] = abuse_email
@@ -4034,10 +4063,20 @@ class PhishingAPI:
             return {"status": "error", "message": "Failed to process report", "url": url}
 
     def _resolve_and_send_report(
-        self, url: str, needs_resolution: bool, stored_emails: List[str], timestamp: str
+        self, url: str, needs_resolution: bool, stored_emails: List[str]
     ) -> None:
-        """Background half of process_phishing_report: resolve abuse contacts and send the
-        immediate abuse report, with the same rules the request path used to apply inline."""
+        """Background half of process_phishing_report: resolve contacts, then report.
+
+        ``AbuseReportManager.send_abuse_report`` claims the site, marks it
+        reported and queues the outbox e-mails in one transaction, so nothing
+        is written here afterwards. A False return is not an error: the site
+        may be claimed by another worker or inside the resend cool-down.
+
+        Args:
+            url: Reported URL.
+            needs_resolution: Whether abuse contacts must be looked up (WHOIS).
+            stored_emails: Contacts already stored for the site.
+        """
         domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
         whois_info = None
         abuse_emails: List[str] = []
@@ -4081,16 +4120,12 @@ class PhishingAPI:
                 if whois_info is None:
                     whois_info = self.abuse_detector.get_enhanced_whois_info(domain)
                 if self.report_manager.send_abuse_report(recipients, url, str(whois_info)):
-                    with self.db_manager.engine.begin() as conn:
-                        conn.execute(
-                            text("""
-                                UPDATE phishing_sites
-                                SET abuse_report_sent = 1, last_report_sent = :timestamp, reported = 1
-                                WHERE url = :url
-                                """),
-                            {"timestamp": timestamp, "url": url},
-                        )
-                    logger.info(f"✅ Immediate abuse report sent for {url}")
+                    logger.info(f"✅ Immediate abuse report accepted for {url}")
+                else:
+                    logger.info(
+                        f"ℹ️  Immediate abuse report for {url} not sent now (claimed by another "
+                        "worker, inside the resend cool-down, or no abuse desk accepted it)"
+                    )
         except Exception as e:
             logger.error(f"❌ Failed to send immediate abuse report for {url}: {e}")
 

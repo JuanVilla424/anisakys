@@ -44,6 +44,9 @@ def api():
         patch("src.api.phishing_api.GrinderReportClient"),
         patch("src.api.phishing_api.MultiAPIValidator"),
         patch("src.api.phishing_api.GRINDER_INTEGRATION_ENABLED", False),
+        # Tests replace threading with mocks: keep those out of the process-wide
+        # shutdown registry, which later tests join.
+        patch("src.api.phishing_api.register_thread"),
     ):
         from src.api.phishing_api import PhishingAPI
 
