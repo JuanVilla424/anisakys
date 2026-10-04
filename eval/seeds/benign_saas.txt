@@ -1,0 +1,13 @@
+# Hard negatives: legitimate pages on free hosting platforms, where most SaaS
+# phishing lives too (a hosting domain alone is not evidence of phishing).
+# One URL per line; dead URLs are dropped at build time by the liveness probe.
+https://pages.github.com/
+https://google.github.io/styleguide/
+https://microsoft.github.io/monaco-editor/
+https://mozilla.github.io/pdf.js/
+https://square.github.io/okhttp/
+https://swr.vercel.app/
+https://next-auth-example.vercel.app/
+https://react-hook-form.netlify.app/
+https://docs.expo.dev/
+https://firebase.google.com/

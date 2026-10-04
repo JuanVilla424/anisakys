@@ -1,0 +1,13 @@
+{
+  "_comment": "USD per call by pipeline stage, used by `python -m src.eval run` for the cost column. Zero = free tier (VirusTotal public, PhishTank, GSB lookups, WHOIS, page fetch). Set real prices before enabling paid plans.",
+  "usd_per_call": {
+    "url_analysis": 0.0,
+    "virustotal_url": 0.0,
+    "virustotal_domain": 0.0,
+    "urlvoid": 0.0,
+    "phishtank": 0.0,
+    "whois": 0.0,
+    "google_safe_browsing": 0.0,
+    "kit_fingerprint": 0.0
+  }
+}

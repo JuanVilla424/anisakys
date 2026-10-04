@@ -181,6 +181,7 @@ class SiteQueue:
                 SELECT ps_inner.id FROM phishing_sites AS ps_inner
                 WHERE {eligibility}
                   AND ps_inner.site_status = 'up'
+                  AND COALESCE(ps_inner.label_verdict, '') <> 'benign'
                   AND COALESCE(ps_inner.abuse_report_sent, 0) = 0
                   AND (ps_inner.last_report_sent IS NULL
                        OR ps_inner.last_report_sent
@@ -224,8 +225,8 @@ class SiteQueue:
         Returns:
             ``(tracked, claim)``: ``tracked`` is whether a ``phishing_sites``
             row exists; ``claim`` is ``None`` when it does not exist, when
-            another worker holds it, or when it was reported within the
-            cooldown.
+            another worker holds it, when it was reported within the
+            cooldown, or when an analyst labelled it benign.
         """
         with short_transaction(self.engine) as conn:
             row = (
@@ -237,6 +238,7 @@ class SiteQueue:
                         WHERE ps.id = (
                             SELECT id FROM phishing_sites
                             WHERE url = :url
+                              AND COALESCE(label_verdict, '') <> 'benign'
                               AND (report_lease_until IS NULL OR report_lease_until < now())
                               AND (last_report_sent IS NULL
                                    OR last_report_sent

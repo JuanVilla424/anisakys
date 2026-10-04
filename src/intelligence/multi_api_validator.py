@@ -212,10 +212,22 @@ class MultiAPIValidator:
             "recommendations": [],
         }
 
+        # Wall-clock milliseconds of each step (the evaluation harness reports
+        # latency per stage from these).
+        stage_timings: Dict[str, float] = {}
+        stage_started = time.perf_counter()
+
+        def lap(stage: str) -> None:
+            nonlocal stage_started
+            finished = time.perf_counter()
+            stage_timings[stage] = round((finished - stage_started) * 1000, 1)
+            stage_started = finished
+
         # Step 0: URL Lexical Analysis (fast, no API calls)
         logger.info(f"📊 Step 0: URL lexical analysis for {url}")
         url_analysis = self.url_analyzer.analyze(url)
         results["url_analysis"] = url_analysis
+        lap("url_analysis")
         if url_analysis.get("risk_score", 0) > 0:
             logger.warning(f"⚠️ URL analysis risk score: {url_analysis['risk_score']}")
             for factor in url_analysis.get("risk_factors", []):
@@ -225,6 +237,7 @@ class MultiAPIValidator:
         logger.info(f"📊 Step 1: VirusTotal URL analysis for {url}")
         vt_result = self.virustotal.scan_url(url)
         results["virustotal"] = vt_result
+        lap("virustotal_url")
 
         # Step 1.5: VirusTotal domain report for registrar info
         vt_domain: Dict[str, Any] = (
@@ -232,6 +245,7 @@ class MultiAPIValidator:
             if domain
             else {"status": NO_DATA, "error": "No host name in URL"}
         )
+        lap("virustotal_domain")
         if not vt_domain.get("error"):
             results["virustotal"]["registrar"] = vt_domain.get("registrar")
             results["virustotal"]["creation_date"] = vt_domain.get("creation_date")
@@ -244,6 +258,7 @@ class MultiAPIValidator:
             else {"status": NO_DATA, "error": "No host name in URL"}
         )
         results["urlvoid"] = uv_result
+        lap("urlvoid")
 
         # Merge registrar info from VT into urlvoid for consistent storage
         if not uv_result.get("error"):
@@ -255,6 +270,7 @@ class MultiAPIValidator:
         logger.info(f"📊 Step 3: PhishTank community database check for {url}")
         pt_result = self.phishtank.check_phishing_status(url)
         results["phishtank"] = pt_result
+        lap("phishtank")
 
         # Step 4: WHOIS lookup for domain registration info
         logger.info(f"📊 Step 4: WHOIS lookup for {domain}")
@@ -346,11 +362,13 @@ class MultiAPIValidator:
 
         results["whois"] = whois_info
         domain_age = whois_info.get("domain_age_days")
+        lap("whois")
 
         # Step 5: Google Safe Browsing check
         logger.info(f"📊 Step 5: Google Safe Browsing check for {url}")
         gsb_result = self.google_safe_browsing.check_url(url)
         results["google_safe_browsing"] = gsb_result
+        lap("google_safe_browsing")
         if gsb_status(gsb_result) == LISTED:
             logger.warning(
                 f"🚨 Google Safe Browsing threats found: {gsb_result.get('threat_count', 0)}"
@@ -383,6 +401,22 @@ class MultiAPIValidator:
         results["detected_kit_type"] = kit_result.get("kit_type")
         results["kit_confidence"] = kit_result.get("confidence")
         results["kit_indicators"] = kit_result.get("indicators")
+        lap("kit_fingerprint")
+        results["stage_timings_ms"] = stage_timings
+        # Whether each external source answered (listed / not_listed) or not
+        # (error / no_data): the evaluation harness counts provider calls and
+        # coverage from this.
+        results["stage_status"] = {
+            "virustotal_url": provider_status(vt_result),
+            "virustotal_domain": provider_status(vt_domain),
+            "urlvoid": provider_status(uv_result),
+            "phishtank": provider_status(pt_result),
+            "google_safe_browsing": gsb_status(gsb_result),
+            "whois": NOT_LISTED if whois_info else NO_DATA,
+            "kit_fingerprint": (
+                LISTED if kit_result.get("kit_type") else (NOT_LISTED if kit_result else NO_DATA)
+            ),
+        }
 
         # Step 6: Aggregate results and calculate threat level
         results["aggregated_threat_level"] = self._aggregate_threat_level(

@@ -1,7 +1,7 @@
 {
   // Type-checked in CI (`pyright`). The list holds every module that is clean
   // today; add a module here once it passes, never remove one. Legacy modules
-  // with known errors are tracked for phase 6 (docs/ROADMAP-v2.md).
+  // with known errors are tracked for phase 6 (docs/ROADMAP.md).
   // No venvPath: pyright uses the active interpreter (CI) or --pythonpath.
   "pythonVersion": "3.12",
   "include": [
@@ -35,6 +35,8 @@
     "src/intelligence/stix_export.py",
     "src/intelligence/taxii_client.py",
     "src/intelligence/urlvoid.py",
+    "src/eval",
+    "src/labels.py",
     "src/logger.py",
     "src/models",
     "src/monitoring/__init__.py",
@@ -42,6 +44,7 @@
     "src/monitoring/gsb_rescan.py",
     "src/observability/__init__.py",
     "src/observability/health.py",
+    "src/observability/operational.py",
     "src/observability/structured_logger.py",
     "src/observability/tracing.py",
     "src/reporting/__init__.py",
@@ -61,7 +64,9 @@
     "tests/detection/test_kit_fingerprint.py",
     "tests/detection/test_redirect_analyzer.py",
     "tests/detection/test_utils_ssrf.py",
+    "tests/eval",
     "tests/intelligence",
+    "tests/labels",
     "tests/models",
     "tests/monitoring/__init__.py",
     "tests/monitoring/test_feed_intel.py",
@@ -70,6 +75,7 @@
     "tests/networking",
     "tests/observability/__init__.py",
     "tests/observability/test_logging_config.py",
+    "tests/observability/test_operational_pg.py",
     "tests/regressions/__init__.py",
     "tests/regressions/test_no_runtime_ddl.py",
     "tests/regressions/test_platform_hygiene.py",

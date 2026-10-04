@@ -491,7 +491,7 @@ threads, limited to `EMAIL_MONITOR_ALLOWED_MAILBOXES`), `metrics` and `admin`.
 - Every response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining`,
   `X-RateLimit-Reset` and `Retry-After`; a 429 is
   `{"error": "...", "retry_after": <seconds>}` with the same `Retry-After`.
-  `/threads/<id>/results` is limited per API key *and* thread (30/min, 120/min per key).
+  `/threads/<id>/results` is limited per API key _and_ thread (30/min, 120/min per key).
 - Lists report the real `total` across pages (`/sites`, `/intelligence/iocs`,
   `/campaigns`, `/reports/tasks`); `/graph` reports `meta.total_rows`, `meta.limit`
   and `meta.limited`.
@@ -589,6 +589,30 @@ Reset scanning position to beginning:
 cd anisakys
 python anisakys.py --reset-offset
 ```
+
+### 📏 **Measuring Detection Quality**
+
+Analyst labels (`POST /api/v1/sites/<id>/labels`: `confirm`, `dismiss`, `report`) are the
+ground truth. The evaluation harness builds a versioned dataset and measures the detector:
+
+```bash
+# Dataset: analyst labels + live-verified OpenPhish feed + hard negatives
+# (official brand logins, homonyms, benign SaaS pages, Tranco top sites)
+python -m src.eval build --name baseline --version 2026-10-04
+python -m src.eval verify eval/datasets/baseline/2026-10-04
+
+# Precision, recall, PR-AUC, TPR@FPR, precision@k, per-brand confusion,
+# calibration and latency/cost per stage -> eval/runs/<run>/report.{json,html}
+python -m src.eval run eval/datasets/baseline/2026-10-04 --predictor live
+python -m src.eval run eval/datasets/baseline/2026-10-04 --predictor heuristic
+
+# Time to detect / report / take down, queues and outcomes from the database
+python -m src.eval ops --days 30
+```
+
+Dataset manifests (with the samples' SHA-256) and the seed lists in `eval/seeds/` are
+versioned; samples built from third-party feeds and the run reports stay local. The same
+operational metrics are served at `GET /api/v1/metrics/operational` and on `/metrics`.
 
 ## 🤝 Contributing
 

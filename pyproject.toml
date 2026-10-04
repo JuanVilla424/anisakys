@@ -99,7 +99,7 @@ extend-exclude = ["scripts", "smtp-relay", "alembic/versions"]
 
 [tool.ruff.lint]
 # Pyflakes (F) is the blocking gate in CI. The wider rule set below is the
-# target for new and modified code (see docs/ROADMAP-v2.md, phase 6).
+# target for new and modified code (see docs/ROADMAP.md, phase 6).
 select = ["F"]
 extend-select = []
 

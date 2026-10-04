@@ -1,0 +1,33 @@
+{
+  "_comment": "Hard negatives: official login pages and aliases per brand. Official domains come from KNOWN_BRANDS in src/detection/url_analyzer.py (their homepages are added automatically); this file adds login pages, extra aliases and brands the detector does not list yet. Dead URLs are dropped at build time by the liveness probe.",
+  "brands": [
+    {"name": "microsoft", "aliases": ["office365", "outlook", "hotmail", "msonline"], "urls": ["https://login.microsoftonline.com/", "https://login.live.com/", "https://outlook.live.com/owa/"]},
+    {"name": "google", "aliases": ["gmail"], "urls": ["https://accounts.google.com/"]},
+    {"name": "apple", "aliases": ["icloud", "appleid"], "urls": ["https://appleid.apple.com/", "https://www.icloud.com/"]},
+    {"name": "amazon", "aliases": ["aws"], "urls": ["https://www.amazon.com/ap/signin"]},
+    {"name": "paypal", "aliases": [], "urls": ["https://www.paypal.com/signin"]},
+    {"name": "facebook", "aliases": ["meta"], "urls": ["https://www.facebook.com/login/"]},
+    {"name": "instagram", "aliases": [], "urls": ["https://www.instagram.com/accounts/login/"]},
+    {"name": "whatsapp", "aliases": [], "urls": ["https://web.whatsapp.com/"]},
+    {"name": "twitter", "aliases": [], "urls": ["https://x.com/i/flow/login"]},
+    {"name": "linkedin", "aliases": [], "urls": ["https://www.linkedin.com/login"]},
+    {"name": "netflix", "aliases": [], "urls": ["https://www.netflix.com/login"]},
+    {"name": "spotify", "aliases": [], "urls": ["https://accounts.spotify.com/login"]},
+    {"name": "dropbox", "aliases": [], "urls": ["https://www.dropbox.com/login"]},
+    {"name": "zoom", "aliases": [], "urls": ["https://zoom.us/signin"]},
+    {"name": "ebay", "aliases": [], "urls": ["https://signin.ebay.com/"]},
+    {"name": "coinbase", "aliases": [], "urls": ["https://login.coinbase.com/"]},
+    {"name": "binance", "aliases": [], "urls": ["https://accounts.binance.com/"]},
+    {"name": "chase", "aliases": [], "urls": ["https://secure.chase.com/"]},
+    {"name": "wellsfargo", "aliases": [], "urls": ["https://connect.secure.wellsfargo.com/auth/login/present"]},
+    {"name": "mercadolibre", "aliases": ["mercadopago"], "urls": ["https://www.mercadolibre.com.co/"]},
+    {"name": "bancolombia", "aliases": ["transaccionesbancolombia"], "urls": ["https://sucursalpersonas.transaccionesbancolombia.com/"]},
+    {"name": "davivienda", "aliases": [], "urls": ["https://www.davivienda.com/"]},
+    {"name": "nequi", "aliases": [], "urls": ["https://www.nequi.com.co/"]},
+    {"name": "daviplata", "aliases": [], "urls": ["https://www.daviplata.com/"]},
+    {"name": "bbva", "aliases": ["bbvanet"], "urls": ["https://www.bbva.com.co/"]},
+    {"name": "dian", "aliases": ["muisca"], "urls": ["https://muisca.dian.gov.co/"]},
+    {"name": "simit", "aliases": ["fcm"], "urls": ["https://www.fcm.org.co/simit/"]},
+    {"name": "runt", "aliases": [], "urls": ["https://www.runt.gov.co/"]}
+  ]
+}

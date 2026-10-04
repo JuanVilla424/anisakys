@@ -54,6 +54,9 @@ smtp-relay/
 monitoring/
 bin/
 node_modules/
+eval/runs/
+eval/cache/
+eval/datasets/
 Dockerfile
 docker-compose*.yml
 .dockerignore

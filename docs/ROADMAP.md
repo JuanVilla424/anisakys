@@ -1,9 +1,10 @@
 # Anisakys v2 — Roadmap
 
-Working memory for the v2 programme. Every phase ships as one branch
-`feat/v2-faseN-<topic>` per affected repository and one PR into `dev`.
-Tick boxes only when the change is merged into the phase branch **and**
-covered by a test. Numbers in this file are measured, never estimated.
+Working memory for the v2 programme. Phase 0 shipped as one branch
+`feat/v2-fase0-<topic>` per affected repository and one PR into `dev`; from
+phase 1 on, every phase ships as one commit per affected repository directly
+on `dev` (D20). Tick boxes only when the change is on `dev` **and** covered by
+a test. Numbers in this file are measured, never estimated.
 
 - Backend: `JuanVilla424/anisakys` (base `dev`)
 - Frontend: `JuanVilla424/anisakys-frontend` (base `dev`)
@@ -48,6 +49,11 @@ covered by a test. Numbers in this file are measured, never estimated.
 | D17 | A site is `down` only after N consecutive failing probe cycles from every client profile, with a canary check against local outages; WAF challenges and parking never count as down; only the takedown monitor writes `down`. | Removes false takedowns that auto-closed reports. |
 | D18 | Origin-IP candidates behind Cloudflare (from `origin.`/`direct.` sub-domains) are informational only. | The phishing operator controls that DNS and could aim complaints at a third party. |
 | D19 | `pyproject.toml` (PEP 621) is the single dependency source, locked with Poetry; `requirements*.txt` are generated (`tools/sync-requirements.sh`, checked in CI). | Reproducible installs for Docker/systemd. |
+| D20 | From phase 1 on, work is committed directly to `dev`, one commit per repository, without feature branches or agent-opened PRs. | Owner's branch rule for agents; CI on push to `dev` is the gate. |
+| D21 | Ground truth is the append-only `labels` table (migration `006`) with the latest verdict denormalised on `phishing_sites`; `benign` keeps a site out of reporting and analysis and cancels its queued e-mails and open analyst tasks; `report` needs `report_send`; `detector_snapshot` freezes what the detector said when the analyst decided. | The `stored` predictor measures the decision the analyst actually saw, not a later re-scan. |
+| D22 | Evaluation datasets version their manifest (sources, parameters, counts, SHA-256) and the seed lists in git; samples built from third-party feeds and run reports stay local. URLs are sanitised (no query, fragment, credentials or port; e-mail/token path segments redacted). | Feed licences forbid redistribution; no personal data in samples. |
+| D23 | The baseline score is ordinal (threat level first, confidence second) and explicitly uncalibrated; `unknown` is an abstention reported as coverage, never as clean; TPR at a fixed FPR is flagged as not resolvable with fewer than 1/FPR negatives. | Honest numbers until phase 2 calibrates the fusion on `labels`. |
+| D24 | Operational metrics (TTD/TTR/TTT, queues, outcomes) are computed from the shared database and exposed through `GET /api/v1/metrics/operational` and a Prometheus collector on `/metrics` (60 s cache). | Every process writes to the database; one measurement point instead of per-process exporters. |
 
 ## Risks
 
@@ -145,11 +151,45 @@ covered by a test. Numbers in this file are measured, never estimated.
   - STIX bundles: omit `confidence` when the caller gives none instead of defaulting to 50.
 
 ## Phase 1 — Measure before improving
-- [ ] `labels` table + API + UI actions (confirm / dismiss / report).
-- [ ] Versioned evaluation dataset (`eval/`, manifest + hashes, no personal data): live-verified positives; hard negatives (official brand domains and logins, Tranco top, benign SaaS-hosted sites, homonyms such as `phase.com`, `zoom.us`, `banco.info`); temporal split; dedupe by eTLD+1 and kit.
-- [ ] `python -m anisakys.eval run`: precision, recall, PR-AUC, TPR at FPR 1e-3/1e-4, precision@k, per-brand confusion, reliability diagram, cost/latency per stage; JSON + HTML.
-- [ ] Operational metrics from every process: TTD, TTR, TTT (first/last outage, re-emergence), feed lag, queue depth, bounces/responses, screenshot/RDAP success.
-- [ ] Baseline published here; per-brand targets agreed.
+- [x] `labels` table + API + UI actions (confirm / dismiss / report): migration `006`, `src/labels.py`, `POST/GET /api/v1/sites/<id>/labels`, `GET /api/v1/labels`, `label` filter on `/api/v1/sites`, console drawer actions (D21).
+- [x] Approval queue for `/report` submissions without `report_send`: `GET /api/v1/reports/approvals`; approve = `report`, reject = `dismiss`; console tab "Waiting for approval".
+- [x] Versioned evaluation dataset (`python -m src.eval build|verify`, `eval/`): manifest + SHA-256, sanitised URLs, live-verified positives, hard negatives (official brand pages from `KNOWN_BRANDS` + `eval/seeds/`, homonyms such as `phase.com`, `zoom.us`, `banco.info`, benign SaaS-hosted pages, Tranco top), dedupe by eTLD+1 with a per-kit cap, deterministic temporal split (D22).
+- [x] `python -m src.eval run` (`live`, `heuristic`, `stored` predictors): precision/recall/F1 per operating point, PR-AUC, TPR at FPR 1e-3/1e-4 (flagged when not resolvable), precision@k, per-brand and per-category confusion, reliability diagram + ECE, coverage, latency and cost per stage (`eval/costs.json`); JSON + self-contained HTML (D23).
+- [x] Operational metrics from the shared database: `GET /api/v1/metrics/operational`, Prometheus gauges on `/metrics`, `python -m src.eval ops` — TTD, TTR, TTT (first/last outage, re-emergence), lead over public feeds, queue depth, deliveries, responses, screenshot and abuse-contact success (D24).
+- [x] Baseline published here.
+- [ ] Per-brand targets agreed with the owner (proposal below).
+
+### Phase 1 baseline (measured 2026-10-04)
+
+Dataset `baseline/2026-10-04` (samples SHA-256 `3e807846f1ec…`, manifest in `eval/datasets/`): 466 samples — 91 phishing (OpenPhish community feed, live when the dataset was built) and 375 benign (287 Tranco top-500 list `Y83KG`, 62 official brand pages, 20 homonyms, 6 benign SaaS pages). 929 candidates were probed: 553 up, 113 WAF challenge, 134 NXDOMAIN, 92 HTTP error, 33 connection error, 4 SSRF-blocked. Split: train 328 (64 phishing), test 138 (27 phishing). The deployment had no analyst labels yet.
+
+Threat-intel providers configured: none (VirusTotal, Google Safe Browsing, PhishTank app key and URLVoid unset). PhishTank still answered 50 of 138 keyless lookups (4 listed, 88 errors).
+
+| Test split, live run (27 phishing / 111 benign) | Deployed detector | Heuristics only (same signals, no abstention rule) |
+|---|---|---|
+| Coverage (verdict other than `unknown`) | 34.8 % (48/138) | 94.9 % (131/138) |
+| Precision / recall at level ≥ high | 0.667 / 0.148 (4 TP, 2 FP) | 0.750 / 0.222 (6 TP, 2 FP) |
+| FPR at level ≥ high | 1.8 % (2/111) | 1.8 % (2/111) |
+| Precision / recall at level ≥ medium | 0.636 / 0.259 | 0.545 / 0.444 |
+| FPR at level ≥ medium | 3.6 % (4/111) | 9.0 % (10/111) |
+| PR-AUC | 0.359 | 0.438 |
+| Precision@10 | 0.6 | 0.7 |
+| ECE | 0.165 | 0.114 |
+| TPR at FPR 1e-3 / 1e-4 | not resolvable (111 negatives; 1 000 / 10 000 needed) | not resolvable |
+
+With every threat-intel provider disabled (`--predictor heuristic`) the deployed detector abstains on 136 of 138 URLs (its only two verdicts are the two false positives below); the heuristic score keeps PR-AUC 0.379 (≥ high: 0.667 / 0.148; ≥ medium: 0.55 / 0.407 at 8.1 % FPR).
+
+Latency per URL (live run): total p50 1.9 s / p95 7.2 s; WHOIS p50 0.33 s / p95 1.8 s; page fetch + kit fingerprint p50 1.1 s / p95 5.2 s. Cost: 0 USD (free tiers only).
+
+Findings for phase 2:
+- Without provider keys the deployed detector abstains on 65 % of URLs and flags 4 of 27 live phishing sites at `high`; the heuristics rank better (PR-AUC 0.44) but are never allowed to decide on their own.
+- Both false positives are Google-owned domains (`googleblog.com`, `googledomains.com`) rated `critical` by the kit fingerprint: its brand-domain check treats official sister domains as attacker infrastructure (fix: official-domain allowlist first).
+- The lexical combo-squatting check matches brand tokens inside unrelated words (`meridian-shop.example` → `dian`, pattern `meri[BRAND]-shop`) (fix: token-boundary brand matching).
+- Only 91 of the 300 OpenPhish URLs survived liveness verification and de-duplication: feed positives must be verified live when a dataset is built.
+
+Operational baseline (demo database, `python -m src.eval ops`): in the last 30 days 1 site was first seen and no report, delivery or outage happened, so TTD/TTR/TTT have n = 0 and every queue is empty. Over 365 days (18 sites) TTD has a median of 18 h (n = 16), but p90 is 135 443 h because old or compromised domains count from their registration date (TTD needs a second definition for those in phase 3); no abuse report has been sent from this database, so TTR, TTT, response and enrichment rates stay unmeasured until the pipeline runs on real traffic.
+
+Proposed targets (owner to confirm, per protected brand): precision ≥ 0.95 and FPR ≤ 0.1 % at the auto-report operating point; recall ≥ 0.80 for live phishing of protected brands; median TTD ≤ 24 h, TTR ≤ 1 h, TTT ≤ 48 h.
 
 ## Phase 2 — Detection core v2
 - [ ] Brand catalogue in the database (aliases, official eTLD+1, apps, reference logos/favicons with pHash + mmh3, reference logins, Spanish/English lure vocabulary, priority, takedown preferences), managed from the UI.
@@ -199,3 +239,4 @@ covered by a test. Numbers in this file are measured, never estimated.
 ## Changelog of this file
 - 2026-10-03 — Created with the audit baseline; phase 0 foundation done.
 - 2026-10-04 — Phase 0 completed: workstreams A, A2, B, C, D (backend) and F (frontend) merged; results table and decisions D11–D19 added.
+- 2026-10-04 — Phase 1 completed: labels, approval queue, evaluation harness and operational metrics; measured baseline and decisions D20–D24 added; file renamed from `ROADMAP-v2.md`.

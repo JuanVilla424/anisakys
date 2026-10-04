@@ -225,3 +225,37 @@ class TestComprehensiveScan:
         ):
             result = validator.comprehensive_scan("https://phish.example/login")
         assert not any("GOOGLE SAFE BROWSING" in r for r in result["recommendations"])
+
+
+class TestStageInstrumentation:
+    """Per-stage latency and answers, read by the evaluation harness (src/eval)."""
+
+    def test_every_stage_is_timed_and_its_answer_recorded(self, validator):
+        with (
+            patch.object(validator.virustotal, "scan_url", return_value=VT_CLEAN),
+            patch.object(validator.urlvoid, "analyze_domain", return_value=UV_DISABLED),
+            patch.object(validator.phishtank, "check_phishing_status", return_value=PT_ERROR),
+            patch.object(validator.google_safe_browsing, "check_url", return_value=GSB_PHISHING),
+        ):
+            result = validator.comprehensive_scan("https://phish.example/login")
+
+        assert set(result["stage_timings_ms"]) == {
+            "url_analysis",
+            "virustotal_url",
+            "virustotal_domain",
+            "urlvoid",
+            "phishtank",
+            "whois",
+            "google_safe_browsing",
+            "kit_fingerprint",
+        }
+        assert all(ms >= 0 for ms in result["stage_timings_ms"].values())
+        assert result["stage_status"] == {
+            "virustotal_url": "not_listed",
+            "virustotal_domain": "error",
+            "urlvoid": "no_data",
+            "phishtank": "error",
+            "google_safe_browsing": "listed",
+            "whois": "not_listed",
+            "kit_fingerprint": "no_data",
+        }

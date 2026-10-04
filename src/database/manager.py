@@ -432,6 +432,7 @@ class DatabaseManager:
                             OR (source = 'external_api' AND auto_analysis_status IS NULL)  -- API sites not analyzed
                         )
                         AND site_status != 'down'  -- Only analyze sites that are potentially up
+                        AND COALESCE(label_verdict, '') <> 'benign'  -- Analyst said benign
                         ORDER BY
                             CASE
                                 WHEN manual_flag = 1 THEN 0      -- Manual sites first

@@ -179,14 +179,17 @@ def apply_reporting_schema(engine) -> None:
     """Create the tables the reporting pipeline needs, exactly as Alembic would.
 
     Runs the baseline revision (001) through a minimal ``op`` stand-in and then
-    the reporting revision's SQL constants (004). Every statement is idempotent,
-    so this is safe on a test database that already has some of the tables.
+    the SQL constants of the reporting revision (004) and of the analyst labels
+    revision (006), whose ``label_verdict`` the claim queries read. Every
+    statement is idempotent, so this is safe on a test database that already
+    has some of the tables.
 
     Args:
         engine: SQLAlchemy engine bound to the test database.
     """
     baseline = _load_migration("001_baseline_schema.py")
     reporting = _load_migration("004_reporting_outbox.py")
+    labels = _load_migration("006_analyst_labels.py")
     with engine.begin() as conn:
 
         class _Op:
@@ -196,13 +199,13 @@ def apply_reporting_schema(engine) -> None:
 
         setattr(baseline, "op", _Op())
         baseline.upgrade()
-        for statement in reporting.UPGRADE_STATEMENTS:
+        for statement in (*reporting.UPGRADE_STATEMENTS, *labels.UPGRADE_STATEMENTS):
             conn.execute(text(statement))
 
 
 @pytest.fixture(scope="session", autouse=True)
 def reporting_schema(create_test_database):
-    """Apply migrations 001 + 004 to the test database once per session."""
+    """Apply migrations 001 + 004 + 006 to the test database once per session."""
     engine = create_engine(create_test_database)
     try:
         apply_reporting_schema(engine)
@@ -216,18 +219,20 @@ def _restore_reporting_schema(reporting_schema, db_engine):
     """Re-apply the reporting schema after tests that drop ``phishing_sites``.
 
     Some legacy tests drop and recreate ``phishing_sites`` through the runtime
-    DDL, which knows nothing about revision 004's claim columns. One cheap
-    catalogue query per test detects that and restores the columns.
+    DDL, which knows nothing about the claim columns of revision 004 or the
+    label columns of revision 006. One cheap catalogue query per test detects
+    that and restores the columns.
     """
     yield
     with db_engine.connect() as conn:
         present = conn.execute(
             text(
-                "SELECT 1 FROM information_schema.columns WHERE table_name = 'phishing_sites' "
-                "AND column_name = 'report_lease_until'"
+                "SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE table_name = 'phishing_sites' "
+                "AND column_name IN ('report_lease_until', 'label_verdict')"
             )
-        ).first()
-    if present is None:
+        ).scalar()
+    if present != 2:
         apply_reporting_schema(db_engine)
 
 

@@ -66,12 +66,27 @@ from src.intelligence import (
     GRINDER0X_API_URL,
     GRINDER_INTEGRATION_ENABLED,
 )
+from src.labels import (
+    MAX_NOTE_LENGTH,
+    MAX_TAG_LENGTH,
+    Label,
+    LabelAction,
+    LabelRepository,
+    LabelVerdict,
+    SiteNotFoundError,
+)
 from src.logger import logger
 from src.observability.health import (
     STATUS_HEALTHY,
     STATUS_UNHEALTHY,
     check_database,
     create_health_checker,
+)
+from src.observability.operational import (
+    DEFAULT_WINDOW_DAYS,
+    MAX_WINDOW_DAYS,
+    compute_operational_metrics,
+    register_operational_collector,
 )
 from src.reporting.db import short_transaction
 from src.reporting.outbox import ManualTaskOutcome, OutboxRepository, OutboxRow, OutboxStatus
@@ -210,6 +225,10 @@ def parse_recipients(raw: Optional[str]) -> List[str]:
 # Accepted values of enum-like query parameters.
 SITE_STATUSES = frozenset({"up", "down"})
 PRIORITIES = frozenset({"critical", "high", "medium", "low"})
+LABEL_ACTIONS = frozenset(action.value for action in LabelAction)
+LABEL_VERDICTS = frozenset(verdict.value for verdict in LabelVerdict)
+# GET /api/v1/sites ``label`` filter: a verdict, or sites nobody labelled yet.
+SITE_LABEL_FILTERS = LABEL_VERDICTS | {"unlabeled"}
 # Statuses an analyst may set with PATCH /api/v1/reports/<id>.
 REPORT_UPDATE_STATUSES = frozenset(
     {"sent", "acknowledged", "in_progress", "resolved", "rejected", "timeout", "bounced", "pending"}
@@ -771,6 +790,84 @@ def manual_task_json(row: OutboxRow) -> Dict[str, Any]:
     }
 
 
+def label_json(label: Label) -> Dict[str, Any]:
+    """Serialise an analyst label.
+
+    Args:
+        label: Stored label.
+
+    Returns:
+        ``{"id", "site_id", "url", "registrable_domain", "verdict", "action",
+        "brand", "kit", "note", "labeled_by", "detector_snapshot",
+        "created_at"}``; ``detector_snapshot`` is what the detector had
+        concluded when the label was written.
+    """
+    return {
+        "id": label.id,
+        "site_id": label.site_id,
+        "url": label.url,
+        "registrable_domain": label.registrable_domain,
+        "verdict": label.verdict,
+        "action": label.action,
+        "brand": label.brand,
+        "kit": label.kit,
+        "note": label.note,
+        "labeled_by": label.labeled_by,
+        "detector_snapshot": label.detector_snapshot,
+        "created_at": iso_utc(label.created_at),
+    }
+
+
+def labeled_site_json(site: Dict[str, Any]) -> Dict[str, Any]:
+    """Serialise the state of a site right after it was labelled.
+
+    Args:
+        site: Row with the columns ``LabelRepository`` returns.
+
+    Returns:
+        ``{"id", "url", "label_verdict", "labeled_at", "manual_flag",
+        "requires_manual_review", "auto_report_eligible", "site_status",
+        "abuse_report_sent"}``.
+    """
+    return {
+        "id": site["id"],
+        "url": site["url"],
+        "label_verdict": site["label_verdict"],
+        "labeled_at": iso_utc(site["labeled_at"]),
+        "manual_flag": bool(site["manual_flag"]),
+        "requires_manual_review": bool(site["requires_manual_review"]),
+        "auto_report_eligible": bool(site["auto_report_eligible"]),
+        "site_status": site["site_status"] or "unknown",
+        "abuse_report_sent": bool(site["abuse_report_sent"]),
+    }
+
+
+def approval_json(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Serialise a submission waiting for analyst approval.
+
+    Args:
+        row: Row from ``LabelRepository.pending_approvals``.
+
+    Returns:
+        ``{"site_id", "url", "source", "priority", "description",
+        "abuse_email", "site_status", "first_seen", "last_seen",
+        "requested_at", "requested_by"}``.
+    """
+    return {
+        "site_id": row["id"],
+        "url": row["url"],
+        "source": row["source"],
+        "priority": row["priority"],
+        "description": row["description"],
+        "abuse_email": row["abuse_email"],
+        "site_status": row["site_status"] or "unknown",
+        "first_seen": iso_utc(row["first_seen"]),
+        "last_seen": iso_utc(row["last_seen"]),
+        "requested_at": iso_utc(row["approval_requested_at"]),
+        "requested_by": row["approval_requested_by"],
+    }
+
+
 def campaign_id(kind: str, key: str) -> str:
     """Return a stable campaign identifier for a grouping key.
 
@@ -979,6 +1076,10 @@ class PhishingAPI:
         self._health_cache: Optional[Tuple[float, Dict[str, Any]]] = None
         self.app.register_error_handler(InvalidParameterError, _invalid_parameter_response)
         self.setup_routes()
+        # Pipeline timings and queue depth on /metrics, computed from the database.
+        engine = getattr(self.db_manager, "engine", None)
+        if engine is not None:
+            register_operational_collector(engine)
 
         # Test Grinder connection on startup
         if GRINDER_INTEGRATION_ENABLED:
@@ -1065,9 +1166,15 @@ class PhishingAPI:
                     return jsonify({"error": "Invalid abuse email format"}), 400
 
                 if not has_scope("report_send"):
+                    session = current_key_session() or {}
                     try:
                         pending = self.record_pending_submission(
-                            url, abuse_email, source, priority, description
+                            url,
+                            abuse_email,
+                            source,
+                            priority,
+                            description,
+                            requested_by=session.get("key_name") or session.get("key_type"),
                         )
                     except SQLAlchemyError as e:
                         return internal_error(
@@ -1848,6 +1955,9 @@ class PhishingAPI:
             ``gsb_safe`` until Google Safe Browsing has checked the site
             (``gsb_last_check`` is NULL). ``first_seen``, ``last_seen`` and
             ``takedown_date`` are ISO-8601 with an explicit UTC offset.
+            ``label_verdict`` is the latest analyst label (``phishing`` /
+            ``benign``) or null; ``label`` filters on it (``unlabeled`` = no
+            label yet).
 
             Returns:
                 JSON ``{"items": [...], "total": int, "limit": int, "offset": int}``.
@@ -1857,6 +1967,7 @@ class PhishingAPI:
             status_filter = enum_arg(request.args, "status", SITE_STATUSES)
             priority_filter = enum_arg(request.args, "priority", PRIORITIES)
             source_filter = str_arg(request.args, "source", max_length=64)
+            label_filter = enum_arg(request.args, "label", SITE_LABEL_FILTERS)
             search = str_arg(request.args, "search") or ""
             try:
 
@@ -1872,6 +1983,11 @@ class PhishingAPI:
                 if source_filter:
                     where_clauses.append("source = :source")
                     params["source"] = source_filter
+                if label_filter == "unlabeled":
+                    where_clauses.append("label_verdict IS NULL")
+                elif label_filter:
+                    where_clauses.append("label_verdict = :label")
+                    params["label"] = label_filter
                 if search:
                     where_clauses.append("url ILIKE :search")
                     params["search"] = f"%{search}%"
@@ -1890,7 +2006,7 @@ class PhishingAPI:
                                    api_confidence_score, registrar_name, domain_age_days,
                                    abuse_report_sent, manual_flag, gsb_safe,
                                    resolved_ip, is_cloudflare, description, assigned_to,
-                                   takedown_date, gsb_last_check
+                                   takedown_date, gsb_last_check, label_verdict, labeled_at
                             FROM phishing_sites {where_sql}
                             ORDER BY last_seen DESC NULLS LAST, id DESC
                             LIMIT :limit OFFSET :offset
@@ -1919,6 +2035,8 @@ class PhishingAPI:
                         "is_cloudflare": None if r[15] is None else bool(r[15]),
                         "description": r[16],
                         "assigned_to": r[17],
+                        "label_verdict": r[20],
+                        "labeled_at": iso_utc(r[21]),
                     }
                     for r in rows
                 ]
@@ -1957,6 +2075,156 @@ class PhishingAPI:
                 return jsonify([{"source": r[0], "count": int(r[1])} for r in rows]), 200
             except Exception as e:
                 return internal_error("get_site_sources", e)
+
+        # ── POST /api/v1/sites/<id>/labels ─────────────────────────────────────
+        @self.app.route("/api/v1/sites/<int:site_id>/labels", methods=["POST"])
+        @self.limiter.limit("60 per minute")
+        @require_api_key(scope=("write", "report_send"))
+        def label_site(site_id: int):
+            """Record an analyst decision about a site (the evaluation ground truth).
+
+            Body: ``{"action": "confirm" | "dismiss" | "report", "brand"?: str,
+            "kit"?: str, "note"?: str}`` (``brand``/``kit`` at most 100
+            characters, ``note`` at most 1000).
+
+            * ``confirm`` (scope ``write``): phishing; nothing is sent.
+            * ``dismiss`` (scope ``write``): benign; the site leaves the reporting
+              loop, its queued e-mails are cancelled and its analyst tasks closed.
+            * ``report`` (scope ``report_send``): phishing; the site is flagged for
+              the reporting pipeline, which also approves a submission waiting
+              in ``GET /api/v1/reports/approvals``.
+
+            Args:
+                site_id: ``id`` of the site (``GET /api/v1/sites``).
+
+            Returns:
+                201 ``{"label": {...}, "site": {...}, "released_from_approval":
+                bool, "cancelled_deliveries": int, "closed_tasks": int}``; 400 on
+                an invalid body; 403 when the key lacks the action's scope; 404
+                when no site has that id.
+            """
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                return jsonify({"error": "Request body must be a JSON object"}), 400
+            raw_action = data.get("action")
+            if raw_action not in LABEL_ACTIONS:
+                return (
+                    jsonify(
+                        {
+                            "error": "action must be one of: " + ", ".join(sorted(LABEL_ACTIONS)),
+                            "parameter": "action",
+                        }
+                    ),
+                    400,
+                )
+            for field, max_length in (
+                ("brand", MAX_TAG_LENGTH),
+                ("kit", MAX_TAG_LENGTH),
+                ("note", MAX_NOTE_LENGTH),
+            ):
+                value = data.get(field)
+                if value is not None and (not isinstance(value, str) or len(value) > max_length):
+                    return (
+                        jsonify(
+                            {
+                                "error": f"{field} must be a string of at most "
+                                f"{max_length} characters",
+                                "parameter": field,
+                            }
+                        ),
+                        400,
+                    )
+            action = LabelAction(raw_action)
+            required = "report_send" if action == LabelAction.REPORT else "write"
+            if not has_scope(required):
+                return jsonify({"error": f"Insufficient scope. Required: {required}"}), 403
+            session = current_key_session() or {}
+            try:
+                outcome = LabelRepository(self.db_manager.engine).record(
+                    site_id,
+                    action,
+                    brand=data.get("brand"),
+                    kit=data.get("kit"),
+                    note=data.get("note"),
+                    labeled_by=session.get("key_name") or session.get("key_type"),
+                )
+            except SiteNotFoundError:
+                return jsonify({"error": "Site not found"}), 404
+            except Exception as e:
+                return internal_error("label_site", e, extra={"site_id": site_id})
+            logger.info(
+                f"🏷️ Site {site_id} labelled {outcome.label.verdict} ({action.value}); "
+                f"cancelled {outcome.cancelled_deliveries} e-mail(s), "
+                f"closed {outcome.closed_tasks} task(s)"
+            )
+            return (
+                jsonify(
+                    {
+                        "label": label_json(outcome.label),
+                        "site": labeled_site_json(outcome.site),
+                        "released_from_approval": outcome.released_from_approval,
+                        "cancelled_deliveries": outcome.cancelled_deliveries,
+                        "closed_tasks": outcome.closed_tasks,
+                    }
+                ),
+                201,
+            )
+
+        # ── GET /api/v1/sites/<id>/labels ──────────────────────────────────────
+        @self.app.route("/api/v1/sites/<int:site_id>/labels", methods=["GET"])
+        @self.limiter.limit("60 per minute")
+        @require_api_key(scope="read")
+        def get_site_labels(site_id: int):
+            """List every label of a site, newest first.
+
+            Args:
+                site_id: ``id`` of the site.
+
+            Returns:
+                JSON ``{"items": [...], "total": int}`` (empty for an unknown id).
+            """
+            try:
+                labels = LabelRepository(self.db_manager.engine).history(site_id)
+                return (
+                    jsonify(
+                        {"items": [label_json(label) for label in labels], "total": len(labels)}
+                    ),
+                    200,
+                )
+            except Exception as e:
+                return internal_error("get_site_labels", e, extra={"site_id": site_id})
+
+        # ── GET /api/v1/labels ─────────────────────────────────────────────────
+        @self.app.route("/api/v1/labels", methods=["GET"])
+        @self.limiter.limit("30 per minute")
+        @require_api_key(scope="read")
+        def get_labels():
+            """List analyst labels, newest first, optionally by verdict or action.
+
+            Returns:
+                JSON ``{"items": [...], "total": int, "limit": int, "offset": int}``.
+            """
+            limit = int_arg(request.args, "limit", default=50, minimum=1, maximum=200)
+            offset = _offset_arg()
+            verdict = enum_arg(request.args, "verdict", LABEL_VERDICTS)
+            action = enum_arg(request.args, "action", LABEL_ACTIONS)
+            try:
+                labels, total = LabelRepository(self.db_manager.engine).list_labels(
+                    verdict=verdict, action=action, limit=limit, offset=offset
+                )
+                return (
+                    jsonify(
+                        {
+                            "items": [label_json(label) for label in labels],
+                            "total": total,
+                            "limit": limit,
+                            "offset": offset,
+                        }
+                    ),
+                    200,
+                )
+            except Exception as e:
+                return internal_error("get_labels", e)
 
         # ── GET /api/v1/reports ────────────────────────────────────────────────
         @self.app.route("/api/v1/reports", methods=["GET"])
@@ -2185,6 +2453,42 @@ class PhishingAPI:
                 return jsonify({"task": manual_task_json(row), "report_status": report_status}), 200
             except Exception as e:
                 return internal_error("complete_report_task", e)
+
+        # ── GET /api/v1/reports/approvals ──────────────────────────────────────
+        @self.app.route("/api/v1/reports/approvals", methods=["GET"])
+        @self.limiter.limit("30 per minute")
+        @require_api_key(scope="read")
+        def get_report_approvals():
+            """List submissions waiting for an analyst decision, oldest request first.
+
+            A site is listed while a ``POST /api/v1/report`` from a key without
+            ``report_send`` requested it, nobody flagged it for reporting and no
+            label decided it. Approve with ``POST /api/v1/sites/<id>/labels``
+            ``{"action": "report"}`` (``report_send``); reject with
+            ``{"action": "dismiss"}`` (``write``).
+
+            Returns:
+                JSON ``{"items": [...], "total": int, "limit": int, "offset": int}``.
+            """
+            limit = int_arg(request.args, "limit", default=50, minimum=1, maximum=200)
+            offset = _offset_arg()
+            try:
+                rows, total = LabelRepository(self.db_manager.engine).pending_approvals(
+                    limit=limit, offset=offset
+                )
+                return (
+                    jsonify(
+                        {
+                            "items": [approval_json(row) for row in rows],
+                            "total": total,
+                            "limit": limit,
+                            "offset": offset,
+                        }
+                    ),
+                    200,
+                )
+            except Exception as e:
+                return internal_error("get_report_approvals", e)
 
         # ── GET /api/v1/reports/stats ──────────────────────────────────────────
         @self.app.route("/api/v1/reports/stats", methods=["GET"])
@@ -3900,6 +4204,35 @@ class PhishingAPI:
             except Exception as e:
                 return internal_error("get_blocklist", e)
 
+        # ── GET /api/v1/metrics/operational ────────────────────────────────────
+        @self.app.route("/api/v1/metrics/operational", methods=["GET"])
+        @self.limiter.limit("30 per minute")
+        @require_api_key(scope=("metrics", "read"))
+        def get_operational_metrics():
+            """Pipeline timings, queue depth and outcomes measured from the database.
+
+            ``days`` (1-365, default 30) bounds the sites considered by their
+            ``first_seen``. Durations are hours (count/median/p90/mean; null
+            statistics when nothing was measured): time to detect (since domain
+            registration), time to report (first delivered e-mail), time to the
+            first and the last confirmed outage after that report, and the lead
+            over public feeds. See ``src/observability/operational.py``.
+
+            Returns:
+                The metrics document.
+            """
+            days = int_arg(
+                request.args,
+                "days",
+                default=DEFAULT_WINDOW_DAYS,
+                minimum=1,
+                maximum=MAX_WINDOW_DAYS,
+            )
+            try:
+                return jsonify(compute_operational_metrics(self.db_manager.engine, days)), 200
+            except Exception as e:
+                return internal_error("get_operational_metrics", e)
+
         @self.app.route("/api/v1/health", methods=["GET"])
         @self.limiter.exempt
         def health_check():
@@ -4057,7 +4390,13 @@ class PhishingAPI:
             logger.error(f"❌ _trigger_email_scan thread {thread_id}: {e}")
 
     def record_pending_submission(
-        self, url: str, abuse_email: Optional[str], source: str, priority: str, description: str
+        self,
+        url: str,
+        abuse_email: Optional[str],
+        source: str,
+        priority: str,
+        description: str,
+        requested_by: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Store a submission from a key without ``report_send`` for analyst review.
 
@@ -4068,7 +4407,9 @@ class PhishingAPI:
         an ``external_api`` site auto-report-eligible) never selects it. An
         existing row only gets ``last_seen`` refreshed (and is flagged for
         review unless already approved or reported); analyst-curated fields
-        are not overwritten.
+        are not overwritten. ``approval_requested_at``/``_by`` (first request
+        wins) put the site in ``GET /api/v1/reports/approvals`` until a label
+        decides it.
 
         Args:
             url: Submitted URL (already validated and SSRF-checked).
@@ -4076,6 +4417,7 @@ class PhishingAPI:
             source: Submitter-provided source label.
             priority: Submitter-provided priority.
             description: Free-text description.
+            requested_by: Name (or type) of the submitting API key.
 
         Returns:
             The response body for the 202 answer.
@@ -4095,10 +4437,11 @@ class PhishingAPI:
                         INSERT INTO phishing_sites
                         (url, manual_flag, first_seen, last_seen, abuse_email,
                          reported, abuse_report_sent, source, priority, description,
-                         auto_report_eligible, requires_manual_review, auto_analysis_status)
+                         auto_report_eligible, requires_manual_review, auto_analysis_status,
+                         approval_requested_at, approval_requested_by)
                         VALUES (:url, 0, :timestamp, :timestamp, :abuse_email,
                                 0, 0, :source, :priority, :description,
-                                0, 1, 'awaiting_approval')
+                                0, 1, 'awaiting_approval', now(), :requested_by)
                     """),
                     {
                         "url": url,
@@ -4107,6 +4450,7 @@ class PhishingAPI:
                         "source": source,
                         "priority": priority,
                         "description": description,
+                        "requested_by": requested_by,
                     },
                 )
             else:
@@ -4118,10 +4462,20 @@ class PhishingAPI:
                                 WHEN manual_flag = 1 OR abuse_report_sent = 1
                                     THEN requires_manual_review
                                 ELSE 1
+                            END,
+                            approval_requested_at = CASE
+                                WHEN manual_flag = 1 OR abuse_report_sent = 1
+                                    THEN approval_requested_at
+                                ELSE COALESCE(approval_requested_at, now())
+                            END,
+                            approval_requested_by = CASE
+                                WHEN manual_flag = 1 OR abuse_report_sent = 1
+                                    THEN approval_requested_by
+                                ELSE COALESCE(approval_requested_by, :requested_by)
                             END
                         WHERE url = :url
                     """),
-                    {"timestamp": timestamp, "url": url},
+                    {"timestamp": timestamp, "url": url, "requested_by": requested_by},
                 )
         logger.info(f"📝 Submission for {url} recorded; awaiting analyst approval")
         return {

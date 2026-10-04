@@ -156,3 +156,10 @@ test_main_logging.py
 docs/
 CONTEXT.md
 .test-screenshots/
+
+# Evaluation harness (python -m src.eval): runs, caches and dataset samples built
+# from third-party feeds stay local; seeds and dataset manifests (with the
+# samples' SHA-256) are versioned.
+eval/runs/
+eval/cache/
+eval/datasets/*/*/samples.jsonl
