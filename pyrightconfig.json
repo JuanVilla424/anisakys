@@ -6,7 +6,7 @@
   "pythonVersion": "3.12",
   "include": [
     "alembic",
-    "src/api/__init__.py",
+    "src/api",
     "src/auth.py",
     "src/circuit_breaker.py",
     "src/cli",

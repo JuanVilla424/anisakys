@@ -2227,12 +2227,12 @@ class PhishingAPI:
                         {
                             "total_reports": total,
                             "status_breakdown": status_breakdown,
-                            "response_rate": round(responded / total, 3) if total > 0 else 0.0,
+                            "response_rate": round(responded / total, 3) if total > 0 else None,
                             "overdue_reports": overdue,
                             "avg_response_time_hours": (
                                 round(float(avg_row), 1) if avg_row else None
                             ),
-                            "generated_at": datetime.datetime.now().isoformat(),
+                            "generated_at": iso_utc(datetime.datetime.now(datetime.timezone.utc)),
                         }
                     ),
                     200,
