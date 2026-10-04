@@ -309,6 +309,46 @@ class ReportTracker:
         )
         return bool(result.rowcount)
 
+    def settle_manual_report(self, conn: Connection, report_id: str) -> Optional[str]:
+        """Close a ``pending_manual`` report once an analyst closed all its tasks.
+
+        A report is ``pending_manual`` when it had no deliverable e-mail, only
+        analyst tasks. When none of its outbox rows is still
+        ``pending_manual`` it becomes ``sent`` if a task was submitted, else
+        ``failed``. Its ``sla_deadline`` stays unset: there is no e-mail
+        recipient a follow-up could go to. Reports in any other status are
+        left alone.
+
+        Args:
+            conn: Connection inside an open transaction.
+            report_id: Tracked report id.
+
+        Returns:
+            The new status, or None when the report did not change.
+        """
+        status = conn.execute(
+            text("""
+                UPDATE abuse_reports AS ar
+                SET status = CASE
+                        WHEN EXISTS (
+                            SELECT 1 FROM abuse_report_outbox AS o
+                            WHERE o.report_id = ar.report_id AND o.channel <> 'email'
+                              AND o.status = 'sent'
+                        ) THEN 'sent'
+                        ELSE 'failed'
+                    END,
+                    updated_at = now()
+                WHERE ar.report_id = :report_id AND ar.status = 'pending_manual'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM abuse_report_outbox AS o
+                      WHERE o.report_id = :report_id AND o.status = 'pending_manual'
+                  )
+                RETURNING ar.status
+                """),
+            {"report_id": report_id},
+        ).scalar()
+        return str(status) if status is not None else None
+
     def claim_followup(
         self,
         conn: Connection,

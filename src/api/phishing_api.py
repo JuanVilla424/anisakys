@@ -73,6 +73,9 @@ from src.observability.health import (
     check_database,
     create_health_checker,
 )
+from src.reporting.db import short_transaction
+from src.reporting.outbox import ManualTaskOutcome, OutboxRepository, OutboxRow
+from src.reporting.report_tracker import ReportTracker
 from src.shutdown import register_thread
 from src.utils.timeouts import OperationTimeoutError, timeout
 from src.dns.network_utils import assess_url_target, is_cloudflare_ip
@@ -723,6 +726,45 @@ def integration_health(
         }
     )
     return entry
+
+
+# Longest analyst note accepted by POST /api/v1/reports/tasks/<id>/complete.
+REPORT_TASK_NOTE_MAX_LENGTH = 1000
+
+
+def manual_task_json(row: OutboxRow) -> Dict[str, Any]:
+    """Serialise an analyst task (an outbox row of a manual channel).
+
+    Args:
+        row: Outbox row with channel ``web_form`` or ``manual_review``.
+
+    Returns:
+        ``{"id", "report_id", "site_url", "channel", "provider", "form_url",
+        "reason", "subject", "text", "status", "created_at", "outcome",
+        "note", "completed_by", "completed_at"}``; ``provider`` is null for
+        ``manual_review`` (there is no contact), the last four are null while
+        the task is open.
+    """
+    payload = row.payload or {}
+    recorded = payload.get("analyst")
+    analyst: Dict[str, Any] = recorded if isinstance(recorded, dict) else {}
+    return {
+        "id": row.id,
+        "report_id": row.report_id,
+        "site_url": row.site_url,
+        "channel": row.channel,
+        "provider": row.recipient if row.channel == "web_form" else None,
+        "form_url": row.form_url,
+        "reason": payload.get("reason"),
+        "subject": payload.get("subject"),
+        "text": payload.get("text"),
+        "status": row.status,
+        "created_at": iso_utc(row.created_at),
+        "outcome": analyst.get("outcome"),
+        "note": analyst.get("note"),
+        "completed_by": analyst.get("completed_by"),
+        "completed_at": iso_utc(analyst.get("completed_at")),
+    }
 
 
 def campaign_id(kind: str, key: str) -> str:
@@ -1989,6 +2031,123 @@ class PhishingAPI:
 
             except Exception as e:
                 return internal_error("update_report", e)
+
+        # ── GET /api/v1/reports/tasks ──────────────────────────────────────────
+        @self.app.route("/api/v1/reports/tasks", methods=["GET"])
+        @self.limiter.limit("30 per minute")
+        @require_api_key(scope="read")
+        def get_report_tasks():
+            """List open analyst tasks of the reporting outbox, oldest first.
+
+            A task is an outbox row an analyst must handle: a provider that only
+            takes reports through a web form (``channel: "web_form"``, with its
+            ``form_url``) or a site without any usable abuse contact
+            (``channel: "manual_review"``). ``subject``/``text`` is the report
+            to file.
+
+            Returns:
+                JSON ``{"items": [...], "total": int, "limit": int, "offset": int}``.
+            """
+            limit = int_arg(request.args, "limit", default=50, minimum=1, maximum=200)
+            offset = _offset_arg()
+            try:
+                outbox = OutboxRepository(self.db_manager.engine)
+                rows = outbox.pending_manual_tasks(limit=limit, offset=offset)
+                total = outbox.count_pending_manual_tasks()
+                return (
+                    jsonify(
+                        {
+                            "items": [manual_task_json(row) for row in rows],
+                            "total": total,
+                            "limit": limit,
+                            "offset": offset,
+                        }
+                    ),
+                    200,
+                )
+            except Exception as e:
+                return internal_error("get_report_tasks", e)
+
+        # ── POST /api/v1/reports/tasks/<id>/complete ──────────────────────────
+        @self.app.route("/api/v1/reports/tasks/<int:task_id>/complete", methods=["POST"])
+        @self.limiter.limit("30 per minute")
+        @require_api_key(scope="report")
+        def complete_report_task(task_id: int):
+            """Close an analyst task.
+
+            Body: ``{"outcome": "submitted" | "not_applicable", "note"?: str}``
+            (note at most 1000 characters). ``submitted`` marks the outbox row
+            ``sent``; ``not_applicable`` marks it ``failed``. When a report had
+            only analyst tasks and the last one is closed, the report leaves
+            ``pending_manual``: ``sent`` if any task was submitted, else
+            ``failed``.
+
+            Args:
+                task_id: Outbox row id (``id`` from GET /api/v1/reports/tasks).
+
+            Returns:
+                200 ``{"task": {...}, "report_status": str | null}``; 400 on an
+                invalid body; 404 when no task has that id; 409 when it is
+                already closed.
+            """
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                return jsonify({"error": "Request body must be a JSON object"}), 400
+            raw_outcome = data.get("outcome")
+            outcomes = sorted(o.value for o in ManualTaskOutcome)
+            if raw_outcome not in outcomes:
+                return (
+                    jsonify(
+                        {
+                            "error": "outcome must be one of: " + ", ".join(outcomes),
+                            "parameter": "outcome",
+                        }
+                    ),
+                    400,
+                )
+            note = data.get("note")
+            if note is not None and (
+                not isinstance(note, str) or len(note) > REPORT_TASK_NOTE_MAX_LENGTH
+            ):
+                return (
+                    jsonify(
+                        {
+                            "error": "note must be a string of at most "
+                            f"{REPORT_TASK_NOTE_MAX_LENGTH} characters",
+                            "parameter": "note",
+                        }
+                    ),
+                    400,
+                )
+            session = current_key_session() or {}
+            completed_by = session.get("key_name") or session.get("key_type")
+            try:
+                outbox = OutboxRepository(self.db_manager.engine)
+                tracker = ReportTracker(self.db_manager.engine)
+                with short_transaction(self.db_manager.engine) as conn:
+                    row, changed = outbox.complete_manual_task(
+                        conn,
+                        task_id,
+                        ManualTaskOutcome(raw_outcome),
+                        note=(note or "").strip() or None,
+                        completed_by=completed_by,
+                    )
+                    report_status = (
+                        tracker.settle_manual_report(conn, row.report_id)
+                        if row is not None and changed
+                        else None
+                    )
+                if row is None:
+                    return jsonify({"error": "Task not found"}), 404
+                if not changed:
+                    return (
+                        jsonify({"error": "Task is already closed", "status": row.status}),
+                        409,
+                    )
+                logger.info(f"🗂️ Analyst task {task_id} ({row.report_id}) closed as {raw_outcome}")
+                return jsonify({"task": manual_task_json(row), "report_status": report_status}), 200
+            except Exception as e:
+                return internal_error("complete_report_task", e)
 
         # ── GET /api/v1/reports/stats ──────────────────────────────────────────
         @self.app.route("/api/v1/reports/stats", methods=["GET"])

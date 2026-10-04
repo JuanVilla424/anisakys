@@ -46,8 +46,9 @@ import os
 import re
 import socket
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
@@ -86,6 +87,19 @@ class OutboxAudience(str, Enum):
 
     PRIMARY = "primary"
     CC = "cc"
+
+
+class ManualTaskOutcome(str, Enum):
+    """How an analyst closed a ``pending_manual`` task.
+
+    ``submitted`` (the analyst filed the report, e.g. through the provider's
+    web form) moves the row to ``sent``; ``not_applicable`` moves it to
+    ``failed`` (nothing was delivered). The outcome itself is kept in the
+    row's ``payload["analyst"]``.
+    """
+
+    SUBMITTED = "submitted"
+    NOT_APPLICABLE = "not_applicable"
 
 
 def default_worker_id() -> str:
@@ -168,6 +182,7 @@ class OutboxRow:
     payload: Dict[str, Any]
     last_error: Optional[str] = None
     message_id: Optional[str] = None
+    created_at: Optional[datetime] = None
 
     @property
     def envelope_recipients(self) -> List[str]:
@@ -208,6 +223,7 @@ class OutboxRow:
             payload=payload or {},
             last_error=row["last_error"],
             message_id=row["message_id"],
+            created_at=row.get("created_at"),
         )
 
 
@@ -470,25 +486,122 @@ class OutboxRepository:
             )
         return [OutboxRow.from_mapping(row) for row in rows]
 
-    def pending_manual_tasks(self, limit: int = 100) -> List[OutboxRow]:
+    def pending_manual_tasks(self, limit: int = 100, offset: int = 0) -> List[OutboxRow]:
         """List open analyst tasks (web forms, sites without contacts).
 
         Args:
             limit: Maximum number of rows.
+            offset: Rows to skip (pagination).
 
         Returns:
-            Oldest tasks first.
+            Oldest tasks first, with ``created_at`` set.
         """
         with short_transaction(self.engine) as conn:
             rows = (
                 conn.execute(
                     text(
-                        f"SELECT {_ROW_COLUMNS} FROM abuse_report_outbox "
-                        "WHERE status = 'pending_manual' ORDER BY created_at, id LIMIT :limit"
+                        f"SELECT {_ROW_COLUMNS}, created_at FROM abuse_report_outbox "
+                        "WHERE status = 'pending_manual' ORDER BY created_at, id "
+                        "LIMIT :limit OFFSET :offset"
                     ),
-                    {"limit": limit},
+                    {"limit": limit, "offset": offset},
                 )
                 .mappings()
                 .all()
             )
         return [OutboxRow.from_mapping(row) for row in rows]
+
+    def count_pending_manual_tasks(self) -> int:
+        """Count open analyst tasks.
+
+        Returns:
+            Number of ``pending_manual`` rows.
+        """
+        with short_transaction(self.engine) as conn:
+            count = conn.execute(
+                text("SELECT COUNT(*) FROM abuse_report_outbox WHERE status = 'pending_manual'")
+            ).scalar()
+        return int(count or 0)
+
+    def complete_manual_task(
+        self,
+        conn: Connection,
+        task_id: int,
+        outcome: ManualTaskOutcome,
+        note: Optional[str] = None,
+        completed_by: Optional[str] = None,
+    ) -> Tuple[Optional[OutboxRow], bool]:
+        """Close an analyst task inside the caller's transaction.
+
+        The row is locked first, so two analysts closing the same task cannot
+        both succeed. Only ``pending_manual`` rows (never e-mail rows) change.
+
+        Args:
+            conn: Connection inside an open transaction.
+            task_id: Outbox row id.
+            outcome: How the analyst closed it.
+            note: Optional analyst note (sanitised; kept in ``last_error`` and
+                the payload).
+            completed_by: Who closed it (e.g. the API key name), for the audit
+                trail in the payload.
+
+        Returns:
+            ``(row, changed)``: ``(None, False)`` when no row has that id; the
+            unchanged row and False when it is not an open analyst task; the
+            updated row and True otherwise.
+        """
+        current = (
+            conn.execute(
+                text(
+                    f"SELECT {_ROW_COLUMNS}, created_at FROM abuse_report_outbox "
+                    "WHERE id = :id FOR UPDATE"
+                ),
+                {"id": task_id},
+            )
+            .mappings()
+            .first()
+        )
+        if current is None:
+            return None, False
+        if current["status"] != OutboxStatus.PENDING_MANUAL.value:
+            return OutboxRow.from_mapping(current), False
+        clean_note = sanitize_error(note) if note else None
+        submitted = outcome == ManualTaskOutcome.SUBMITTED
+        if submitted:
+            last_error = clean_note
+        else:
+            last_error = "Closed by analyst: not applicable" + (
+                f" ({clean_note})" if clean_note else ""
+            )
+        analyst = {
+            "outcome": outcome.value,
+            "note": clean_note,
+            "completed_by": completed_by,
+        }
+        updated = (
+            conn.execute(
+                text(f"""
+                    UPDATE abuse_report_outbox
+                    SET status = :status,
+                        sent_at = CASE WHEN :submitted THEN now() ELSE sent_at END,
+                        last_error = :last_error,
+                        payload = payload || jsonb_build_object(
+                            'analyst',
+                            CAST(:analyst AS JSONB) || jsonb_build_object('completed_at', now())
+                        ),
+                        updated_at = now()
+                    WHERE id = :id AND status = 'pending_manual'
+                    RETURNING {_ROW_COLUMNS}, created_at
+                    """),
+                {
+                    "id": task_id,
+                    "status": (OutboxStatus.SENT.value if submitted else OutboxStatus.FAILED.value),
+                    "submitted": submitted,
+                    "last_error": last_error,
+                    "analyst": json.dumps(analyst),
+                },
+            )
+            .mappings()
+            .one()
+        )
+        return OutboxRow.from_mapping(updated), True
