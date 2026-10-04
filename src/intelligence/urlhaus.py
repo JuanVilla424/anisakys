@@ -13,11 +13,11 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from src.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, CircuitBreakerOpenError
-from src.config import settings
+from src.config import settings, secret_value
 from src.logger import logger
 from src.observability.structured_logger import log_api_call, log_error
 
-URLHAUS_API_KEY = getattr(settings, "URLHAUS_API_KEY", None)
+URLHAUS_API_KEY = secret_value(getattr(settings, "URLHAUS_API_KEY", None))
 URLHAUS_RECENT_URL = "https://urlhaus-api.abuse.ch/v1/urls/recent/"
 
 

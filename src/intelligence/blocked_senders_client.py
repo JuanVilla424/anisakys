@@ -1,24 +1,71 @@
 """
 Google Workspace Blocked Senders — Cloud Identity Policy API v1beta1.
 
-Manages the "Anisakys" entry inside the existing gmail.blocked_sender_lists policy.
+Manages the "Anisakys" entry inside the existing gmail.blocked_sender_lists policy
+of the customer configured in ``GOOGLE_WORKSPACE_CUSTOMER_ID`` (default
+``my_customer``, the documented alias for the caller's own organization).
 """
 
+import re
 import threading
 from typing import Optional
 
+from src.config import settings
 from src.logger import logger
 
 POLICY_SCOPE = "https://www.googleapis.com/auth/cloud-identity.policies"
 SETTING_TYPE = "settings/gmail.blocked_sender_lists"
-CUSTOMER = "customers/C00yx3tcp"
+DEFAULT_CUSTOMER_ID = "my_customer"
 LIST_NAME = "Anisakys"
+
+_CUSTOMER_ID_RE = re.compile(r"^[A-Za-z0-9_]+$")
+
+
+def customer_resource(customer_id: Optional[str]) -> str:
+    """Build the ``customers/{id}`` resource name used in policy filters.
+
+    Args:
+        customer_id: Workspace customer ID (``C0...``), ``my_customer``, or an
+            already-prefixed ``customers/{id}``. Empty means ``my_customer``.
+
+    Returns:
+        The resource name, e.g. ``customers/my_customer``.
+
+    Raises:
+        ValueError: If the ID contains characters a customer ID cannot have
+            (it is interpolated into a CEL filter).
+    """
+    value = (customer_id or "").strip() or DEFAULT_CUSTOMER_ID
+    if value.startswith("customers/"):
+        value = value[len("customers/") :]
+    if not _CUSTOMER_ID_RE.match(value):
+        raise ValueError(f"Invalid Google Workspace customer ID: {value!r}")
+    return f"customers/{value}"
 
 
 class BlockedSendersClient:
-    def __init__(self, service_account_file: str, admin_email: str):
+    """Read/modify the Anisakys entry of the Gmail blocked-senders policy."""
+
+    def __init__(
+        self, service_account_file: str, admin_email: str, customer_id: Optional[str] = None
+    ):
+        """Create a client authorised as ``admin_email`` via domain-wide delegation.
+
+        Args:
+            service_account_file: Path to the service-account JSON key.
+            admin_email: Workspace admin to impersonate.
+            customer_id: Workspace customer; defaults to
+                ``GOOGLE_WORKSPACE_CUSTOMER_ID`` (``my_customer``).
+
+        Raises:
+            ValueError: If the customer ID is malformed.
+        """
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
+
+        self.customer = customer_resource(
+            customer_id or getattr(settings, "GOOGLE_WORKSPACE_CUSTOMER_ID", None)
+        )
 
         creds = service_account.Credentials.from_service_account_file(
             service_account_file,
@@ -29,11 +76,18 @@ class BlockedSendersClient:
         self._lock = threading.Lock()
 
     def _get_policy(self) -> tuple[str, list]:
-        """Return (policy_name, blockedSenders list) from the existing policy."""
+        """Return (policy_name, blockedSenders list) from the existing policy.
+
+        Returns:
+            The policy resource name and its ``blockedSenders`` list.
+
+        Raises:
+            Exception: If the customer has no gmail.blocked_sender_lists policy.
+        """
         resp = (
             self._svc.policies()
             .list(
-                filter=f'customer=="{CUSTOMER}" && setting.type=="{SETTING_TYPE}"',
+                filter=f'customer=="{self.customer}" && setting.type=="{SETTING_TYPE}"',
                 pageSize=50,
             )
             .execute()
@@ -116,6 +170,15 @@ def get_blocked_senders_client(
     service_account_file: str,
     admin_email: str,
 ) -> BlockedSendersClient:
+    """Return the process-wide client, creating it on first use.
+
+    Args:
+        service_account_file: Path to the service-account JSON key.
+        admin_email: Workspace admin to impersonate.
+
+    Returns:
+        The shared :class:`BlockedSendersClient` (customer from settings).
+    """
     global _client
     if _client is None:
         _client = BlockedSendersClient(service_account_file, admin_email)

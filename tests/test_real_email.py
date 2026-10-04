@@ -8,11 +8,16 @@ import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from src.reporting.abuse_contact_validator import AbuseContactValidator, validate_abuse_email
-from src.screenshot_service import ScreenshotService, capture_phishing_screenshot
-from src.reporting.report_tracker import ReportTracker, create_report_record
+import pytest
+
+# Live network: resolves MX records of real mail providers and captures real websites.
+# Excluded by default; run with `pytest -m network`.
+pytestmark = pytest.mark.network
+
+from src.reporting.abuse_contact_validator import AbuseContactValidator
+from src.screenshot_service import ScreenshotService
+from src.reporting.report_tracker import create_report_record
 import tempfile
-from pathlib import Path
 
 # Test user email - CLEANUP REQUIRED: Remove validation records from database
 TEST_USER_EMAIL = "r6ty5r296it6tl4eg5m.constant214@passinbox.com"
@@ -31,7 +36,7 @@ def test_real_email_validation():
     # Complete validation
     result = validator.validate_registrar_abuse_contact(TEST_USER_EMAIL)
 
-    print(f"📊 Validation result:")
+    print("📊 Validation result:")
     print(f"   - Email: {result['email']}")
     print(f"   - Valid format: {'✅' if result['format_valid'] else '❌'}")
     print(f"   - Valid domain: {'✅' if result['domain_valid'] else '❌'}")
@@ -40,12 +45,12 @@ def test_real_email_validation():
     print(f"   - Generally valid: {'✅' if result['valid'] else '❌'}")
 
     if result["errors"]:
-        print(f"❌ Errors:")
+        print("❌ Errors:")
         for error in result["errors"]:
             print(f"   - {error}")
 
     if result["warnings"]:
-        print(f"⚠️  Warnings:")
+        print("⚠️  Warnings:")
         for warning in result["warnings"]:
             print(f"   - {warning}")
 
@@ -54,7 +59,7 @@ def test_real_email_validation():
 
 def test_screenshot_service():
     """Test the screenshot service"""
-    print(f"\n📸 Testing screenshot service...")
+    print("\n📸 Testing screenshot service...")
 
     # CLEANUP REQUIRED: Screenshots directory auto-cleaned with tempfile
     with tempfile.TemporaryDirectory() as temp_dir:
@@ -64,14 +69,14 @@ def test_screenshot_service():
         print(f"🔧 Preferred engine: {service.preferred_engine}")
 
         # Test with a real site (not actually executed to avoid issues)
-        print(f"✅ Service initialized correctly")
+        print("✅ Service initialized correctly")
 
         return True
 
 
 def test_report_record_creation():
     """Test report record creation"""
-    print(f"\n📋 Testing report record creation...")
+    print("\n📋 Testing report record creation...")
 
     report = create_report_record(
         site_url="https://test-phishing-site.com",
@@ -81,7 +86,7 @@ def test_report_record_creation():
         screenshot_included=True,
     )
 
-    print(f"📊 Record created:")
+    print("📊 Record created:")
     print(f"   - Report ID: {report.report_id}")
     print(f"   - Site URL: {report.site_url}")
     print(f"   - Recipients: {report.recipients}")
@@ -95,7 +100,7 @@ def test_report_record_creation():
 
 def test_multiple_abuse_emails():
     """Test validation of multiple abuse emails"""
-    print(f"\n📧 Testing validation of multiple emails...")
+    print("\n📧 Testing validation of multiple emails...")
 
     # Common test emails for phishing - CLEANUP REQUIRED: Remove validation cache data
     test_emails = [
@@ -140,8 +145,8 @@ def main():
         # Test 4: Multiple emails
         test_multiple_abuse_emails()
 
-        print(f"\n🎉 TEST SUMMARY")
-        print(f"=" * 30)
+        print("\n🎉 TEST SUMMARY")
+        print("=" * 30)
         print(f"✅ Test email: {'Valid' if email_result['valid'] else 'With issues'}")
         print(f"✅ Screenshot service: {'Working' if screenshot_result else 'With issues'}")
         print(f"✅ Report creation: {'Working' if report_result else 'With issues'}")

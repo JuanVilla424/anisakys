@@ -2,7 +2,7 @@
 Tests for src/database/manager.py - DatabaseManager
 """
 
-from unittest.mock import patch, MagicMock, PropertyMock
+from unittest.mock import patch, MagicMock
 
 import pytest
 from sqlalchemy import text
@@ -39,41 +39,40 @@ class TestDatabaseManager:
         assert manager.engine == db_engine
 
 
-class TestDatabaseManagerInit:
-    """Tests for database initialization methods."""
+class TestDatabaseManagerHasNoRuntimeDdl:
+    """The schema is owned by Alembic; DatabaseManager must not create tables."""
 
-    def test_init_db_creates_scan_results_table(self):
-        """init_db should create scan_results table."""
+    @pytest.mark.parametrize(
+        "method",
+        [
+            "init_db",
+            "init_phishing_db",
+            "migrate_phishing_db",
+            "migrate_gsb_columns",
+            "init_registrar_abuse_db",
+            "init_hosting_abuse_db",
+            "init_threads_db",
+            "init_blocklist_db",
+            "_init_email_reputation_db",
+        ],
+    )
+    def test_runtime_ddl_methods_are_gone(self, method):
+        assert not hasattr(DatabaseManager, method)
+
+    def test_migrated_test_database_has_core_tables(self):
+        """conftest builds the schema with `alembic upgrade head`."""
         manager = DatabaseManager()
-        # This actually creates the table if it doesn't exist
-        manager.init_db()
-
-        # Verify table exists by querying it
         with manager.engine.connect() as conn:
-            from sqlalchemy import text
-
-            result = conn.execute(
-                text(
-                    "SELECT table_name FROM information_schema.tables WHERE table_name = 'scan_results'"
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    text(
+                        "SELECT table_name FROM information_schema.tables "
+                        "WHERE table_schema = 'public'"
+                    )
                 )
-            ).fetchone()
-            assert result is not None
-
-    def test_init_phishing_db_creates_phishing_sites_table(self):
-        """init_phishing_db should create phishing_sites table."""
-        manager = DatabaseManager()
-        manager.init_phishing_db()
-
-        # Verify table exists
-        with manager.engine.connect() as conn:
-            from sqlalchemy import text
-
-            result = conn.execute(
-                text(
-                    "SELECT table_name FROM information_schema.tables WHERE table_name = 'phishing_sites'"
-                )
-            ).fetchone()
-            assert result is not None
+            }
+        assert {"scan_results", "phishing_sites", "hosting_abuse", "alembic_version"} <= tables
 
 
 class TestDatabaseManagerOperations:
@@ -104,10 +103,8 @@ class TestDatabaseManagerOperations:
         result = manager.get_registrar_abuse_emails(None)
         assert result is None
 
-    @patch.object(DatabaseManager, "init_registrar_abuse_db")
-    def test_get_registrar_abuse_emails_queries_database(self, mock_init):
+    def test_get_registrar_abuse_emails_queries_database(self):
         """get_registrar_abuse_emails should query the database."""
-        from unittest.mock import MagicMock
 
         manager = DatabaseManager()
 
@@ -138,45 +135,13 @@ class TestDatabaseManagerOperations:
 
     def test_get_hosting_abuse_emails_returns_none_for_unknown(self, manager):
         """get_hosting_abuse_emails should return None for unknown provider."""
-        # Ensure table exists first
-        manager.init_hosting_abuse_db()
         result = manager.get_hosting_abuse_emails("unknown-provider-12345-test")
         assert result is None
 
     def test_get_hosting_abuse_emails_with_asn(self, manager):
         """get_hosting_abuse_emails should accept optional ASN parameter."""
-        # Ensure table exists first
-        manager.init_hosting_abuse_db()
         result = manager.get_hosting_abuse_emails("unknown-provider", asn="AS12345")
         assert result is None
-
-
-class TestDatabaseManagerInitTables:
-    """Tests for table initialization methods."""
-
-    @pytest.fixture
-    def manager(self):
-        """Create a DatabaseManager instance."""
-        return DatabaseManager()
-
-    def test_init_registrar_abuse_db_runs_without_error(self, manager):
-        """init_registrar_abuse_db should run without raising exception."""
-        # This method has complex migration logic, just verify it doesn't crash
-        try:
-            manager.init_registrar_abuse_db()
-        except Exception as e:
-            # Some databases may have issues with migration, that's ok for unit test
-            pass
-        # No assertion needed - test passes if no unhandled exception
-
-    def test_init_hosting_abuse_db_creates_table(self, manager):
-        """init_hosting_abuse_db should create hosting_abuse table."""
-        manager.init_hosting_abuse_db()
-
-        # Verify by querying the table directly
-        with manager.engine.connect() as conn:
-            result = conn.execute(text("SELECT COUNT(*) FROM hosting_abuse")).scalar()
-            assert result is not None
 
 
 class TestDatabaseManagerStorePhishing:
@@ -185,9 +150,7 @@ class TestDatabaseManagerStorePhishing:
     @pytest.fixture
     def manager(self):
         """Create a DatabaseManager instance."""
-        m = DatabaseManager()
-        m.init_phishing_db()
-        return m
+        return DatabaseManager()
 
     def test_store_detected_phishing_site_new_url(self, manager):
         """store_detected_phishing_site should return True for new URL."""

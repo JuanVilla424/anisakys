@@ -18,7 +18,6 @@ from src import main  # noqa: F401 — side-effect import to seed sys.modules
 
 from src.reporting.email_detector import EnhancedAbuseEmailDetector
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

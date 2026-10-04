@@ -6,16 +6,24 @@ Provides automated phishing analysis using multi-API validation.
 
 from __future__ import annotations
 
+import datetime
+import json
 import re
-import time
 import threading
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, TYPE_CHECKING
 
 from sqlalchemy import text
 
 from src.config import settings
-from src.intelligence import MultiAPIValidator, AUTO_ANALYSIS_ENABLED
+from src.intelligence import (
+    AUTO_ANALYSIS_ENABLED,
+    AUTO_REPORT_THRESHOLD_CONFIDENCE,
+    MANUAL_REVIEW_THRESHOLD_CONFIDENCE,
+    MultiAPIValidator,
+)
 from src.logger import logger
+from src.models import AttachmentConfig
+from src.shutdown import is_shutdown_requested, register_thread, wait_for_shutdown
 
 # Get config value
 AUTO_ANALYSIS_DELAY_SECONDS = getattr(settings, "AUTO_ANALYSIS_DELAY_SECONDS", 30) or 30
@@ -47,11 +55,17 @@ class AutoPhishingAnalyzer:
         self.running = False
 
     def start_analysis_worker(self):
-        """Start the background analysis worker thread."""
+        """Start the background analysis worker thread (scheduler role only).
+
+        The thread is registered so a graceful shutdown joins it.
+        """
         if not self.running:
             self.running = True
-            analysis_thread = threading.Thread(target=self._analysis_worker_loop, daemon=True)
+            analysis_thread = threading.Thread(
+                target=self._analysis_worker_loop, name="auto-analysis", daemon=True
+            )
             analysis_thread.start()
+            register_thread(analysis_thread)
             logger.info("🤖 Auto-analysis worker started")
 
     def stop_analysis_worker(self):
@@ -63,7 +77,7 @@ class AutoPhishingAnalyzer:
         """Main loop for the analysis worker."""
         logger.info("🔄 Auto-analysis worker loop started")
 
-        while self.running:
+        while self.running and not is_shutdown_requested():
             try:
                 # Get pending sites for analysis
                 pending_sites = self.db_manager.get_pending_analysis_sites(limit=5)
@@ -82,18 +96,19 @@ class AutoPhishingAnalyzer:
                             )
 
                             # Small delay between analyses to avoid overwhelming APIs
-                            time.sleep(AUTO_ANALYSIS_DELAY_SECONDS)
+                            if wait_for_shutdown(AUTO_ANALYSIS_DELAY_SECONDS):
+                                break
 
                         except Exception as e:
                             logger.error(f"❌ Error analyzing site {site_info['url']}: {e}")
                             continue
                 else:
-                    # No, pending sites, wait longer
-                    time.sleep(60)
+                    # No pending sites, wait longer
+                    wait_for_shutdown(60)
 
             except Exception as e:
                 logger.error(f"❌ Error in auto-analysis worker loop: {e}")
-                time.sleep(30)
+                wait_for_shutdown(30)
 
     def analyze_detected_site(self, url: str, detection_keywords: List[str]) -> Dict[str, Any]:
         """
@@ -372,13 +387,11 @@ class AutoPhishingAnalyzer:
                         # Mark for manual review instead
                         with self.db_manager.engine.begin() as conn:
                             conn.execute(
-                                text(
-                                    """
+                                text("""
                                     UPDATE phishing_sites
                                     SET auto_report_eligible = 0, requires_manual_review = 1
                                     WHERE url = :url
-                                """
-                                ),
+                                """),
                                 {"url": url},
                             )
                         continue
@@ -386,13 +399,11 @@ class AutoPhishingAnalyzer:
                     # Get enhanced multi-API results for a report
                     with self.db_manager.engine.begin() as conn:
                         api_results = conn.execute(
-                            text(
-                                """
+                            text("""
                                 SELECT virustotal_result, urlvoid_result, phishtank_result,
                                        multi_api_threat_level, api_confidence_score
                                 FROM phishing_sites WHERE url = :url
-                            """
-                            ),
+                            """),
                             {"url": url},
                         ).fetchone()
 
@@ -404,9 +415,9 @@ class AutoPhishingAnalyzer:
                             "urlvoid": json.loads(api_results[1]) if api_results[1] else {},
                             "phishtank": json.loads(api_results[2]) if api_results[2] else {},
                             "recommendations": [
-                                f"🤖 AUTO-DETECTED: Site flagged by automated system",
-                                f"🎯 DETECTION KEYWORDS: {keywords}",
-                                f"📊 THREAT ASSESSMENT: {threat_level.upper()} ({confidence}% confidence)",
+                                f"Detection keywords: {keywords}",
+                                f"Threat assessment: {str(threat_level).upper()} "
+                                f"({confidence}% confidence)",
                             ],
                         }
                     else:
@@ -423,26 +434,8 @@ class AutoPhishingAnalyzer:
                     )
 
                     if success:
-                        # Update database to mark as reported
-                        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                        with self.db_manager.engine.begin() as conn:
-                            conn.execute(
-                                text(
-                                    """
-                                    UPDATE phishing_sites
-                                    SET abuse_report_sent = 1,
-                                        last_report_sent = :timestamp,
-                                        abuse_email = CASE
-                                            WHEN manual_emails = 1 THEN abuse_email
-                                            ELSE :abuse_email
-                                        END,
-                                        reported = 1
-                                    WHERE url = :url
-                                """
-                                ),
-                                {"timestamp": timestamp, "abuse_email": abuse_list[0], "url": url},
-                            )
-
+                        # send_abuse_report() marks the site and tracks the report
+                        # in the same transaction that queues the e-mails.
                         logger.info(f"✅ AUTO-REPORT SENT: {url} to {abuse_list[0]}")
                         processed_count += 1
                     else:

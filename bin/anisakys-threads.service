@@ -1,5 +1,7 @@
 [Unit]
-Description=Anisakys - Background Threads (Monitoring, Auto-Analysis, Reporting)
+Description=Anisakys - Scheduler (abuse reporting, follow-ups, takedown monitoring, periodic jobs)
+# The only unit that runs background jobs. Run exactly one per database: a second
+# scheduler waits on a PostgreSQL advisory lock as a hot standby.
 After=network.target
 
 [Service]
@@ -8,7 +10,7 @@ User=anisakys
 Group=anisakys
 WorkingDirectory=/opt/anisakys
 EnvironmentFile=/opt/anisakys/.env
-ExecStart=/opt/anisakys/venv/bin/python anisakys.py --threads-only
+ExecStart=/opt/anisakys/venv/bin/python anisakys.py --role scheduler
 Restart=always
 RestartSec=10
 

@@ -50,8 +50,10 @@ from functools import wraps
 import signal
 import sys
 
+from src.utils.serialization import serialize_for_json  # noqa: F401 (re-exported)
 from src.config import (
     settings,
+    secret_value,
     CLOUDFLARE_IP_RANGES,
     ALLOWED_HEAD_STATUS,
     DEFAULT_USER_AGENT,
@@ -83,11 +85,12 @@ from src.data import (
     TLD_WHOIS_SERVERS,
 )
 from src.models import DynamicBatchConfig, AttachmentConfig, EngineMode
-from src.database import DatabaseManager, db_engine, DATABASE_URL
+from src.database import DatabaseManager, db_engine, DATABASE_URL, ensure_schema_is_current
 from src.reporting import EnhancedAbuseEmailDetector, AbuseReportManager
-from src.monitoring import TakedownMonitor, start_gsb_rescan_job, stop_gsb_rescan_job
+from src.monitoring import TakedownMonitor
+from src.monitoring.takedown import save_offset
 from src.detection import AutoPhishingAnalyzer, PhishingUtils, PhishingScanner
-from src.api import PhishingAPI, TimeoutError, timeout, upgrade_phishing_db
+from src.api import PhishingAPI
 from src.intelligence import (
     GrinderReportClient,
     require_api_key,
@@ -110,15 +113,33 @@ from src.intelligence import (
 from src.generators.query_generator import generate_queries_file
 from src.dns.network_utils import get_ip_info, is_cloudflare_ip
 from src.screenshot_client import get_screenshot_service
+from src.runtime import (
+    ProcessRole,
+    RoleConfigurationError,
+    SchedulerJobs,
+    resolve_process_role,
+    runs_background_jobs,
+    start_scheduler_jobs,
+)
 
 # Global testing mode detection - independent of test_mode (used for screenshots)
 IS_TESTING_MODE = False
 
 
-def set_testing_mode(enabled=True):
-    """Enable/disable global testing mode. In testing mode, CCs are NEVER sent."""
+def set_testing_mode(enabled: bool = True) -> None:
+    """Enable or disable testing mode, in which CC recipients are never e-mailed.
+
+    The reporting pipeline reads ``src.reporting.abuse_manager.IS_TESTING_MODE``;
+    setting only this module's flag (as before) left CCs enabled.
+
+    Args:
+        enabled: Whether testing mode is active.
+    """
     global IS_TESTING_MODE
+    import src.reporting.abuse_manager as abuse_manager_module
+
     IS_TESTING_MODE = enabled
+    abuse_manager_module.IS_TESTING_MODE = enabled
     if enabled:
         logger.warning("🧪 TESTING MODE ACTIVE - CCs disabled for security")
 
@@ -132,32 +153,6 @@ if not QUERIES_FILE:
     raise Exception("QUERIES_FILE must be set in your .env file")
 
 OFFSET_FILE = getattr(settings, "OFFSET_FILE")
-
-
-def serialize_for_json(obj):
-    """Convert objects with datetime to JSON-serializable format"""
-    if obj is None:
-        return None
-
-    if hasattr(obj, "__dict__"):
-        # For objects with attributes, convert to dict
-        result = {}
-        for key, value in obj.__dict__.items():
-            if isinstance(value, datetime.datetime):
-                result[key] = value.isoformat()
-            elif isinstance(value, list):
-                result[key] = [serialize_for_json(item) for item in value]
-            else:
-                result[key] = value
-        return result
-    elif isinstance(obj, datetime.datetime):
-        return obj.isoformat()
-    elif isinstance(obj, list):
-        return [serialize_for_json(item) for item in obj]
-    elif isinstance(obj, dict):
-        return {key: serialize_for_json(value) for key, value in obj.items()}
-    else:
-        return obj
 
 
 # Auto-Analysis delay (other configs imported from src.intelligence)
@@ -188,7 +183,14 @@ ABUSE_EMAIL_PATTERNS = [
 ]
 
 # Import shared shutdown state
-from src.shutdown import shutdown_requested, signal_handler
+from src.shutdown import (
+    install_signal_handlers,
+    request_shutdown,
+    is_shutdown_requested,
+    join_registered_threads,
+    register_thread,
+    wait_for_shutdown,
+)
 
 
 class Engine:
@@ -228,14 +230,19 @@ class Engine:
             )
 
         self.args = args
+        # Process role (single scheduler): decides which background jobs run here.
+        self.role = resolve_process_role(
+            getattr(args, "role", None),
+            threads_only=bool(getattr(args, "threads_only", False)),
+            start_api=bool(getattr(args, "start_api", False)),
+        )
+        if self.role == ProcessRole.SCHEDULER:
+            args.threads_only = True
+        elif self.role == ProcessRole.API:
+            args.start_api = True
         self.db_manager = DatabaseManager(db_url=DATABASE_URL)
-        self.db_manager.init_db()
-        self.db_manager.init_phishing_db()
-        upgrade_phishing_db()
-        self.db_manager.init_registrar_abuse_db()
-        self.db_manager.init_hosting_abuse_db()
-        self.db_manager.init_threads_db()
-        self.db_manager.init_blocklist_db()
+        # The schema is owned by Alembic; refuse to start against a stale database.
+        ensure_schema_is_current(self.db_manager.engine)
 
         # Ensure all initialization connections are closed
         logger.info("🔒 Disposing initialization connections")
@@ -302,6 +309,65 @@ class Engine:
             self.scanner = None
             logger.debug("ℹ️  No scanner needed for current mode")
 
+    def _build_thread_schedulers(self) -> Tuple[Optional[Any], Optional[Any]]:
+        """Create the image-tracking and e-mail monitor schedulers when configured.
+
+        They are only constructed here; :meth:`_start_background_jobs` starts
+        their loops in the role that owns background jobs.
+
+        Returns:
+            ``(image_scheduler, email_scheduler)``, each ``None`` when not configured.
+        """
+        image_scheduler = None
+        email_scheduler = None
+        serpapi_key = secret_value(getattr(settings, "SERPAPI_KEY", None))
+        if serpapi_key:
+            from src.monitoring.scheduler import ImageTrackingScheduler
+
+            image_scheduler = ImageTrackingScheduler(
+                serpapi_key=serpapi_key,
+                s3_bucket=getattr(settings, "S3_DATA_BUCKET", None),
+                aws_region=getattr(settings, "AWS_REGION", None),
+            )
+        if getattr(settings, "GOOGLE_SERVICE_ACCOUNT_FILE", None) and getattr(
+            settings, "GOOGLE_WORKSPACE_DOMAIN", None
+        ):
+            from src.monitoring.email_scheduler import EmailMonitorScheduler
+
+            email_scheduler = EmailMonitorScheduler(
+                service_account_file=settings.GOOGLE_SERVICE_ACCOUNT_FILE,
+                domain=settings.GOOGLE_WORKSPACE_DOMAIN,
+                block_threshold=getattr(settings, "EMAIL_BLOCK_THRESHOLD", 5),
+                vt_api_key=secret_value(getattr(settings, "VIRUSTOTAL_API_KEY", None)),
+                poll_interval_minutes=getattr(settings, "EMAIL_POLL_INTERVAL_MINUTES", 15),
+                admin_email=getattr(settings, "GOOGLE_ADMIN_EMAIL", None),
+            )
+        return image_scheduler, email_scheduler
+
+    def _start_background_jobs(
+        self, image_scheduler: Optional[Any] = None, email_scheduler: Optional[Any] = None
+    ) -> List[str]:
+        """Start the background jobs if this process's role owns them.
+
+        Args:
+            image_scheduler: Image-tracking scheduler to start, if configured.
+            email_scheduler: E-mail monitor scheduler to start, if configured.
+
+        Returns:
+            Names of the jobs started (empty for the api and scanner roles).
+        """
+        return start_scheduler_jobs(
+            SchedulerJobs(
+                report_manager=self.report_manager,
+                takedown_monitor=self.takedown_monitor,
+                db_manager=self.db_manager,
+                auto_analyzer=self.auto_analyzer,
+                image_scheduler=image_scheduler,
+                email_scheduler=email_scheduler,
+            ),
+            self.role,
+        )
+
     def mark_site_as_phishing(self, url: str, abuse_email: Optional[str] = None):
         """Mark a site as phishing with enhanced database operations including WHOIS data."""
         with self.db_manager.engine.begin() as conn:
@@ -340,19 +406,17 @@ class Engine:
 
             if result:
                 conn.execute(
-                    text(
-                        """
+                    text("""
                         UPDATE phishing_sites
                         SET manual_flag=1, last_seen=:timestamp, reported=0,
-                            abuse_report_sent=0,
+                            abuse_report_sent=0, report_attempts=0, report_last_error=NULL,
                             abuse_email = CASE
                                 WHEN manual_emails = 1 THEN abuse_email
                                 ELSE :abuse_email
                             END,
                             whois_info=:whois_info, registrar=:registrar
                         WHERE url=:url
-                    """
-                    ),
+                    """),
                     {
                         "timestamp": timestamp,
                         "abuse_email": json.dumps(abuse_emails),
@@ -368,15 +432,13 @@ class Engine:
                 )
             else:
                 conn.execute(
-                    text(
-                        """
+                    text("""
                         INSERT INTO phishing_sites
                         (url, manual_flag, first_seen, last_seen, abuse_email,
                          whois_info, registrar, reported, abuse_report_sent)
                         VALUES (:url, 1, :timestamp, :timestamp, :abuse_email,
                                 :whois_info, :registrar, 0, 0)
-                    """
-                    ),
+                    """),
                     {
                         "url": url,
                         "timestamp": timestamp,
@@ -453,7 +515,7 @@ class Engine:
                     if pt_result.get("target"):
                         print(f"   🎯 Target: {pt_result['target']}")
                 else:
-                    print(f"   ✅ Status: Not in phishing database")
+                    print("   ✅ Status: Not in phishing database")
 
             # Recommendations
             print("\n📋 RECOMMENDATIONS:")
@@ -479,8 +541,7 @@ class Engine:
 
                     if not existing:
                         conn.execute(
-                            text(
-                                """
+                            text("""
                                 INSERT INTO phishing_sites
                                 (url, manual_flag, first_seen, last_seen, virustotal_result,
                                  urlvoid_result, phishtank_result, multi_api_threat_level,
@@ -488,8 +549,7 @@ class Engine:
                                 VALUES (:url, 1, :timestamp, :timestamp, :vt_result,
                                         :uv_result, :pt_result, :threat_level, :confidence,
                                         'multi_api_scan', :priority)
-                            """
-                            ),
+                            """),
                             {
                                 "url": url,
                                 "timestamp": timestamp,
@@ -501,7 +561,7 @@ class Engine:
                                 "priority": "high" if threat_level == "critical" else "medium",
                             },
                         )
-                        print(f"🔄 URL flagged in database for further processing")
+                        print("🔄 URL flagged in database for further processing")
 
         except Exception as e:
             logger.error(f"❌ Multi-API scan failed for {url}: {e}")
@@ -572,81 +632,23 @@ class Engine:
 
         if getattr(self.args, "start_api", False):
             # Start API server
-            api_key = getattr(self.args, "api_key", None) or getattr(
-                settings, "ANISAKYS_API_KEY", None
+            api_key = getattr(self.args, "api_key", None) or secret_value(
+                getattr(settings, "ANISAKYS_API_KEY", None)
             )
             if not api_key:
                 logger.error("❌ API key is required when starting API server")
                 logger.error("   Use --api-key parameter or set ANISAKYS_API_KEY in .env")
                 return
 
-            # Start background threads for abuse reporting and monitoring BEFORE starting API
-            logger.info("🧵 Starting background threads for API mode...")
-            reporting_thread = threading.Thread(
-                target=self.report_manager.report_phishing_sites, daemon=True
+            # Background jobs run in this process only in the "all" role
+            # (single-process development); the "api" role leaves reporting,
+            # takedown monitoring and the schedulers to the scheduler process
+            # and, like the gunicorn entrypoint, never sends e-mail itself.
+            in_process_jobs = runs_background_jobs(self.role)
+            scheduler, email_scheduler = (
+                self._build_thread_schedulers() if in_process_jobs else (None, None)
             )
-            reporting_thread.start()
-            logger.info("📧 Abuse reporting thread started")
-
-            takedown_thread = threading.Thread(target=self.takedown_monitor.run, daemon=True)
-            takedown_thread.start()
-            logger.info("📡 Takedown monitoring thread started")
-
-            # Start GSB rescan background job
-            gsb_job = start_gsb_rescan_job(
-                rescan_interval_hours=12, batch_size=50, max_age_hours=24
-            )
-            logger.info("🔄 GSB rescan job started (12h interval)")
-
-            # Start image tracking / ads scheduler if SERPAPI_KEY is configured
-            scheduler = None
-            if getattr(settings, "SERPAPI_KEY", None):
-                from src.monitoring.scheduler import ImageTrackingScheduler
-
-                scheduler = ImageTrackingScheduler(
-                    serpapi_key=settings.SERPAPI_KEY,
-                    s3_bucket=getattr(settings, "S3_DATA_BUCKET", None),
-                    aws_region=getattr(settings, "AWS_REGION", None),
-                )
-                scheduler.start()
-                logger.info("📡 Image tracking scheduler started")
-
-            # Start email threat monitoring scheduler if Google config is set
-            email_scheduler = None
-            if getattr(settings, "GOOGLE_SERVICE_ACCOUNT_FILE", None) and getattr(
-                settings, "GOOGLE_WORKSPACE_DOMAIN", None
-            ):
-                from src.monitoring.email_scheduler import EmailMonitorScheduler
-
-                email_scheduler = EmailMonitorScheduler(
-                    service_account_file=settings.GOOGLE_SERVICE_ACCOUNT_FILE,
-                    domain=settings.GOOGLE_WORKSPACE_DOMAIN,
-                    block_threshold=getattr(settings, "EMAIL_BLOCK_THRESHOLD", 5),
-                    vt_api_key=getattr(settings, "VIRUSTOTAL_API_KEY", None),
-                    poll_interval_minutes=getattr(settings, "EMAIL_POLL_INTERVAL_MINUTES", 15),
-                    admin_email=getattr(settings, "GOOGLE_ADMIN_EMAIL", None),
-                )
-                email_scheduler.start()
-                logger.info("📧 Email threat monitoring scheduler started")
-
-            # Start CT (Certificate Transparency) log monitoring if enabled
-            if getattr(settings, "CT_MONITOR_ENABLED", False):
-                from src.monitoring.ct_monitor import start_ct_monitor_job
-
-                start_ct_monitor_job(
-                    db_manager=self.db_manager,
-                    stream_url=getattr(settings, "CT_STREAM_URL", None) or None,
-                    min_score=getattr(settings, "CT_MONITOR_MIN_SCORE", None),
-                )
-                logger.info("🔭 CT monitoring job started")
-
-            # Start external feed intelligence (OpenPhish/URLhaus corroboration
-            # + urlscan.io discovery) if enabled
-            if getattr(settings, "FEED_INTEL_ENABLED", False):
-                from src.monitoring.feed_intel import start_feed_intel_job
-
-                start_feed_intel_job(db_manager=self.db_manager)
-                logger.info("🌐 Feed intel job started")
+            self._start_background_jobs(scheduler, email_scheduler)
 
             # Store the API key globally for decorator access
             global flask_app
@@ -655,7 +657,7 @@ class Engine:
                 self.db_manager,
                 self.abuse_detector,
                 api_key=api_key,
-                report_manager=self.report_manager,
+                report_manager=self.report_manager if in_process_jobs else None,
                 scheduler=scheduler,
                 email_scheduler=email_scheduler,
             )
@@ -664,56 +666,32 @@ class Engine:
             api_port = getattr(self.args, "api_port", None) or getattr(
                 settings, "ANISAKYS_API_PORT", 8091
             )
-            logger.info("🚀 Starting API server with background reporting enabled...")
+            logger.info(
+                "🚀 Starting API development server"
+                + (" (background jobs run in this process)" if self.role == ProcessRole.ALL else "")
+            )
+            # Development server only (production: gunicorn + src.api.wsgi). Never
+            # run with debug=True: the Werkzeug debugger allows remote code execution.
             api.run(
-                host=getattr(self.args, "api_host", "0.0.0.0"),
+                host=getattr(self.args, "api_host", None) or settings.API_BIND_HOST,
                 port=int(api_port),
-                debug=(self.args.log_level == "DEBUG"),
             )
             return
 
-        # Start background threads for abuse reporting and monitoring
-        logger.debug("🧵 Starting background threads...")
-
-        reporting_thread = threading.Thread(
-            target=self.report_manager.report_phishing_sites, daemon=True
+        # Background jobs: only the scheduler role (or "all") starts them.
+        scheduler, email_scheduler = (
+            self._build_thread_schedulers() if runs_background_jobs(self.role) else (None, None)
         )
-        reporting_thread.start()
-        logger.debug("📧 Abuse reporting thread started")
-
-        takedown_thread = threading.Thread(target=self.takedown_monitor.run, daemon=True)
-        takedown_thread.start()
-        logger.debug("🔍 Takedown monitoring thread started")
-
-        # Start follow-up worker for ICANN compliance (every 24 hours)
-        followup_thread = threading.Thread(target=self.report_manager.followup_worker, daemon=True)
-        followup_thread.start()
-        logger.debug("🔄 ICANN follow-up worker started (checks every 24 hours)")
-
-        # Start auto-analysis worker if APIs are configured
-        if AUTO_ANALYSIS_ENABLED:
-            self.auto_analyzer.start_analysis_worker()
-            logger.info("🤖 Auto-analysis system started with multi-API integration")
-        else:
-            logger.info(
-                "ℹ️  Auto-analysis disabled (no API keys configured or disabled in settings)"
-            )
-
-        # Start GSB rescan background job (re-verifies existing sites periodically)
-        gsb_job = start_gsb_rescan_job(rescan_interval_hours=12, batch_size=50, max_age_hours=24)
-        logger.info("🔄 GSB rescan job started (12h interval, re-checks existing sites)")
+        self._start_background_jobs(scheduler, email_scheduler)
 
         if self.args.threads_only:
             logger.info(
-                "🧵 Running in threads-only mode. Background threads are active; skipping scanning cycle."
+                "Scheduler role: background jobs only (abuse reporting, outbox delivery, "
+                "follow-ups, takedown monitoring, GSB re-scan, configured schedulers"
+                + (", auto-analysis" if AUTO_ANALYSIS_ENABLED else "")
+                + "); no scanning in this process."
             )
-            logger.info(
-                "🔄 Active systems: Abuse reporting, Takedown monitoring, ICANN Follow-up, GSB Re-scan"
-                + (", Auto-analysis" if AUTO_ANALYSIS_ENABLED else "")
-            )
-            logger.info("ℹ️  To scan for new sites, run without --threads-only flag.")
 
-            # Show system status
             if AUTO_ANALYSIS_ENABLED:
                 try:
                     pending_count = len(self.db_manager.get_pending_analysis_sites(limit=100))
@@ -725,26 +703,11 @@ class Engine:
                     )
                 except Exception as e:
                     logger.debug(f"Could not get system status: {e}")
-            else:
-                logger.info("ℹ️  Auto-analysis system inactive - no API keys configured")
-
-            # Show what the threads are doing
-            logger.info("🔄 Background threads running:")
-            logger.info("  📧 Abuse Report Manager: Processing flagged phishing sites")
-            logger.info("  🔍 Takedown Monitor: Monitoring site status changes")
-            logger.info("  🔄 ICANN Follow-up Worker: Checking overdue reports every 24 hours")
-            logger.info(
-                "  🔄 GSB Re-scan Job: Re-verifying sites against Google Safe Browsing every 12h"
-            )
-            if AUTO_ANALYSIS_ENABLED:
-                logger.info(
-                    "  🤖 Auto-Analysis Worker: Analyzing detected sites with multi-API validation"
-                )
 
             logger.info("✅ System ready. Press Ctrl+C to stop.")
 
-            while not shutdown_requested:
-                time.sleep(60)
+            while not wait_for_shutdown(60):
+                pass
 
         elif self.mode.scanning_mode:
             # SCANNING MODE - This should always work regardless of API keys
@@ -883,7 +846,17 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--threads-only",
         action="store_true",
-        help="Only run background threads (monitoring, auto-analysis, auto-reporting) without scanning.",
+        help="Alias of --role scheduler: run the background jobs without scanning.",
+    )
+    parser.add_argument(
+        "--role",
+        choices=[role.value for role in ProcessRole],
+        default=None,
+        help=(
+            "Process role (default: PROCESS_ROLE, 'all'). Only 'scheduler' (or 'all' for a\n"
+            "single-process setup) runs reporting, takedown monitoring, follow-ups and the\n"
+            "periodic jobs; 'api' serves the API and 'scanner' scans, nothing else."
+        ),
     )
     parser.add_argument(
         "--regen-queries",
@@ -909,7 +882,13 @@ def parse_arguments() -> argparse.Namespace:
         "--api-port", type=int, default=8091, help="Port for the API server (default: 8091)"
     )
     parser.add_argument(
-        "--api-host", type=str, default="0.0.0.0", help="Host for the API server (default: 0.0.0.0)"
+        "--api-host",
+        type=str,
+        default=None,
+        help=(
+            "Interface for the development API server (default: API_BIND_HOST, "
+            "127.0.0.1). Production deployments use gunicorn with src.api.wsgi."
+        ),
     )
     parser.add_argument(
         "--api-key", type=str, help="API key for authentication when starting API server"
@@ -1011,19 +990,15 @@ def show_auto_status():
             ).scalar()
 
             # Threat level breakdown
-            threat_breakdown = conn.execute(
-                text(
-                    """
+            threat_breakdown = conn.execute(text("""
                     SELECT multi_api_threat_level, COUNT(*) as count
                     FROM phishing_sites
                     WHERE auto_analysis_status = 'completed'
                     GROUP BY multi_api_threat_level
                     ORDER BY count DESC
-                """
-                )
-            ).fetchall()
+                """)).fetchall()
 
-            print(f"📊 DETECTION STATISTICS:")
+            print("📊 DETECTION STATISTICS:")
             print(f"   🎯 Total Auto-Detected Sites: {total_auto_detected}")
             print(f"   📋 Pending Analysis: {pending_analysis}")
             print(f"   ✅ Analysis Completed: {analysis_completed}")
@@ -1031,11 +1006,11 @@ def show_auto_status():
             print(f"   👀 Manual Review Required: {manual_review}")
             print(f"   📤 Auto-Reports Sent: {auto_reports_sent}")
 
-            print(f"\n⏰ RECENT ACTIVITY (Last 24 Hours):")
+            print("\n⏰ RECENT ACTIVITY (Last 24 Hours):")
             print(f"   🔍 New Detections: {recent_detections}")
             print(f"   🤖 Sites Analyzed: {recent_analysis}")
 
-            print(f"\n🎯 THREAT LEVEL BREAKDOWN:")
+            print("\n🎯 THREAT LEVEL BREAKDOWN:")
             if threat_breakdown:
                 for threat_level, count in threat_breakdown:
                     if threat_level:
@@ -1044,7 +1019,7 @@ def show_auto_status():
                 print("   No completed analyses yet")
 
             # Configuration status
-            print(f"\n⚙️  CONFIGURATION STATUS:")
+            print("\n⚙️  CONFIGURATION STATUS:")
             print(
                 f"   🤖 Auto-Analysis: {'✅ Enabled' if AUTO_ANALYSIS_ENABLED else '❌ Disabled'}"
             )
@@ -1058,10 +1033,10 @@ def show_auto_status():
                 print(f"   🎯 Auto-Report Threat Levels: {["critical", "high"]}")
                 print(f"   ⏱️  Analysis Delay: {AUTO_ANALYSIS_DELAY_SECONDS} seconds")
             else:
-                print(f"   ❌ Reason: No API keys configured or AUTO_MULTI_API_SCAN disabled")
+                print("   ❌ Reason: No API keys configured or AUTO_MULTI_API_SCAN disabled")
 
             # API status
-            print(f"\n🔧 API INTEGRATION STATUS:")
+            print("\n🔧 API INTEGRATION STATUS:")
             api_configs = []
             if VIRUSTOTAL_API_KEY:
                 api_configs.append("✅ VirusTotal")
@@ -1082,20 +1057,18 @@ def show_auto_status():
                 print(f"   {config}")
 
             # Grinder integration status
-            print(f"\n🔗 GRINDER INTEGRATION STATUS:")
+            print("\n🔗 GRINDER INTEGRATION STATUS:")
             if GRINDER_INTEGRATION_ENABLED:
                 print(f"   ✅ Enabled: {GRINDER0X_API_URL}")
-                print(f"   🔄 Automatic IP reporting: Active")
+                print("   🔄 Automatic IP reporting: Active")
             else:
-                print(f"   ❌ Disabled: Missing configuration")
-                print(f"   ⚙️  Configure GRINDER0X_API_URL and GRINDER0X_API_KEY to enable")
+                print("   ❌ Disabled: Missing configuration")
+                print("   ⚙️  Configure GRINDER0X_API_URL and GRINDER0X_API_KEY to enable")
 
             # Recent pending sites for analysis
             if pending_analysis > 0:
-                print(f"\n🔍 NEXT SITES FOR ANALYSIS:")
-                recent_pending = conn.execute(
-                    text(
-                        """
+                print("\n🔍 NEXT SITES FOR ANALYSIS:")
+                recent_pending = conn.execute(text("""
                         SELECT url, detection_keywords, first_seen, priority
                         FROM phishing_sites
                         WHERE auto_analysis_status = 'pending'
@@ -1108,27 +1081,21 @@ def show_auto_status():
                             END,
                             first_seen ASC
                         LIMIT 5
-                    """
-                    )
-                ).fetchall()
+                    """)).fetchall()
 
                 for i, (url, keywords, first_seen, priority) in enumerate(recent_pending, 1):
                     print(f"   {i}. {url} ({priority}) - Keywords: {keywords}")
 
             # Recent auto-report eligible sites
             if auto_eligible > 0:
-                print(f"\n🚨 SITES READY FOR AUTO-REPORTING:")
-                recent_eligible = conn.execute(
-                    text(
-                        """
+                print("\n🚨 SITES READY FOR AUTO-REPORTING:")
+                recent_eligible = conn.execute(text("""
                         SELECT url, multi_api_threat_level, api_confidence_score
                         FROM phishing_sites
                         WHERE auto_report_eligible = 1 AND abuse_report_sent = 0
                         ORDER BY api_confidence_score DESC, first_seen ASC
                         LIMIT 5
-                    """
-                    )
-                ).fetchall()
+                    """)).fetchall()
 
                 for i, (url, threat_level, confidence) in enumerate(recent_eligible, 1):
                     print(f"   {i}. {url} - {threat_level} ({confidence}% confidence)")
@@ -1146,7 +1113,7 @@ def test_grinder_integration():
     print("=" * 80)
 
     # Test configuration
-    print(f"📋 Configuration:")
+    print("📋 Configuration:")
     print(f"   API URL: {GRINDER0X_API_URL or 'Not configured'}")
     print(f"   API Key: {'Configured' if GRINDER0X_API_KEY else 'Not configured'}")
     print(f"   Integration Enabled: {GRINDER_INTEGRATION_ENABLED}")
@@ -1157,18 +1124,18 @@ def test_grinder_integration():
         return
 
     # Test connection
-    print(f"\n🔗 Testing connection to Grinder API...")
+    print("\n🔗 Testing connection to Grinder API...")
     grinder_client = GrinderReportClient()
     connection_result = grinder_client.test_connection()
 
     if connection_result["status"] == "success":
-        print(f"✅ Connection successful!")
+        print("✅ Connection successful!")
     else:
         print(f"❌ Connection failed: {connection_result['message']}")
         return
 
     # Test IP reporting (with test data)
-    print(f"\n📤 Testing IP reporting functionality...")
+    print("\n📤 Testing IP reporting functionality...")
     test_ip = "192.0.2.1"  # RFC 5737 test IP
     test_context = {
         "method": "test_integration",
@@ -1182,11 +1149,11 @@ def test_grinder_integration():
     report_result = grinder_client.report_malicious_ip(test_ip, test_context, confidence=95)
 
     if report_result["status"] == "success":
-        print(f"✅ Test IP report sent successfully!")
+        print("✅ Test IP report sent successfully!")
         print(f"   Categories: {report_result.get('categories', [])}")
         print(f"   Confidence: {report_result.get('confidence', 0)}%")
     elif report_result["status"] == "rate_limited":
-        print(f"⏰ Rate limited - this is normal for testing")
+        print("⏰ Rate limited - this is normal for testing")
     else:
         print(f"❌ Test report failed: {report_result['message']}")
 
@@ -1212,6 +1179,14 @@ def main():
         log_level=log_level,
         arguments=vars(args),
     )
+
+    try:
+        resolve_process_role(
+            args.role, threads_only=args.threads_only, start_api=bool(args.start_api)
+        )
+    except (RoleConfigurationError, ValueError) as e:
+        logger.error(f"❌ Invalid process role: {e}")
+        sys.exit(2)
 
     # Handle test Grinder integration command
     if getattr(args, "test_grinder_integration", False):
@@ -1313,13 +1288,19 @@ def main():
         engine_instance = Engine(args)
         logger.debug("✅ Engine instance created successfully")
         logger.debug("🚀 Starting engine with enhanced threat intelligence...")
+        install_signal_handlers(interrupt_main=bool(getattr(args, "start_api", False)))
         engine_instance.start()
+    except KeyboardInterrupt:
+        logger.info("🛑 Interrupt received, stopping background workers...")
     except Exception as e:
         logger.error(f"❌ Failed to create or start engine: {e}")
         import traceback
 
         logger.debug(f"Full traceback: {traceback.format_exc()}")
         raise
+    finally:
+        request_shutdown()
+        join_registered_threads()
 
 
 if __name__ == "__main__":

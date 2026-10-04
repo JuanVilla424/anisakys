@@ -1,7 +1,6 @@
 """Gmail API client using service account with domain-wide delegation."""
 
 import base64
-import email as email_lib
 import re
 import threading
 import time

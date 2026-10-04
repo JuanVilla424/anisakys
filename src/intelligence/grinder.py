@@ -6,24 +6,21 @@ bidirectional threat intelligence integration.
 """
 
 import datetime
-import hmac
 import ipaddress
 import logging
 import time
-from functools import wraps
 from typing import Any, Dict, List
 
 import requests
-from flask import current_app, jsonify, request
 
 from src.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, CircuitBreakerOpenError
-from src.config import settings
+from src.config import settings, secret_value
 from src.logger import logger
 from src.observability.structured_logger import log_api_call, log_error, log_with_context
 
 # Grinder Integration Configuration
 GRINDER0X_API_URL = getattr(settings, "GRINDER0X_API_URL", None)
-GRINDER0X_API_KEY = getattr(settings, "GRINDER0X_API_KEY", None)
+GRINDER0X_API_KEY = secret_value(getattr(settings, "GRINDER0X_API_KEY", None))
 
 # Grinder integration is enabled if both URL and API key are configured
 GRINDER_INTEGRATION_ENABLED = bool(GRINDER0X_API_URL and GRINDER0X_API_KEY)
@@ -343,7 +340,7 @@ class GrinderReportClient:
         api_confidence = detection_context.get("api_confidence", 0)
 
         comment_parts = [
-            f"Phishing infrastructure detected by Anisakys threat intelligence system.",
+            "Phishing infrastructure detected by Anisakys threat intelligence system.",
             f"Threat Level: {threat_level}",
         ]
 

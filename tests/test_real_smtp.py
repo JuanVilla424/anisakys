@@ -8,6 +8,12 @@ import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import pytest
+
+# Live network: connects to the configured SMTP server and sends a real report.
+# Excluded by default; run with `pytest -m network`.
+pytestmark = pytest.mark.network
+
 from src.config import settings
 import smtplib
 from email.mime.multipart import MIMEMultipart
@@ -22,16 +28,16 @@ def test_smtp_connection():
     print("🧪 DIRECT SMTP CONNECTION TEST")
     print("=" * 45)
 
-    print(f"📧 SMTP Configuration:")
+    print("📧 SMTP Configuration:")
     print(f"   - Host: {settings.SMTP_HOST}")
     print(f"   - Puerto: {settings.SMTP_PORT}")
     print(f"   - Sender: {settings.ABUSE_EMAIL_SENDER}")
 
     try:
-        print(f"\n🔌 Connecting to SMTP...")
+        print("\n🔌 Connecting to SMTP...")
 
         with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
-            print(f"✅ Successful connection")
+            print("✅ Successful connection")
 
             # Try login if credentials exist
             smtp_user = getattr(settings, "SMTP_USER", "")
@@ -40,12 +46,12 @@ def test_smtp_connection():
             if smtp_user and smtp_pass:
                 print(f"🔐 Attempting login with user: {smtp_user}")
                 server.login(smtp_user, smtp_pass)
-                print(f"✅ Successful login")
+                print("✅ Successful login")
             else:
-                print(f"ℹ️  No SMTP credentials configured")
+                print("ℹ️  No SMTP credentials configured")
 
             # Create test email
-            print(f"\n📧 Creating test email...")
+            print("\n📧 Creating test email...")
 
             msg = MIMEMultipart()
             msg["Subject"] = "Anisakys ICANN Compliance SMTP Test"
@@ -73,14 +79,14 @@ def test_smtp_connection():
 
             msg.attach(MIMEText(html_content, "html"))
 
-            print(f"📤 Sending test email...")
+            print("📤 Sending test email...")
             server.send_message(msg)
             print(f"✅ Email sent successfully to {TEST_USER_EMAIL}")
 
             return True
 
     except ConnectionRefusedError:
-        print(f"❌ Connection refused - SMTP server not available")
+        print("❌ Connection refused - SMTP server not available")
         return False
     except smtplib.SMTPAuthenticationError as e:
         print(f"❌ Authentication error: {e}")
@@ -98,7 +104,7 @@ def test_smtp_connection():
 
 def test_real_abuse_report():
     """Test real abuse report without mocks"""
-    print(f"\n🧪 REAL REPORT TEST WITHOUT MOCKS")
+    print("\n🧪 REAL REPORT TEST WITHOUT MOCKS")
     print("=" * 45)
 
     from src.main import Engine, set_testing_mode
@@ -135,7 +141,7 @@ def test_real_abuse_report():
     )
 
     try:
-        print(f"🔧 Initializing Engine...")
+        print("🔧 Initializing Engine...")
         engine = Engine(args)
 
         # Real URL for screenshot - CLEANUP REQUIRED: Remove any generated screenshots
@@ -160,7 +166,7 @@ def test_real_abuse_report():
         report_manager.screenshot_service = engine.screenshot_service
         report_manager.report_tracker = engine.report_tracker
 
-        print(f"📤 Sending REAL report...")
+        print("📤 Sending REAL report...")
 
         # REAL sending (no mocks) - CLEANUP REQUIRED: Remove abuse report records from database
         result = report_manager.send_abuse_report(
@@ -175,7 +181,7 @@ def test_real_abuse_report():
         if result:
             print(f"🎉 Report sent! Check your email: {TEST_USER_EMAIL}")
         else:
-            print(f"❌ Error sending report")
+            print("❌ Error sending report")
 
         return result
 
@@ -197,24 +203,24 @@ def main():
 
     # Test 2: Real report if SMTP works
     if smtp_ok:
-        print(f"\n" + "=" * 55)
+        print("\n" + "=" * 55)
         report_ok = test_real_abuse_report()
     else:
-        print(f"\n❌ Skipping report test because SMTP failed")
+        print("\n❌ Skipping report test because SMTP failed")
         report_ok = False
 
     # Final result
-    print(f"\n🏁 FINAL RESULT")
+    print("\n🏁 FINAL RESULT")
     print("=" * 20)
     print(f"📧 Direct SMTP: {'✅ OK' if smtp_ok else '❌ FAILED'}")
     print(f"📋 Real report: {'✅ OK' if report_ok else '❌ FAILED'}")
 
     if smtp_ok and report_ok:
-        print(f"\n🎉 SYSTEM WORKING!")
+        print("\n🎉 SYSTEM WORKING!")
         print(f"📧 Check your email: {TEST_USER_EMAIL}")
-        print(f"📥 May take a few minutes to arrive")
+        print("📥 May take a few minutes to arrive")
     else:
-        print(f"\n⚠️  Check SMTP configuration")
+        print("\n⚠️  Check SMTP configuration")
 
     return smtp_ok and report_ok
 

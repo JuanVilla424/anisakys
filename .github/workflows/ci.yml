@@ -1,42 +1,162 @@
 ---
 # .github/workflows/ci.yml
+#
+# Blocking quality gates for every pull request and every push to dev/main.
+# Tool versions come from requirements-dev.txt, generated from poetry.lock, so
+# CI runs exactly what developers run locally. No job may be skipped with
+# continue-on-error: a red job blocks the merge.
 
 name: CI
 
 on:
+  pull_request:
   push:
     branches:
+      - dev
       - main
 
 permissions:
   contents: read
-  id-token: write
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+  POETRY_VERSION: "2.5.1"
+  POETRY_PLUGIN_EXPORT_VERSION: "1.10.1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  # Measured line coverage of src/ (network tests excluded) when the gate was
+  # introduced, rounded down. Raise it as coverage grows; never lower it.
+  COVERAGE_FLOOR: "69"
 
 jobs:
-  build:
-    runs-on: ubuntu-latest
+  lint:
+    name: Lint (ruff, black, lockfile)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v7
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v7
         with:
-          python-version: '3.12'
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install linters (pinned in requirements-dev.txt)
+        run: pip install $(grep -E '^(ruff|black)==' requirements-dev.txt | cut -d' ' -f1)
+      - name: ruff (pyflakes rules)
+        run: ruff check src tests
+      - name: black
+        run: black --check -l 100 src tests
+      - name: poetry.lock and requirements files match pyproject.toml
+        run: |
+          pipx install "poetry==${POETRY_VERSION}"
+          pipx inject poetry "poetry-plugin-export==${POETRY_PLUGIN_EXPORT_VERSION}"
+          tools/sync-requirements.sh --check
+
+  typecheck:
+    name: Type check (pyright)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
       - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: pyright (modules listed in pyrightconfig.json)
+        run: pyright
+
+  test:
+    name: Tests (PostgreSQL 16)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: anisakys
+          POSTGRES_PASSWORD: anisakys
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U anisakys"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+      - name: Configure the test environment
         run: |
-          python -m venv venv
-          source venv/bin/activate
-          pip install --upgrade pip
-          pip install poetry
-          poetry lock
-          poetry install
-      - name: Format check with Black
+          cp .env.test.example .env.test
+          sed -i 's|^DATABASE_URL=.*|DATABASE_URL=postgresql://anisakys:anisakys@localhost:5432/anisakys_test|' .env.test
+      # tests/conftest.py creates the database and builds the schema with
+      # `alembic upgrade head`; tests marked `network` are excluded.
+      - name: pytest
+        run: >-
+          pytest -m "not network" -o log_cli=false
+          --cov=src --cov-report=term --cov-report=xml
+          --cov-fail-under="${COVERAGE_FLOOR}"
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  security:
+    name: Dependency audit (pip-audit)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Install pip-audit (pinned in requirements-dev.txt)
+        run: pip install $(grep -E '^pip-audit==' requirements-dev.txt | cut -d' ' -f1)
+      # requirements.txt is fully pinned from the lock (transitive deps
+      # included), so it is audited as-is without re-resolving.
+      - name: pip-audit
+        run: pip-audit -r requirements.txt --no-deps --disable-pip --progress-spinner off
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+      - name: Lint Dockerfile (hadolint)
+        run: docker run --rm -i ghcr.io/hadolint/hadolint:v2.15.1 hadolint - < Dockerfile
+      - name: Build image (not pushed)
+        run: docker build --pull -t anisakys:ci .
+      - name: Smoke-test the image
         run: |
-          source venv/bin/activate
-          black --check scripts/
-        continue-on-error: true
-      - name: Lint with Pylint
-        run: |
-          source venv/bin/activate
-          pylint $(git ls-files '*.py')
-        continue-on-error: true
+          docker run --rm anisakys:ci sh -c '
+            set -e
+            test "$(id -u)" = 10001
+            command -v whois
+            command -v dig
+            alembic --help > /dev/null
+            test ! -e /app/.env
+          '

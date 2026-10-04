@@ -67,12 +67,14 @@ class TestPhishingAPIEndpoints:
         """Create test client for API with mocked dependencies."""
         with (
             patch("src.api.phishing_api.GrinderReportClient") as mock_grinder,
-            patch("src.api.phishing_api.MultiAPIValidator") as mock_validator,
+            patch("src.api.phishing_api.MultiAPIValidator"),
         ):
             mock_grinder.return_value.test_connection.return_value = {"status": "success"}
             from src.api.phishing_api import PhishingAPI
 
             mock_db = MagicMock(spec=DatabaseManager)
+            # The health probe pings the database; a mock engine answers it.
+            mock_db.engine = MagicMock()
             mock_detector = MagicMock(spec=EnhancedAbuseEmailDetector)
             api = PhishingAPI(mock_db, mock_detector, api_key="test_api_key")
             api.app.config["TESTING"] = True
@@ -224,6 +226,95 @@ class TestIntegrationsEndpoint:
         vt = next(i for i in data if i["name"] == "virustotal")
         assert vt["configured"] is True
 
+    @staticmethod
+    def _entries(client, headers):
+        resp = client.get("/api/v1/integrations", headers=headers)
+        assert resp.status_code == 200
+        return {i["name"]: i for i in json.loads(resp.data)}
+
+    @staticmethod
+    def _fake_breaker(state, total=0, failed=0):
+        from types import SimpleNamespace
+
+        stats = SimpleNamespace(
+            total_requests=total,
+            failed_requests=failed,
+            last_call_ms=12.5 if total else None,
+            last_state_change=None,
+        )
+        return SimpleNamespace(state=SimpleNamespace(value=state), stats=stats)
+
+    def test_integration_without_a_breaker_is_unknown_not_online(self, integrations_setup):
+        client, _, headers = integrations_setup
+
+        pt = self._entries(client, headers)["phishtank"]
+
+        assert pt["status"] == "unknown"
+        assert pt["circuit_breaker"] is None
+        assert pt["error_rate"] is None
+        assert pt["last_success"] is None
+
+    def test_breaker_without_calls_is_unknown(self, integrations_setup):
+        client, _, headers = integrations_setup
+
+        vt = self._entries(client, headers)["virustotal"]
+
+        assert vt["status"] == "unknown"
+        assert vt["circuit_breaker"] == "closed"
+        assert vt["error_rate"] is None  # was 0.0
+
+    def test_closed_breaker_with_calls_is_online(self, integrations_setup):
+        from src.circuit_breaker import CircuitBreaker
+
+        client, api, headers = integrations_setup
+        cb = CircuitBreaker("VirusTotal")
+        cb.call(lambda: "ok")
+        api.multi_api_validator.virustotal.circuit_breaker = cb
+
+        vt = self._entries(client, headers)["virustotal"]
+
+        assert vt["status"] == "online"
+        assert vt["error_rate"] == 0.0
+        # The breaker never records when a call last succeeded.
+        assert vt["last_success"] is None
+
+    @pytest.mark.parametrize("state, status", [("open", "offline"), ("half_open", "degraded")])
+    def test_open_and_half_open_breakers(self, integrations_setup, state, status):
+        client, api, headers = integrations_setup
+        api.multi_api_validator.virustotal.circuit_breaker = self._fake_breaker(
+            state, total=4, failed=3
+        )
+
+        vt = self._entries(client, headers)["virustotal"]
+
+        assert vt["status"] == status
+        assert vt["circuit_breaker"] == state
+        assert vt["error_rate"] == 0.75
+
+    def test_state_change_time_is_reported_with_utc_offset(self, integrations_setup):
+        import datetime
+
+        client, api, headers = integrations_setup
+        breaker = self._fake_breaker("open", total=5, failed=5)
+        breaker.stats.last_state_change = datetime.datetime(2026, 1, 2, 3, 4, 5)
+        api.multi_api_validator.virustotal.circuit_breaker = breaker
+
+        vt = self._entries(client, headers)["virustotal"]
+
+        expected = datetime.datetime(2026, 1, 2, 3, 4, 5).astimezone(datetime.UTC).isoformat()
+        assert vt["state_changed_at"] == expected
+        assert vt["state_changed_at"].endswith("+00:00")
+
+    def test_smtp_is_unknown_with_no_invented_breaker_or_error_rate(self, integrations_setup):
+        client, _, headers = integrations_setup
+
+        smtp = self._entries(client, headers)["smtp"]
+
+        assert smtp["status"] == "unknown"  # was "online"
+        assert smtp["circuit_breaker"] is None  # was "closed"
+        assert smtp["error_rate"] is None  # was 0.0
+        assert smtp["configured"] is True  # SMTP_HOST is set in .env.test
+
 
 class TestPhishingAPIAuthentication:
     """Tests for API authentication behavior."""
@@ -312,7 +403,8 @@ class TestGraphEndpoint:
     """Tests for GET /api/v1/graph — builds nodes/edges from real sites."""
 
     SAMPLE_ROWS = [
-        # domain, resolved_ip, registrar, threat, avg_conf, cloudflare, first, last, hits, detected_kit_type
+        # domain, resolved_ip, registrar, threat, avg_conf, cloudflare, first, last, hits,
+        # detected_kit_type, kit_confidence, total_rows (window count before LIMIT)
         (
             "brand-alpha.example",
             "203.0.113.10",
@@ -324,6 +416,8 @@ class TestGraphEndpoint:
             "2026-01-05",
             3,
             "evilginx",
+            70,
+            4,
         ),
         (
             "brand-alpha.example",
@@ -336,6 +430,8 @@ class TestGraphEndpoint:
             "2026-01-06",
             1,
             "evilginx",
+            85,
+            4,
         ),
         (
             "acme-bank.example",
@@ -348,8 +444,23 @@ class TestGraphEndpoint:
             "2026-01-07",
             2,
             None,
+            None,
+            4,
         ),
-        ("solo.example", None, None, None, None, False, "2026-01-04", "2026-01-08", 1, None),
+        (
+            "solo.example",
+            None,
+            None,
+            None,
+            None,
+            None,
+            "2026-01-04",
+            "2026-01-08",
+            1,
+            None,
+            None,
+            4,
+        ),
     ]
 
     @pytest.fixture
@@ -403,7 +514,8 @@ class TestGraphEndpoint:
         data = json.loads(client.get("/api/v1/graph", headers=headers).data)
         kit_node = next(n for n in data["nodes"] if n["id"] == "kit:evilginx")
         assert kit_node["type"] == "kit"
-        assert kit_node["severity"] == "critical"
+        # No severity is stored for a kit; it used to be a constant "critical".
+        assert kit_node["severity"] is None
 
         kit_edges = [e for e in data["edges"] if e["target"] == "kit:evilginx"]
         assert len(kit_edges) == 1
@@ -447,6 +559,164 @@ class TestGraphEndpoint:
         assert ids == {"ip:203.0.113.10", "domain:brand-alpha.example"}
         assert len(data["edges"]) == 1
 
+    @pytest.mark.parametrize(
+        "focus",
+        ["registrar:Acme Registrar", "registrar:acme registrar", "REGISTRAR:ACME REGISTRAR"],
+    )
+    def test_graph_focus_registrar_is_case_insensitive(self, graph_setup, focus):
+        """Registrar node IDs keep their case; the focus used to be lower-cased
+        and therefore never matched them."""
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, self.SAMPLE_ROWS)
+
+        resp = client.get("/api/v1/graph", query_string={"focus": focus}, headers=headers)
+
+        ids = {n["id"] for n in json.loads(resp.data)["nodes"]}
+        assert ids == {
+            "registrar:Acme Registrar",
+            "domain:brand-alpha.example",
+            "domain:acme-bank.example",
+        }
+
+    def test_graph_focus_is_applied_in_sql_before_limit(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, self.SAMPLE_ROWS)
+
+        client.get(
+            "/api/v1/graph",
+            query_string={"focus": "registrar:Acme Registrar", "limit": 10},
+            headers=headers,
+        )
+
+        conn = mock_db.engine.begin.return_value.__enter__.return_value
+        statement, params = conn.execute.call_args.args
+        sql = str(statement)
+        assert "LOWER(BTRIM(registrar_name)) = :focus_value" in sql
+        assert sql.index(":focus_value") < sql.index("LIMIT :lim")
+        assert params == {"lim": 10, "focus_value": "acme registrar"}
+
+    @pytest.mark.parametrize("focus", ["registrar:", "asn:13335", "nocolon"])
+    def test_graph_malformed_focus_returns_400(self, graph_setup, focus):
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, self.SAMPLE_ROWS)
+
+        resp = client.get("/api/v1/graph", query_string={"focus": focus}, headers=headers)
+
+        assert resp.status_code == 400
+        assert "focus" in json.loads(resp.data)["error"]
+
+    def test_graph_marks_cdn_ips_as_shared_infrastructure(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        rows = self.SAMPLE_ROWS + [
+            # 104.16.0.0/13 is a Cloudflare edge range; not flagged by the scanner.
+            (
+                "cdn-only.example",
+                "104.16.1.1",
+                None,
+                "low",
+                None,
+                False,
+                "2026-01-05",
+                "2026-01-09",
+                1,
+                None,
+                None,
+                5,
+            ),
+        ]
+        self._rows(mock_db, rows)
+
+        data = json.loads(client.get("/api/v1/graph", headers=headers).data)
+        ip_nodes = {n["id"]: n for n in data["nodes"] if n["type"] == "ip"}
+        assert ip_nodes["ip:104.16.1.1"]["shared_infrastructure"] is True
+        assert ip_nodes["ip:190.2.3.4"]["shared_infrastructure"] is True  # flagged in DB
+        assert ip_nodes["ip:203.0.113.10"]["shared_infrastructure"] is False
+
+    def test_graph_meta_reports_total_rows_and_limit(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, self.SAMPLE_ROWS)
+
+        meta = json.loads(client.get("/api/v1/graph?limit=4", headers=headers).data)["meta"]
+
+        assert meta["total_rows"] == 4
+        assert meta["limit"] == 4
+        assert meta["limited"] is False
+
+    def test_graph_is_limited_when_more_rows_exist_than_returned(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        # Two rows returned, while the window count says 9 matched before LIMIT.
+        rows = [row[:11] + (9,) for row in self.SAMPLE_ROWS[:2]]
+        self._rows(mock_db, rows)
+
+        meta = json.loads(client.get("/api/v1/graph?limit=2", headers=headers).data)["meta"]
+
+        assert meta == {
+            "domains": 1,
+            "ips": 1,
+            "registrars": 1,
+            "kits": 1,
+            "total_rows": 9,
+            "limit": 2,
+            "limited": True,
+        }
+
+    def test_graph_does_not_invent_severities_or_edge_confidence(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, self.SAMPLE_ROWS)
+
+        data = json.loads(client.get("/api/v1/graph", headers=headers).data)
+        nodes = {n["id"]: n for n in data["nodes"]}
+        edges = {(e["source"], e["target"]): e for e in data["edges"]}
+
+        # Unknown threat level: null, not "low".
+        assert nodes["domain:solo.example"]["severity"] is None
+        # No stored severity for IPs (was "medium") or registrars (was a heuristic).
+        assert nodes["ip:203.0.113.10"]["severity"] is None
+        assert nodes["registrar:Acme Registrar"]["severity"] is None
+        # DNS/WHOIS relations have no recorded confidence (was a constant 1.0) ...
+        resolves = edges[("domain:brand-alpha.example", "ip:203.0.113.10")]
+        assert resolves["confidence"] is None
+        # ... the kit relation carries the best stored kit_confidence (85 / 100).
+        assert edges[("domain:brand-alpha.example", "kit:evilginx")]["confidence"] == 0.85
+
+    def test_graph_unknown_hosting_is_omitted_instead_of_direct(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, self.SAMPLE_ROWS)
+
+        nodes = {
+            n["id"]: n
+            for n in json.loads(client.get("/api/v1/graph", headers=headers).data)["nodes"]
+        }
+
+        assert "Hosting" not in nodes["domain:solo.example"]["meta"]
+        assert nodes["domain:brand-alpha.example"]["meta"]["Hosting"] == "Direct"
+        assert nodes["domain:acme-bank.example"]["meta"]["Hosting"] == "Cloudflare"
+
+    def test_graph_timestamps_carry_an_explicit_utc_offset(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, self.SAMPLE_ROWS)
+
+        nodes = {
+            n["id"]: n
+            for n in json.loads(client.get("/api/v1/graph", headers=headers).data)["nodes"]
+        }
+
+        meta = nodes["domain:brand-alpha.example"]["meta"]
+        assert meta["First seen"] == "2026-01-01T00:00:00+00:00"
+        assert meta["Last seen"] == "2026-01-06T00:00:00+00:00"
+
+    def test_graph_focus_meta_counts_only_returned_nodes(self, graph_setup):
+        client, mock_db, headers = graph_setup
+        self._rows(mock_db, self.SAMPLE_ROWS)
+
+        data = json.loads(client.get("/api/v1/graph?focus=ip:203.0.113.10", headers=headers).data)
+
+        # The 2-hop registrar/kit of the domain are dropped, and not counted.
+        assert data["meta"]["domains"] == 1
+        assert data["meta"]["ips"] == 1
+        assert data["meta"]["registrars"] == 0
+        assert data["meta"]["kits"] == 0
+
     def test_graph_empty_when_no_sites(self, graph_setup):
         client, mock_db, headers = graph_setup
         self._rows(mock_db, [])
@@ -455,6 +725,8 @@ class TestGraphEndpoint:
         assert data["nodes"] == []
         assert data["edges"] == []
         assert data["meta"]["domains"] == 0
+        assert data["meta"]["total_rows"] == 0
+        assert data["meta"]["limited"] is False
 
     def test_graph_requires_auth(self, graph_setup):
         client, mock_db, _ = graph_setup

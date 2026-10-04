@@ -5,9 +5,8 @@ Tests for src/models/config.py - DynamicBatchConfig, AttachmentConfig, EngineMod
 import os
 import tempfile
 from argparse import Namespace
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
-import pytest
 
 from src.models.config import DynamicBatchConfig, AttachmentConfig, EngineMode
 

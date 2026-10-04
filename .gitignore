@@ -17,9 +17,6 @@ screenshots
 .ai/
 protocols/
 
-# Poetry
-poetry.lock
-
 # Environment variables
 .env
 .env.test

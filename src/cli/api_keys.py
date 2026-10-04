@@ -4,23 +4,35 @@ CLI tool for managing Anisakys API keys.
 Usage:
     venv/bin/python -m src.cli.api_keys create --name "dashboard" --scopes "read"
     venv/bin/python -m src.cli.api_keys create --name "scanner" --scopes "read,scan" --description "CI scanner"
+    venv/bin/python -m src.cli.api_keys create --name "prometheus" --scopes "metrics"
     venv/bin/python -m src.cli.api_keys list
     venv/bin/python -m src.cli.api_keys revoke --name "dashboard"
     venv/bin/python -m src.cli.api_keys revoke --prefix "ank_a1b2c3"
+
+Scopes are defined in src.auth.SCOPE_DESCRIPTIONS (`create --help` lists them).
+Existing keys keep the scopes they were created with.
 """
 
 import argparse
 import hashlib
 import secrets
 import sys
-from datetime import datetime
 
 from sqlalchemy import create_engine, text
 
+from src.auth import SCOPE_DESCRIPTIONS, VALID_SCOPES
 from src.config import settings
 
-VALID_SCOPES = {"read", "scan", "report", "write", "admin"}
 KEY_PREFIX = "ank_"
+
+
+def _scopes_help() -> str:
+    """Describe every valid scope for ``--help`` output.
+
+    Returns:
+        One ``name: description`` line per scope.
+    """
+    return "\n".join(f"  {name:<12} {desc}" for name, desc in SCOPE_DESCRIPTIONS.items())
 
 
 def _get_engine():
@@ -58,12 +70,10 @@ def cmd_create(args) -> None:
             sys.exit(1)
 
         conn.execute(
-            text(
-                """
+            text("""
                 INSERT INTO api_keys (key_hash, key_prefix, name, scopes, allowed_ips, description)
                 VALUES (:h, :p, :n, :s, :ips, :desc)
-                """
-            ),
+                """),
             {
                 "h": key_hash,
                 "p": key_prefix,
@@ -84,16 +94,12 @@ def cmd_create(args) -> None:
 def cmd_list(args) -> None:
     engine = _get_engine()
     with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                """
+        rows = conn.execute(text("""
                 SELECT key_prefix, name, scopes, allowed_ips, active,
                        created_at, last_used_at, description
                 FROM api_keys
                 ORDER BY created_at DESC
-                """
-            )
-        ).fetchall()
+                """)).fetchall()
 
     if not rows:
         print("No API keys found.")
@@ -150,11 +156,20 @@ def cmd_revoke(args) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Anisakys API key management")
+    parser = argparse.ArgumentParser(
+        description="Anisakys API key management",
+        epilog="Scopes:\n" + _scopes_help(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     # create
-    p_create = sub.add_parser("create", help="Create a new API key")
+    p_create = sub.add_parser(
+        "create",
+        help="Create a new API key",
+        epilog="Scopes:\n" + _scopes_help(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     p_create.add_argument("--name", required=True, help="Human-readable name")
     p_create.add_argument(
         "--scopes",

@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>Follow-up {{ followup_seq }} to phishing report {{ report_id }}</title>
+    <style>
+      body { font-family: Arial, sans-serif; line-height: 1.5; margin: 20px; color: #222; }
+      h2, h3 { color: #2a5d84; }
+      table.facts { border-collapse: collapse; margin: 10px 0; }
+      table.facts th { text-align: left; padding: 4px 12px 4px 0; vertical-align: top; white-space: nowrap; }
+      table.facts td { padding: 4px 0; }
+      code, pre { font-family: Consolas, monospace; }
+      pre { background-color: #f4f4f4; padding: 10px; border: 1px solid #ddd; white-space: pre-wrap; }
+      .note { font-size: 0.9em; color: #555; }
+      .notice { background-color: #fff3cd; border: 1px solid #ffc107; padding: 8px; }
+      .footer { margin-top: 30px; font-size: 0.9em; color: #555; }
+    </style>
+  </head>
+  <body>
+    {% if notified_recipients %}<p class="notice">Copy for information. This follow-up was sent to: {{ notified_recipients | join(', ') }}.</p>{% endif %}
+
+    <h2>Follow-up {{ followup_seq }} to phishing report {{ report_id }}</h2>
+    <p>Dear abuse team,</p>
+    <p>
+      On {{ original_report_time_utc }} we reported the phishing website below (report {{ report_id }}).
+      When we checked again at {{ report_time_utc }} it was still reachable{% if site_status %} (status: {{ site_status }}){% endif %}.
+      Please let us know the status of this case, or take the action requested in the original report.
+    </p>
+
+    {% include "_report_evidence.html" %}
+
+    {% if escalation_contacts %}
+    <p><strong>Escalation:</strong> because the site remains online despite our report and earlier follow-up, this notice is also being shared with: {{ escalation_contacts | join(', ') }}.</p>
+    {% endif %}
+
+    <p>Please quote <strong>{{ report_id }}</strong> in any reply.</p>
+
+    <p class="footer">
+      Sent by {{ organization }} using Anisakys, an open-source phishing detection and takedown tool.
+      Replies to this address are read by our team.
+    </p>
+  </body>
+</html>

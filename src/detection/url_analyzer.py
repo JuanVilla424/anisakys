@@ -3,9 +3,8 @@ URL Analyzer for Phishing Detection
 Implements typosquatting, homograph, and keyword detection
 """
 
-import re
 import logging
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Dict, List, Tuple
 from urllib.parse import urlparse
 import unicodedata
 
@@ -475,7 +474,6 @@ class URLAnalyzer:
             "o": "0",
             "0": "o",
             "l": "1",
-            "1": "l",
             "i": "1",
             "1": "i",
             "e": "3",

@@ -1,5 +1,5 @@
 [Unit]
-Description=Anisakys - Phishing Scanner
+Description=Anisakys - Phishing Scanner (scanner role: no background jobs)
 After=network.target
 
 [Service]
@@ -8,7 +8,7 @@ User=anisakys
 Group=anisakys
 WorkingDirectory=/opt/anisakys
 EnvironmentFile=/opt/anisakys/.env
-ExecStart=/opt/anisakys/venv/bin/python anisakys.py
+ExecStart=/opt/anisakys/venv/bin/python anisakys.py --role scanner
 Restart=always
 RestartSec=10
 

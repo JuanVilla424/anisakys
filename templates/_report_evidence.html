@@ -1,0 +1,35 @@
+<table class="facts" role="presentation">
+  <tr><th>Report ID</th><td>{{ report_id }}</td></tr>
+  <tr><th>Reported URL</th><td><code>{{ defanged_url }}</code></td></tr>
+  {% if brand_name %}<tr><th>Impersonated brand</th><td>{{ brand_name }}</td></tr>{% endif %}
+  {% if first_seen_utc %}<tr><th>First detected</th><td>{{ first_seen_utc }}</td></tr>{% endif %}
+  {% if threat_level %}<tr><th>Threat level</th><td>{{ threat_level | upper }}</td></tr>{% endif %}
+  {% if confidence_score is not none %}<tr><th>Confidence</th><td>{{ confidence_score }}%</td></tr>{% endif %}
+  {% if resolved_ip %}<tr><th>Resolved IP</th><td><code>{{ defanged_ip }}</code></td></tr>{% endif %}
+  {% if asn %}<tr><th>ASN</th><td>{{ asn }}</td></tr>{% endif %}
+  {% if hosting_provider %}<tr><th>Hosting provider</th><td>{{ hosting_provider }}</td></tr>{% endif %}
+  {% if registrar %}<tr><th>Registrar</th><td>{{ registrar }}</td></tr>{% endif %}
+</table>
+<p class="note">The URL is defanged so it cannot be opened by accident: replace <code>hxxp</code> with <code>http</code> and <code>[.]</code> with <code>.</code>, and open it only in an isolated environment.</p>
+
+{% if evidence %}
+<h3>Key evidence</h3>
+<ul>
+  {% for item in evidence %}<li>{{ item }}</li>{% endfor %}
+</ul>
+{% endif %}
+
+<h3>How to reproduce</h3>
+<p>{% if reproduction_note %}{{ reproduction_note }}{% else %}Open the URL above from a clean browser profile. Phishing kits often hide their content from some networks, countries or desktop browsers; if you see a blank or benign page, retry from a residential connection or a mobile user agent before closing the case.{% endif %}</p>
+
+{% if attachments %}
+<h3>Attachments</h3>
+<ul>
+  {% for name in attachments %}<li>{{ name }}</li>{% endfor %}
+</ul>
+{% endif %}
+
+{% if whois_excerpt %}
+<h3>Registration data (excerpt)</h3>
+<pre>{{ whois_excerpt }}</pre>
+{% endif %}

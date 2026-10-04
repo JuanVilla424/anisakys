@@ -208,14 +208,12 @@ class ScreenshotService:
                 page.set_default_timeout(self.timeout * 1000)
 
                 # Remove webdriver detection
-                await page.add_init_script(
-                    """
+                await page.add_init_script("""
                     Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
                     delete window.cdc_adoQpoasnfa76pfcZLmcfl_Array;
                     delete window.cdc_adoQpoasnfa76pfcZLmcfl_Promise;
                     delete window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol;
-                """
-                )
+                """)
 
                 try:
                     await page.goto(url, wait_until="domcontentloaded")
