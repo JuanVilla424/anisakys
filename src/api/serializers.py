@@ -32,8 +32,8 @@ THREAT_LEVEL_RANK: Dict[str, int] = {"clean": 0, "low": 1, "medium": 2, "high": 
 STORED_THREAT_LEVELS: FrozenSet[str] = frozenset(THREAT_LEVEL_RANK) | {"unknown"}
 
 
-def iso_utc(value: Any, *, naive_is_local: bool = False) -> Optional[str]:
-    """Format a timestamp as ISO-8601 with an explicit UTC offset.
+def as_utc(value: Any, *, naive_is_local: bool = False) -> Optional[datetime.datetime]:
+    """Normalise a timestamp to an aware UTC ``datetime``.
 
     Args:
         value: A ``datetime``, a ``date``, an ISO-8601 string (e.g. the text of a
@@ -43,8 +43,8 @@ def iso_utc(value: Any, *, naive_is_local: bool = False) -> Optional[str]:
             (values read from the database, see the module docstring).
 
     Returns:
-        ``YYYY-MM-DDTHH:MM:SS[.ffffff]+00:00``, or None when ``value`` is None
-        or not a recognisable timestamp.
+        The aware UTC value, or None when ``value`` is None or not a
+        recognisable timestamp.
     """
     if value is None:
         return None
@@ -54,14 +54,27 @@ def iso_utc(value: Any, *, naive_is_local: bool = False) -> Optional[str]:
         except ValueError:
             return None
     if isinstance(value, datetime.datetime):
-        if value.tzinfo is None:
-            if naive_is_local:
-                return value.astimezone(datetime.UTC).isoformat()
-            return value.replace(tzinfo=datetime.UTC).isoformat()
-        return value.astimezone(datetime.UTC).isoformat()
+        if value.tzinfo is None and not naive_is_local:
+            return value.replace(tzinfo=datetime.UTC)
+        return value.astimezone(datetime.UTC)
     if isinstance(value, datetime.date):
-        return datetime.datetime.combine(value, datetime.time(), datetime.UTC).isoformat()
+        return datetime.datetime.combine(value, datetime.time(), datetime.UTC)
     return None
+
+
+def iso_utc(value: Any, *, naive_is_local: bool = False) -> Optional[str]:
+    """Format a timestamp as ISO-8601 with an explicit UTC offset.
+
+    Args:
+        value: Anything :func:`as_utc` accepts.
+        naive_is_local: See :func:`as_utc`.
+
+    Returns:
+        ``YYYY-MM-DDTHH:MM:SS[.ffffff]+00:00``, or None when ``value`` is None
+        or not a recognisable timestamp.
+    """
+    normalised = as_utc(value, naive_is_local=naive_is_local)
+    return normalised.isoformat() if normalised is not None else None
 
 
 def threat_level_or_none(value: Any) -> Optional[str]:

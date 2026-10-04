@@ -244,3 +244,55 @@ class TestThreads:
         newest = results["items"][0]
         assert newest["last_detected_at"] == "2026-03-02T08:01:00+00:00"
         assert newest["first_detected_at"] == "2026-03-01T08:01:00+00:00"
+
+
+class TestActivity:
+    def test_missing_timestamps_are_null_and_sorted_last(self, pg_api):
+        client, db_manager, headers = pg_api
+        tag = _tag()
+        site_id = _site(
+            db_manager,
+            f"https://undated-{tag}.example/",
+            first_seen=None,
+            multi_api_threat_level="unknown",
+            priority=None,
+        )
+        _insert(
+            db_manager,
+            "abuse_reports",
+            {
+                "site_url": f"https://undated-{tag}.example/",
+                "recipients": "[]",
+                "report_id": f"ANISAKYS-20260101-{tag.upper()}",
+                "report_date": None,
+                "status": "sent",
+            },
+        )
+        _site(db_manager, f"https://dated-{tag}.example/", first_seen="2026-05-05 05:05:05")
+
+        resp = client.get("/api/v1/activity", query_string={"limit": 100}, headers=headers)
+
+        assert resp.status_code == 200
+        events = resp.get_json()
+        by_id = {e["id"]: e for e in events}
+        undated = by_id[f"det-{site_id}"]
+        assert undated["timestamp"] is None  # was the time of the request
+        assert undated["severity"] is None  # "unknown" verdict; was "medium" fallback
+        assert undated["detail"].endswith("priority: unknown")
+        assert by_id[f"rpt-ANISAKYS-20260101-{tag.upper()}"]["timestamp"] is None
+        stamps = [e["timestamp"] for e in events]
+        dated = [s for s in stamps if s is not None]
+        assert stamps == dated + [None] * (len(stamps) - len(dated))
+        assert dated == sorted(dated, reverse=True)
+        assert all(s.endswith("+00:00") for s in dated)
+
+    def test_limit_one_returns_the_newest_event(self, pg_api):
+        """limit // 2 per source used to fetch nothing at all for limit=1."""
+        client, db_manager, headers = pg_api
+        tag = _tag()
+        site_id = _site(db_manager, f"https://newest-{tag}.example/", first_seen="2030-01-01")
+
+        events = client.get("/api/v1/activity?limit=1", headers=headers).get_json()
+
+        assert [e["id"] for e in events] == [f"det-{site_id}"]
+        assert events[0]["timestamp"] == "2030-01-01T00:00:00+00:00"

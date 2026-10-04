@@ -47,7 +47,13 @@ from src.api.params import (
     int_arg,
     str_arg,
 )
-from src.api.serializers import STORED_THREAT_LEVELS, iso_utc, severest_threat_level
+from src.api.serializers import (
+    STORED_THREAT_LEVELS,
+    as_utc,
+    iso_utc,
+    severest_threat_level,
+    threat_level_or_none,
+)
 from src.intelligence import (
     MultiAPIValidator,
     GrinderReportClient,
@@ -2065,86 +2071,103 @@ class PhishingAPI:
         @self.limiter.limit("20 per minute")
         @require_api_key(scope="read")
         def get_activity():
-            """Recent platform activity: new detections, reports sent, GSB changes, takedowns."""
+            """Recent platform activity: new detections, abuse reports and takedowns.
+
+            Up to ``limit`` events of each kind are read (newest first, NULL
+            timestamps last, ties by id), merged and trimmed to the ``limit``
+            most recent. An event whose timestamp is not recorded keeps
+            ``"timestamp": null`` and sorts after every dated event; it is never
+            given the current time. ``severity`` of a detection is its stored
+            threat level, null when the site has no verdict.
+
+            Returns:
+                JSON list of ``{"id", "type", "url", "timestamp", "detail",
+                "severity"}``.
+            """
             limit = int_arg(request.args, "limit", default=20, maximum=100)
             try:
-
+                params = {"n": limit}
                 with self.db_manager.engine.begin() as conn:
-                    # Recent detections (new sites)
                     detections = conn.execute(
                         text(
                             "SELECT id, url, first_seen, multi_api_threat_level, priority "
-                            "FROM phishing_sites ORDER BY first_seen DESC NULLS LAST LIMIT :n"
+                            "FROM phishing_sites ORDER BY first_seen DESC NULLS LAST, id DESC "
+                            "LIMIT :n"
                         ),
-                        {"n": limit // 2},
+                        params,
                     ).fetchall()
-
-                    # Recent abuse reports sent
                     reports = conn.execute(
                         text(
                             "SELECT report_id, site_url, report_date, status "
-                            "FROM abuse_reports ORDER BY report_date DESC NULLS LAST LIMIT :n"
+                            "FROM abuse_reports ORDER BY report_date DESC NULLS LAST, id DESC "
+                            "LIMIT :n"
                         ),
-                        {"n": limit // 2},
+                        params,
                     ).fetchall()
-
-                    # GSB status changes (taken down sites)
                     takedowns = conn.execute(
                         text(
-                            "SELECT id, url, takedown_date, multi_api_threat_level "
-                            "FROM phishing_sites WHERE site_status = 'down' AND takedown_date IS NOT NULL "
-                            "ORDER BY takedown_date DESC NULLS LAST LIMIT :n"
+                            "SELECT id, url, takedown_date "
+                            "FROM phishing_sites "
+                            "WHERE site_status = 'down' AND takedown_date IS NOT NULL "
+                            "ORDER BY takedown_date DESC, id DESC LIMIT :n"
                         ),
-                        {"n": limit // 4},
+                        params,
                     ).fetchall()
 
-                activity: List[Dict[str, Any]] = []
-
+                events: List[Tuple[Optional[datetime.datetime], Dict[str, Any]]] = []
                 for r in detections:
-                    activity.append(
-                        {
-                            "id": f"det-{r[0]}",
-                            "type": "detection",
-                            "url": r[1],
-                            "timestamp": (
-                                r[2].isoformat() if r[2] else datetime.datetime.now().isoformat()
-                            ),
-                            "detail": f"New phishing site detected — priority: {r[4] or 'medium'}",
-                            "severity": r[3] or r[4] or "medium",
-                        }
+                    events.append(
+                        (
+                            as_utc(r[2]),
+                            {
+                                "id": f"det-{r[0]}",
+                                "type": "detection",
+                                "url": r[1],
+                                "detail": (
+                                    "New phishing site detected — priority: " f"{r[4] or 'unknown'}"
+                                ),
+                                "severity": threat_level_or_none(r[3]),
+                            },
+                        )
                     )
-
                 for r in reports:
-                    activity.append(
-                        {
-                            "id": f"rpt-{r[0]}",
-                            "type": "report",
-                            "url": r[1],
-                            "timestamp": (
-                                r[2].isoformat() if r[2] else datetime.datetime.now().isoformat()
-                            ),
-                            "detail": f"Abuse report {r[0]} — status: {r[3]}",
-                            "severity": "info",
-                        }
+                    events.append(
+                        (
+                            as_utc(r[2]),
+                            {
+                                "id": f"rpt-{r[0]}",
+                                "type": "report",
+                                "url": r[1],
+                                "detail": f"Abuse report {r[0]} — status: {r[3] or 'unknown'}",
+                                "severity": "info",
+                            },
+                        )
                     )
-
                 for r in takedowns:
-                    activity.append(
-                        {
-                            "id": f"td-{r[0]}",
-                            "type": "takedown",
-                            "url": r[1],
-                            "timestamp": (
-                                r[2].isoformat() if r[2] else datetime.datetime.now().isoformat()
-                            ),
-                            "detail": "Site confirmed offline / takedown successful",
-                            "severity": "info",
-                        }
+                    events.append(
+                        (
+                            as_utc(r[2]),
+                            {
+                                "id": f"td-{r[0]}",
+                                "type": "takedown",
+                                "url": r[1],
+                                "detail": "Site confirmed offline / takedown successful",
+                                "severity": "info",
+                            },
+                        )
                     )
 
-                # Sort by timestamp descending and trim to limit
-                activity.sort(key=lambda x: x["timestamp"], reverse=True)
-                return jsonify(activity[:limit]), 200
+                # Newest first, undated events last; ties keep id order (stable
+                # sorts), so the order and what the limit cuts off are deterministic.
+                events.sort(key=lambda e: e[1]["id"])
+                dated: List[Tuple[datetime.datetime, Dict[str, Any]]] = [
+                    (ts, item) for ts, item in events if ts is not None
+                ]
+                dated.sort(key=lambda e: e[0], reverse=True)
+                activity = [{**item, "timestamp": ts.isoformat()} for ts, item in dated]
+                activity += [{**item, "timestamp": None} for ts, item in events if ts is None]
+                activity = activity[:limit]
+                return jsonify(activity), 200
 
             except Exception as e:
                 return internal_error("get_activity", e)

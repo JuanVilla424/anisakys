@@ -6,6 +6,7 @@ import pytest
 
 from src.api.serializers import (
     STORED_THREAT_LEVELS,
+    as_utc,
     iso_utc,
     severest_threat_level,
     threat_level_or_none,
@@ -45,6 +46,24 @@ class TestIsoUtc:
     @pytest.mark.parametrize("value", [None, "", "not a date", 12345])
     def test_unknown_values_are_none(self, value):
         assert iso_utc(value) is None
+
+
+class TestAsUtc:
+    def test_mixed_naive_and_aware_values_become_comparable(self):
+        naive = as_utc(datetime.datetime(2026, 1, 1, 12, 0))
+        aware = as_utc(
+            datetime.datetime(
+                2026, 1, 1, 8, 0, tzinfo=datetime.timezone(datetime.timedelta(hours=-5))
+            )
+        )
+
+        assert naive is not None and aware is not None
+        assert aware > naive
+        assert naive.tzinfo is datetime.UTC
+
+    def test_unknown_values_are_none(self):
+        assert as_utc(None) is None
+        assert as_utc("garbage") is None
 
 
 class TestThreatLevels:
