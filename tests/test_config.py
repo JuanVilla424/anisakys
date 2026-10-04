@@ -65,15 +65,18 @@ class TestSecretSettings:
 
         from src.config import Settings
 
-        cfg = Settings(
-            KEYWORDS="k",
-            DOMAINS="d",
-            SMTP_HOST="h",
-            SMTP_PORT=25,
-            ABUSE_EMAIL_SENDER="s@example.invalid",
-            ABUSE_EMAIL_SUBJECT="x",
-            VIRUSTOTAL_API_KEY="vt-secret-value",
-            SMTP_PASS="smtp-secret-value",
+        # Plain strings, exactly as they arrive from the environment / .env file.
+        cfg = Settings.model_validate(
+            {
+                "KEYWORDS": "k",
+                "DOMAINS": "d",
+                "SMTP_HOST": "h",
+                "SMTP_PORT": 25,
+                "ABUSE_EMAIL_SENDER": "s@example.invalid",
+                "ABUSE_EMAIL_SUBJECT": "x",
+                "VIRUSTOTAL_API_KEY": "vt-secret-value",
+                "SMTP_PASS": "smtp-secret-value",
+            }
         )
 
         assert isinstance(cfg.VIRUSTOTAL_API_KEY, SecretStr)
