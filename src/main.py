@@ -53,6 +53,7 @@ import sys
 from src.utils.serialization import serialize_for_json  # noqa: F401 (re-exported)
 from src.config import (
     settings,
+    secret_value,
     CLOUDFLARE_IP_RANGES,
     ALLOWED_HEAD_STATUS,
     DEFAULT_USER_AGENT,
@@ -319,11 +320,12 @@ class Engine:
         """
         image_scheduler = None
         email_scheduler = None
-        if getattr(settings, "SERPAPI_KEY", None):
+        serpapi_key = secret_value(getattr(settings, "SERPAPI_KEY", None))
+        if serpapi_key:
             from src.monitoring.scheduler import ImageTrackingScheduler
 
             image_scheduler = ImageTrackingScheduler(
-                serpapi_key=settings.SERPAPI_KEY,
+                serpapi_key=serpapi_key,
                 s3_bucket=getattr(settings, "S3_DATA_BUCKET", None),
                 aws_region=getattr(settings, "AWS_REGION", None),
             )
@@ -336,7 +338,7 @@ class Engine:
                 service_account_file=settings.GOOGLE_SERVICE_ACCOUNT_FILE,
                 domain=settings.GOOGLE_WORKSPACE_DOMAIN,
                 block_threshold=getattr(settings, "EMAIL_BLOCK_THRESHOLD", 5),
-                vt_api_key=getattr(settings, "VIRUSTOTAL_API_KEY", None),
+                vt_api_key=secret_value(getattr(settings, "VIRUSTOTAL_API_KEY", None)),
                 poll_interval_minutes=getattr(settings, "EMAIL_POLL_INTERVAL_MINUTES", 15),
                 admin_email=getattr(settings, "GOOGLE_ADMIN_EMAIL", None),
             )
@@ -630,8 +632,8 @@ class Engine:
 
         if getattr(self.args, "start_api", False):
             # Start API server
-            api_key = getattr(self.args, "api_key", None) or getattr(
-                settings, "ANISAKYS_API_KEY", None
+            api_key = getattr(self.args, "api_key", None) or secret_value(
+                getattr(settings, "ANISAKYS_API_KEY", None)
             )
             if not api_key:
                 logger.error("❌ API key is required when starting API server")

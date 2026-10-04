@@ -15,11 +15,11 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from src.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, CircuitBreakerOpenError
-from src.config import settings
+from src.config import settings, secret_value
 from src.logger import logger
 from src.observability.structured_logger import log_api_call, log_error
 
-URLSCAN_API_KEY = getattr(settings, "URLSCAN_API_KEY", None)
+URLSCAN_API_KEY = secret_value(getattr(settings, "URLSCAN_API_KEY", None))
 URLSCAN_SEARCH_URL = "https://urlscan.io/api/v1/search/"
 
 

@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import requests
 
-from src.config import settings
+from src.config import secret_value, settings
 from src.observability.structured_logger import log_with_context
 from src.utils.redaction import redact_secrets
 
@@ -41,7 +41,7 @@ WEB_RISK_SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
 REQUEST_TIMEOUT_SECONDS = 30
 
 # Kept for backward compatibility with importers of the old module constant.
-WEB_RISK_API_KEY = getattr(settings, "GOOGLE_WEB_RISK_API_KEY", None)
+WEB_RISK_API_KEY = secret_value(getattr(settings, "GOOGLE_WEB_RISK_API_KEY", None))
 
 METHOD_WEB_RISK = "web_risk_api"
 METHOD_CRX_UNVERIFIED = "crx_report_unverified"
@@ -112,8 +112,8 @@ class GSBReporter:
             session_factory: Builds an authorized HTTP session from credentials.
                 Defaults to ``google.auth.transport.requests.AuthorizedSession``.
         """
-        self.web_risk_api_key = web_risk_api_key or getattr(
-            settings, "GOOGLE_WEB_RISK_API_KEY", None
+        self.web_risk_api_key = web_risk_api_key or secret_value(
+            getattr(settings, "GOOGLE_WEB_RISK_API_KEY", None)
         )
         self.project = project or getattr(settings, "GOOGLE_CLOUD_PROJECT", None)
         self.credentials_file = credentials_file or getattr(

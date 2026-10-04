@@ -19,13 +19,13 @@ import requests
 from requests.auth import HTTPBasicAuth
 
 from src.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, CircuitBreakerOpenError
-from src.config import settings
+from src.config import settings, secret_value
 from src.logger import logger
 from src.observability.structured_logger import log_api_call, log_error
 
 TAXII_BASE_URL = getattr(settings, "TAXII_BASE_URL", None)
 TAXII_USERNAME = getattr(settings, "TAXII_USERNAME", None)
-TAXII_PASSWORD = getattr(settings, "TAXII_PASSWORD", None)
+TAXII_PASSWORD = secret_value(getattr(settings, "TAXII_PASSWORD", None))
 TAXII_MEDIA_TYPE = "application/taxii+json;version=2.1"
 
 

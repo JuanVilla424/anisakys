@@ -21,14 +21,14 @@ from typing import Any, Dict, Optional, Tuple
 import requests
 
 from src.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, CircuitBreakerOpenError
-from src.config import settings
+from src.config import settings, secret_value
 from src.intelligence.provider_common import ERROR, LISTED, NO_DATA, NOT_LISTED, TokenBucket
 from src.logger import logger
 from src.observability.structured_logger import log_api_call, log_with_context
 from src.utils.redaction import redact_secrets
 
 # API Configuration
-VIRUSTOTAL_API_KEY = getattr(settings, "VIRUSTOTAL_API_KEY", None)
+VIRUSTOTAL_API_KEY = secret_value(getattr(settings, "VIRUSTOTAL_API_KEY", None))
 
 # An analysis older than this is not trusted as a "clean" verdict.
 STALE_AFTER_DAYS = 7

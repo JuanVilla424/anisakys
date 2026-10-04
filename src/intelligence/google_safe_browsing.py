@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
-from src.config import settings
+from src.config import secret_value, settings
 from src.intelligence.provider_common import ERROR, LISTED, NO_DATA, NOT_LISTED
 from src.utils.redaction import redact_secrets
 
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 # API Configuration
 GOOGLE_SAFE_BROWSING_API_URL = "https://safebrowsing.googleapis.com/v4/threatMatches:find"
-GOOGLE_API_KEY = settings.GOOGLE_SAFE_BROWSING_API_KEY or ""
+GOOGLE_API_KEY = secret_value(settings.GOOGLE_SAFE_BROWSING_API_KEY) or ""
 REQUEST_TIMEOUT_SECONDS = 10
 
 # threatMatches:find accepts at most 500 threat entries per request.

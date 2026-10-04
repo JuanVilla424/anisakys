@@ -16,14 +16,14 @@ from typing import Any, Dict, Optional
 import requests
 
 from src.circuit_breaker import CircuitBreaker, CircuitBreakerConfig, CircuitBreakerOpenError
-from src.config import settings
+from src.config import settings, secret_value
 from src.intelligence.provider_common import ERROR, LISTED, NO_DATA, NOT_LISTED
 from src.logger import logger
 from src.observability.structured_logger import log_api_call, log_with_context
 from src.utils.redaction import redact_secrets
 
 # API Configuration
-PHISHTANK_API_KEY = getattr(settings, "PHISHTANK_API_KEY", None)
+PHISHTANK_API_KEY = secret_value(getattr(settings, "PHISHTANK_API_KEY", None))
 PHISHTANK_USER_AGENT = "phishtank/anisakys-phishing-detector"
 
 _submission_warning_logged = False

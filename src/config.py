@@ -3,7 +3,7 @@ import tempfile
 from pathlib import Path
 from pydantic_settings import BaseSettings
 from pydantic import Field, SecretStr
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 from src.dns import cloudflare_ranges
 
@@ -48,39 +48,39 @@ class Settings(BaseSettings):
     AUTO_REPORT_THREAT_LEVELS: Optional[str] = None
     MANUAL_REVIEW_THRESHOLD_CONFIDENCE: int = Field(default=70, ge=0, le=100)
     AUTO_ANALYSIS_DELAY_SECONDS: int = Field(default=30, ge=0)
-    VIRUSTOTAL_API_KEY: Optional[str] = None
-    URLVOID_API_KEY: Optional[str] = None
-    PHISHTANK_API_KEY: Optional[str] = None
-    GOOGLE_SAFE_BROWSING_API_KEY: Optional[str] = None
+    VIRUSTOTAL_API_KEY: Optional[SecretStr] = None
+    URLVOID_API_KEY: Optional[SecretStr] = None
+    PHISHTANK_API_KEY: Optional[SecretStr] = None
+    GOOGLE_SAFE_BROWSING_API_KEY: Optional[SecretStr] = None
     GRINDER0X_API_URL: Optional[str] = None
-    GRINDER0X_API_KEY: Optional[str] = None
+    GRINDER0X_API_KEY: Optional[SecretStr] = None
     MAX_ATTACHMENT_SIZE_MB: Optional[int] = None
     MAX_EMAIL_SIZE_MB: Optional[int] = None
     SCREENSHOTS_DIR: str = Field(default_factory=_default_screenshots_dir)
     SMTP_USER: Optional[str] = None
-    SMTP_PASS: Optional[str] = None
+    SMTP_PASS: Optional[SecretStr] = None
     SMTP_RATE_LIMIT_PER_HOUR: int = 100
     DEFAULT_ATTACHMENT: Optional[str] = None
     LOG_LEVEL: Optional[str] = None
-    ANISAKYS_API_KEY: Optional[str] = None
+    ANISAKYS_API_KEY: Optional[SecretStr] = None
     ANISAKYS_API_PORT: Optional[int] = 8091
     RATELIMIT_STORAGE_URL: Optional[str] = None
     CT_MONITOR_ENABLED: Optional[bool] = False
     CT_MONITOR_MIN_SCORE: Optional[int] = None
     CT_STREAM_URL: Optional[str] = None
     FEED_INTEL_ENABLED: Optional[bool] = False
-    URLHAUS_API_KEY: Optional[str] = None
-    URLSCAN_API_KEY: Optional[str] = None
+    URLHAUS_API_KEY: Optional[SecretStr] = None
+    URLSCAN_API_KEY: Optional[SecretStr] = None
     TAXII_BASE_URL: Optional[str] = None
     TAXII_USERNAME: Optional[str] = None
-    TAXII_PASSWORD: Optional[str] = None
+    TAXII_PASSWORD: Optional[SecretStr] = None
     TAXII_DEFAULT_API_ROOT: Optional[str] = None
     TAXII_DEFAULT_COLLECTION_ID: Optional[str] = None
     MISP_URL: Optional[str] = None
-    MISP_API_KEY: Optional[str] = None
+    MISP_API_KEY: Optional[SecretStr] = None
     SCREENSHOT_WORKER_SOCKET: Optional[str] = None
     TEST_EMAIL: Optional[str] = None
-    SERPAPI_KEY: Optional[str] = None
+    SERPAPI_KEY: Optional[SecretStr] = None
     S3_DATA_BUCKET: Optional[str] = None
     AWS_REGION: Optional[str] = None
     GOOGLE_SERVICE_ACCOUNT_FILE: Optional[str] = None
@@ -142,7 +142,7 @@ class Settings(BaseSettings):
     FOLLOWUP_CHECK_INTERVAL_SECONDS: int = Field(default=3600, ge=60)
 
     # --- v2 phase 0: detection & threat-intel providers ------------------------
-    GOOGLE_WEB_RISK_API_KEY: Optional[str] = None
+    GOOGLE_WEB_RISK_API_KEY: Optional[SecretStr] = None
     # Web Risk Submission API (projects/{project}/uris:submit). It needs OAuth
     # credentials for an allowlisted project; an API key alone cannot submit.
     # Disabled unless GOOGLE_CLOUD_PROJECT is set. Credentials come from the
@@ -199,6 +199,27 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def secret_value(value: Optional[Union[SecretStr, str]]) -> Optional[str]:
+    """Unwrap a credential setting at the point of use.
+
+    Credentials are declared as :class:`pydantic.SecretStr` so they never appear
+    in ``repr(settings)``, validation errors or logs. Call this only where the
+    raw value is handed to a client library.
+
+    Args:
+        value: A ``SecretStr`` from settings, a plain string (tests, explicit
+            overrides) or ``None``.
+
+    Returns:
+        The secret as a string, or ``None`` when unset or empty.
+    """
+    if value is None:
+        return None
+    raw = value.get_secret_value() if isinstance(value, SecretStr) else value
+    return raw or None
+
 
 # Fallback bind path for the sandboxed screenshot worker's own unix socket,
 # used only when starting it without an explicit SCREENSHOT_WORKER_SOCKET

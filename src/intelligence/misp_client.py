@@ -11,11 +11,11 @@ mocked tests only (see tests/intelligence/test_misp_client.py).
 
 from typing import Any, Dict, List, Optional
 
-from src.config import settings
+from src.config import settings, secret_value
 from src.logger import logger
 
 MISP_URL = getattr(settings, "MISP_URL", None)
-MISP_API_KEY = getattr(settings, "MISP_API_KEY", None)
+MISP_API_KEY = secret_value(getattr(settings, "MISP_API_KEY", None))
 
 # indicator "type" (matching GraphView.vue's own domain/ip node-type
 # distinction, see anisakys-frontend GraphView.vue buildStixBundle()) ->

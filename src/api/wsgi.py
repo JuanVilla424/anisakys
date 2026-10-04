@@ -31,7 +31,7 @@ from flask import Flask
 # suite import them in the same order).
 import src.detection.analyzer  # noqa: F401
 from src.api.phishing_api import PhishingAPI
-from src.config import settings
+from src.config import settings, secret_value
 from src.database import DatabaseManager, ensure_schema_is_current
 from src.logger import logger
 from src.reporting.email_detector import EnhancedAbuseEmailDetector
@@ -53,7 +53,7 @@ def create_app(api_key: Optional[str] = None) -> Flask:
         RuntimeError: If the database schema is not at the latest Alembic
             revision.
     """
-    master_key = api_key or settings.ANISAKYS_API_KEY
+    master_key = api_key or secret_value(settings.ANISAKYS_API_KEY)
     if not master_key:
         logger.warning("⚠️  ANISAKYS_API_KEY is not set: only database API keys are accepted")
 

@@ -22,9 +22,8 @@ from dataclasses import dataclass
 from email.message import EmailMessage
 from typing import Dict, Optional, Sequence, Tuple
 
-from pydantic import SecretStr
 
-from src.config import settings
+from src.config import settings, secret_value
 from src.logger import logger
 
 
@@ -52,10 +51,7 @@ class SmtpConfig:
             The configuration (``SMTP_PASS`` may be a plain string or a
             ``SecretStr``).
         """
-        raw_password = getattr(settings, "SMTP_PASS", None)
-        password = (
-            raw_password.get_secret_value() if isinstance(raw_password, SecretStr) else raw_password
-        )
+        password = secret_value(getattr(settings, "SMTP_PASS", None))
         return cls(
             host=settings.SMTP_HOST,
             port=int(settings.SMTP_PORT),
