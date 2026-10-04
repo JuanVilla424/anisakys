@@ -1236,7 +1236,10 @@ class PhishingAPI:
                 # the same open transaction: the connection is closed (and every
                 # execute on it fails) as soon as the ``with`` block exits.
                 try:
-                    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    now_utc = datetime.datetime.now(datetime.timezone.utc)
+                    timestamp = now_utc.strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    )  # legacy naive column: UTC (D16)
 
                     with self.db_manager.engine.begin() as conn:
                         # Check if URL exists
@@ -1507,7 +1510,7 @@ class PhishingAPI:
 
                     # Recent activity (last 7 days)
                     seven_days_ago = (
-                        datetime.datetime.now() - datetime.timedelta(days=7)
+                        datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=7)
                     ).strftime("%Y-%m-%d %H:%M:%S")
                     stats["recent_reports"] = conn.execute(
                         text("SELECT COUNT(*) FROM phishing_sites WHERE first_seen >= :date"),
@@ -1998,10 +2001,10 @@ class PhishingAPI:
                         "site_url": r[1],
                         "recipients": parse_recipients(r[2]),
                         "status": r[3],
-                        "report_date": r[4].isoformat() if r[4] else None,
-                        "sla_deadline": r[5].isoformat() if r[5] else None,
+                        "report_date": iso_utc(r[4]),
+                        "sla_deadline": iso_utc(r[5]),
                         "response_received": bool(r[6]),
-                        "response_date": r[7].isoformat() if r[7] else None,
+                        "response_date": iso_utc(r[7]),
                         "icann_compliant": bool(r[8]),
                         "screenshot_included": bool(r[9]),
                         "follow_up_required": bool(r[10]),
@@ -2196,7 +2199,7 @@ class PhishingAPI:
                     status_rows = conn.execute(
                         text("SELECT status, COUNT(*) FROM abuse_reports GROUP BY status")
                     ).fetchall()
-                    status_breakdown = {r[0]: r[1] for r in status_rows}
+                    status_breakdown = {(r[0] or "unknown"): r[1] for r in status_rows}
 
                     responded = (
                         conn.execute(
@@ -2387,7 +2390,7 @@ class PhishingAPI:
                     (ts, item) for ts, item in events if ts is not None
                 ]
                 dated.sort(key=lambda e: e[0], reverse=True)
-                activity = [{**item, "timestamp": ts.isoformat()} for ts, item in dated]
+                activity = [{**item, "timestamp": iso_utc(ts)} for ts, item in dated]
                 activity += [{**item, "timestamp": None} for ts, item in events if ts is None]
                 activity = activity[:limit]
                 return jsonify(activity), 200
@@ -3889,7 +3892,7 @@ class PhishingAPI:
                         "entry": r[0],
                         "type": r[1],
                         "alert_id": r[2],
-                        "created_at": r[3].isoformat() if r[3] else None,
+                        "created_at": iso_utc(r[3]),
                     }
                     for r in rows
                 ]
@@ -3915,7 +3918,7 @@ class PhishingAPI:
                 jsonify(
                     {
                         "status": status,
-                        "timestamp": datetime.datetime.now().isoformat(),
+                        "timestamp": iso_utc(datetime.datetime.now(datetime.timezone.utc)),
                         "version": APP_VERSION,
                         "grinder_integration": GRINDER_INTEGRATION_ENABLED,
                         "api_authentication": bool(self.api_key),
@@ -4080,7 +4083,8 @@ class PhishingAPI:
         Raises:
             SQLAlchemyError: If the submission cannot be stored.
         """
-        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+        timestamp = now_utc.strftime("%Y-%m-%d %H:%M:%S")  # legacy naive column: UTC (D16)
         with self.db_manager.engine.begin() as conn:
             existing = conn.execute(
                 text("SELECT id FROM phishing_sites WHERE url = :url"), {"url": url}
@@ -4124,7 +4128,7 @@ class PhishingAPI:
             "status": "pending_approval",
             "message": "Submission recorded; an analyst must approve it before it is reported",
             "url": url,
-            "timestamp": timestamp,
+            "timestamp": iso_utc(now_utc),
             "approval_required": True,
             "report_sent": False,
         }
@@ -4157,7 +4161,8 @@ class PhishingAPI:
             ``done`` (the site was already reported).
         """
         try:
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            now_utc = datetime.datetime.now(datetime.timezone.utc)
+            timestamp = now_utc.strftime("%Y-%m-%d %H:%M:%S")  # legacy naive column: UTC (D16)
             stored_emails: List[str] = []
 
             # Short transaction with no network I/O inside
@@ -4238,7 +4243,7 @@ class PhishingAPI:
                 "status": "created" if is_new else "updated",
                 "message": f"{'Created new' if is_new else 'Updated existing'} report for {url}",
                 "url": url,
-                "timestamp": timestamp,
+                "timestamp": iso_utc(now_utc),
                 "abuse_emails_count": len(stored_emails),
                 "report_sent": False,
                 "report_recipients": [],
