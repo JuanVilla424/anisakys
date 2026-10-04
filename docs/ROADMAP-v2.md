@@ -134,6 +134,15 @@ covered by a test. Numbers in this file are measured, never estimated.
 - [ ] Docker runtime layer with `whois`/`dnsutils` could not be built in the development sandbox (egress to the Debian mirror blocked); CI builds the full image.
 - [ ] URLVoid/APIVoid, PhishTank and Web Risk Submission clients follow vendor documentation but could not be exercised live from the sandbox; verify with real credentials before enabling.
 - [ ] Coverage of `src/detection` (57 %) and `src/monitoring` (62 %) below the 75 % target → phases 2–3.
+- [ ] API gaps reported by the console (phase 0 round 2) → phase 1 (labels/approval) and phase 6 (API):
+  - approval queue for `/report` submissions waiting on `report_send` (list + approve/reject);
+  - audit trail of closed analyst tasks (outcome, note, who, when) and filters by report/channel;
+  - `/campaigns` search and status filters; paging of the threats inside a cluster; `/sites` registrar filter;
+  - `/sites` filter for `source IS NULL`; stable IOC ids;
+  - say which limit tripped (per thread or per key) in `/threads/<id>/results` 429 bodies;
+  - rename the misleading `/stats` fields (`total_reports` counts sites, `recent_reports` counts sites first seen in 7 days) behind `/api/v2`;
+  - integration health shared across gunicorn workers (today it reflects the answering worker only);
+  - STIX bundles: omit `confidence` when the caller gives none instead of defaulting to 50.
 
 ## Phase 1 — Measure before improving
 - [ ] `labels` table + API + UI actions (confirm / dismiss / report).
