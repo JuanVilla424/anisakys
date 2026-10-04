@@ -27,9 +27,14 @@ from src.eval.metrics import (
     tpr_at_fpr,
 )
 from src.eval.predictors import SCORE_DEFINITION, Prediction, level_at_least
+from src.eval.targets import MET, MISSED, check_detection
 
 OPERATING_POINTS: Dict[str, str] = {"level>=high": "high", "level>=medium": "medium"}
 PRIMARY_OPERATING_POINT = "level>=high"
+# The detection side of the auto-report rule (src/detection/analyzer.py): threat level
+# high/critical with confidence >= AUTO_REPORT_THRESHOLD_CONFIDENCE.
+AUTO_REPORT_POINT = "auto_report"
+DEFAULT_AUTO_REPORT_MIN_CONFIDENCE = 85
 FPR_TARGETS = (1e-3, 1e-4)
 K_VALUES = (10, 50, 100)
 ANSWERED = frozenset({"listed", "not_listed"})
@@ -50,7 +55,10 @@ def defang(url: str) -> str:
 
 
 def verdict_block(
-    samples: Sequence[Sample], predictions: Sequence[Prediction], heuristic: bool = False
+    samples: Sequence[Sample],
+    predictions: Sequence[Prediction],
+    heuristic: bool = False,
+    auto_report_min_confidence: int = DEFAULT_AUTO_REPORT_MIN_CONFIDENCE,
 ) -> Dict[str, Any]:
     """All quality metrics of one verdict (deployed or heuristic).
 
@@ -58,6 +66,8 @@ def verdict_block(
         samples: Scored samples.
         predictions: Their predictions, in the same order.
         heuristic: Use the heuristic level/score instead of the deployed one.
+        auto_report_min_confidence: Confidence the ``auto_report`` operating point
+            requires on top of level high.
 
     Returns:
         Coverage, level distribution, operating points (with per-brand and
@@ -75,10 +85,21 @@ def verdict_block(
         bucket = distribution[sample.label]
         bucket[level] = bucket.get(level, 0) + 1
 
+    decisions: Dict[str, List[int]] = {
+        name: [1 if level_at_least(level, minimum) else 0 for level in levels]
+        for name, minimum in OPERATING_POINTS.items()
+    }
+    decisions[AUTO_REPORT_POINT] = [
+        (
+            1
+            if level_at_least(level, "high") and (p.confidence or 0) >= auto_report_min_confidence
+            else 0
+        )
+        for level, p in zip(levels, predictions)
+    ]
     operating_points: Dict[str, Any] = {}
     misclassified: Dict[str, List[Dict[str, Any]]] = {}
-    for name, minimum in OPERATING_POINTS.items():
-        y_pred = [1 if level_at_least(level, minimum) else 0 for level in levels]
+    for name, y_pred in decisions.items():
         counts = confusion(y_true, y_pred)
         operating_points[name] = {
             **counts,
@@ -197,6 +218,8 @@ def build_report(
     costs: Optional[Dict[str, float]] = None,
     code_commit: Optional[str] = None,
     notes: Optional[List[str]] = None,
+    targets: Optional[Dict[str, Any]] = None,
+    auto_report_min_confidence: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Assemble the metrics document of one evaluation run.
 
@@ -209,10 +232,18 @@ def build_report(
         costs: USD per call by stage.
         code_commit: Commit of the evaluated code.
         notes: Context worth keeping with the numbers (e.g. providers configured).
+        targets: Quality targets (``eval/targets.json``), checked on the deployed verdict.
+        auto_report_min_confidence: Confidence of the ``auto_report`` operating point
+            (default: ``AUTO_REPORT_THRESHOLD_CONFIDENCE`` from the settings).
 
     Returns:
         The report document.
+
+    Raises:
+        ValueError: When the targets name an unknown operating point.
     """
+    if auto_report_min_confidence is None:
+        auto_report_min_confidence = _configured_auto_report_confidence()
     by_id = {p.sample_id: p for p in predictions}
     pairs: List[Tuple[Sample, Prediction]] = [(s, by_id[s.id]) for s in samples if s.id in by_id]
     scored = [s for s, _ in pairs]
@@ -236,12 +267,46 @@ def build_report(
             "not_scored": len(samples) - len(scored),
             "errors": sum(1 for p in scored_predictions if p.error),
         },
-        "verdicts": {"deployed": verdict_block(scored, scored_predictions)},
+        "auto_report_rule": {
+            "min_level": "high",
+            "min_confidence": auto_report_min_confidence,
+            "source": "src/detection/analyzer.py (threat level high/critical with confidence "
+            ">= AUTO_REPORT_THRESHOLD_CONFIDENCE)",
+        },
+        "verdicts": {
+            "deployed": verdict_block(
+                scored, scored_predictions, auto_report_min_confidence=auto_report_min_confidence
+            )
+        },
     }
     if predictor != "stored":
-        report["verdicts"]["heuristic"] = verdict_block(scored, scored_predictions, heuristic=True)
+        report["verdicts"]["heuristic"] = verdict_block(
+            scored,
+            scored_predictions,
+            heuristic=True,
+            auto_report_min_confidence=auto_report_min_confidence,
+        )
         report["stages"] = stage_block(scored_predictions, costs)
+    if targets:
+        point = targets.get("operating_point", AUTO_REPORT_POINT)
+        operating_points = report["verdicts"]["deployed"]["operating_points"]
+        if point not in operating_points:
+            raise ValueError(f"targets: unknown operating point {point!r}")
+        report["targets"] = check_detection(operating_points[point], targets)
     return report
+
+
+def _configured_auto_report_confidence() -> int:
+    """The deployed auto-report confidence threshold.
+
+    Returns:
+        ``AUTO_REPORT_THRESHOLD_CONFIDENCE``, else the settings default (85).
+    """
+    from src.config import settings
+
+    return int(
+        getattr(settings, "AUTO_REPORT_THRESHOLD_CONFIDENCE", DEFAULT_AUTO_REPORT_MIN_CONFIDENCE)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +337,7 @@ svg text{fill:var(--muted);font-size:11px}.axis{stroke:var(--line)}
 .diag{stroke:var(--muted);stroke-dasharray:4 4}.dot{fill:var(--a)}
 code,.url{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;word-break:break-all}
 ul.notes{color:var(--muted);padding-left:18px}
+td.ok{color:var(--ok);font-weight:600}td.bad{color:var(--bad);font-weight:600}td.na{color:var(--muted)}
 """
 
 
@@ -426,6 +492,75 @@ def _group_table(groups: Dict[str, Dict[str, Any]], title: str, limit: int = 20)
     return f"<table><thead><tr>{header}</tr></thead><tbody>{''.join(rows)}</tbody></table>"
 
 
+_STATUS_LABELS = {MET: ("ok", "met"), MISSED: ("bad", "missed")}
+
+
+def _target_cells(name: str, result: Dict[str, Any]) -> str:
+    """Render one target result as table cells.
+
+    Args:
+        name: Metric name.
+        result: Output of :mod:`src.eval.targets` for one metric.
+
+    Returns:
+        ``<td>`` cells: metric, target, value, status.
+    """
+    target = result["target"]
+    bound = (
+        f"≥ {_fmt(target['min'])}"
+        if "min" in target
+        else f"≤ {_fmt(target.get('max', target.get('max_median')))}"
+    )
+    css, label = _STATUS_LABELS.get(result["status"], ("na", "not resolvable"))
+    reason = f" ({html.escape(result['reason'])})" if result.get("reason") else ""
+    return (
+        f"<td>{html.escape(name)}</td><td>{bound}</td><td class='n'>{_fmt(result['value'])}</td>"
+        f"<td class='{css}'>{label}{reason}</td>"
+    )
+
+
+def _targets_html(targets: Dict[str, Any]) -> str:
+    """Render the quality targets: overall, then the brands with enough data.
+
+    Args:
+        targets: ``report["targets"]``.
+
+    Returns:
+        An HTML fragment.
+    """
+    header = "<tr><th>Metric</th><th>Target</th><th>Value</th><th>Status</th></tr>"
+    overall = "".join(
+        f"<tr>{_target_cells(metric, result)}</tr>"
+        for metric, result in targets["overall"]["targets"].items()
+    )
+    brand_rows = "".join(
+        f"<tr><td>{html.escape(brand)}</td>"
+        + "".join(
+            f"<td class='{_STATUS_LABELS.get(r['status'], ('na', ''))[0]}'>"
+            f"{_fmt(r['value'])}</td>"
+            for r in result["targets"].values()
+        )
+        + "</tr>"
+        for brand, result in targets["brands"].items()
+        if any(r["status"] != "not_resolvable" for r in result["targets"].values())
+    )
+    summary = targets["summary"]
+    parts = [
+        f"<h2>Targets — deployed, {html.escape(str(targets['operating_point']))}</h2>",
+        f"<table><thead>{header}</thead><tbody>{overall}</tbody></table>",
+        f"<p class='meta'>{summary['brands']} brand(s) in the split; "
+        f"{summary['brands_fully_resolvable']} with enough data for every target; "
+        f"{summary['brands_meeting_all']} meeting all of them.</p>",
+    ]
+    if brand_rows:
+        metrics = "".join(f"<th>{html.escape(m)}</th>" for m in targets["overall"]["targets"])
+        parts.append(
+            f"<table><thead><tr><th>Brand</th>{metrics}</tr></thead><tbody>{brand_rows}</tbody>"
+            "</table>"
+        )
+    return "".join(parts)
+
+
 def _errors_table(entries: List[Dict[str, Any]]) -> str:
     """Render misclassified samples with defanged URLs.
 
@@ -510,6 +645,8 @@ def render_html(report: Dict[str, Any]) -> str:
             + "".join(f"<li>{html.escape(n)}</li>" for n in report["notes"])
             + "</ul>"
         )
+    if report.get("targets"):
+        sections.append(_targets_html(report["targets"]))
     sections += [
         "<h2>Operating points — deployed verdict</h2>",
         _ops_table(deployed),

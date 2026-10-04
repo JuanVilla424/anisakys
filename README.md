@@ -614,6 +614,11 @@ Dataset manifests (with the samples' SHA-256) and the seed lists in `eval/seeds/
 versioned; samples built from third-party feeds and the run reports stay local. The same
 operational metrics are served at `GET /api/v1/metrics/operational` and on `/metrics`.
 
+Every `run` and `ops` checks the agreed targets in `eval/targets.json` (precision, recall and
+FPR at the auto-report operating point, overall and per brand; pipeline medians) and reports
+each one as met, missed or not resolvable. `run --reuse-cache <file>` re-scores the scans of an
+earlier run without new network calls.
+
 ## 🤝 Contributing
 
 **Contributions are welcome! To contribute to this repository, please follow these steps**:

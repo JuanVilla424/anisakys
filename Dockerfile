@@ -4,9 +4,10 @@
 #   docker build -t anisakys .
 #
 # The default command (entrypoint-backend.sh) applies the database migrations
-# and starts the API. Other roles (scanner, threads) can reuse the image with
-# a different command; they do not serve HTTP, so disable the healthcheck for
-# them (compose: `healthcheck: {disable: true}`).
+# and starts the API. Other roles reuse the image with a different command and
+# serve no HTTP: the scheduler role writes a heartbeat file, so override the
+# healthcheck with `python -m src.runtime.health`; for the scanner role disable
+# it (compose: `healthcheck: {disable: true}`).
 #
 # Runtime configuration comes from the environment (compose `env_file`):
 # .env files are excluded from the build context and never baked in.
@@ -16,6 +17,8 @@
 ARG PYTHON_IMAGE=python:3.12.15-slim-trixie
 
 # --- dependencies ------------------------------------------------------------
+# The tag is pinned in PYTHON_IMAGE above; hadolint cannot resolve build args.
+# hadolint ignore=DL3006
 FROM ${PYTHON_IMAGE} AS builder
 
 ENV PIP_NO_CACHE_DIR=1 \
@@ -29,6 +32,7 @@ COPY requirements.txt /tmp/requirements.txt
 RUN pip install -r /tmp/requirements.txt
 
 # --- runtime -----------------------------------------------------------------
+# hadolint ignore=DL3006
 FROM ${PYTHON_IMAGE} AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

@@ -178,6 +178,40 @@ class TestCommandLine:
         summary = json.loads(_last_json(capsys))
         assert summary["counts"]["samples"] >= 3
         assert Path(summary["report_html"]).exists()
+        # eval/targets.json is checked by default (tiny dataset: nothing is resolvable).
+        assert summary["targets"]["operating_point"] == "auto_report"
+        assert summary["targets"]["precision"] == "not_resolvable"
+
+        # --reuse-cache scores with the earlier scans and never scans again.
+        (cache_file,) = (tmp_path / "cache").glob("heuristic-cli-v1-*.jsonl")
+        with patch("src.eval.predictors.offline_validator", side_effect=AssertionError("scan")):
+            code = main(
+                [
+                    "run",
+                    str(dataset),
+                    "--predictor",
+                    "heuristic",
+                    "--split",
+                    "all",
+                    "--out",
+                    str(tmp_path / "runs"),
+                    "--reuse-cache",
+                    str(cache_file),
+                    "--targets",
+                    "",
+                    "--auto-report-confidence",
+                    "70",
+                ]
+            )
+        assert code == 0
+        reused = json.loads(_last_json(capsys))
+        assert reused["counts"] == summary["counts"]
+        assert reused["targets"] is None
+        report = json.loads(Path(reused["report_json"]).read_text())
+        assert report["notes"][0].startswith(f"Predictions reused from {cache_file.name}")
+        assert report["auto_report_rule"]["min_confidence"] == 70
+        # The canned validator answers "high" with confidence 75: flagged at 70.
+        assert report["verdicts"]["deployed"]["operating_points"]["auto_report"]["tp"] >= 1
 
     def test_verify_fails_on_a_tampered_dataset(self, tmp_path):
         seeds = _seeds(tmp_path / "seeds")

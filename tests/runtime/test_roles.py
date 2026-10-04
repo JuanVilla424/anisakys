@@ -19,7 +19,7 @@ from sqlalchemy import create_engine
 
 from src import main  # noqa: F401 - seeds sys.modules to break the import cycle
 from src import shutdown
-from src.runtime import roles
+from src.runtime import health, roles
 from src.runtime.roles import (
     ProcessRole,
     RoleConfigurationError,
@@ -36,10 +36,13 @@ UNITS = Path(__file__).resolve().parents[2] / "bin"
 
 
 @pytest.fixture(autouse=True)
-def _fresh_runtime():
+def _fresh_runtime(monkeypatch):
+    """Reset the runtime; the heartbeat is a mock (tests/runtime/test_health.py covers it)."""
     roles._reset_for_tests()
     shutdown.reset_shutdown()
-    yield
+    heartbeat = MagicMock(return_value=None)
+    monkeypatch.setattr(health, "start_heartbeat", heartbeat)
+    yield heartbeat
     shutdown.request_shutdown()
     shutdown.join_registered_threads(timeout_per_thread=5)
     shutdown.reset_shutdown()
@@ -103,6 +106,34 @@ class TestStartingJobs:
         jobs.report_manager.report_phishing_sites.assert_not_called()
         jobs.takedown_monitor.run.assert_not_called()
         jobs.email_scheduler.start.assert_not_called()
+
+    def test_the_leader_reports_its_job_loops_to_the_heartbeat(self, _fresh_runtime):
+        jobs = _jobs()
+        with (
+            patch("src.monitoring.start_gsb_rescan_job"),
+            patch("src.intelligence.AUTO_ANALYSIS_ENABLED", False),
+        ):
+            start_scheduler_jobs(jobs, ProcessRole.SCHEDULER, leader_lock=False)
+
+        _fresh_runtime.assert_called_once()
+        engine, state, threads = _fresh_runtime.call_args.args
+        assert engine is jobs.db_manager.engine
+        assert state() == "leader"
+        assert sorted(threads()) == [
+            "abuse-reporting",
+            "followup-worker",
+            "outbox-dispatch",
+            "takedown-monitor",
+        ]
+
+    def test_a_standby_reports_standby_without_job_loops(self, _fresh_runtime):
+        jobs = _jobs()
+        with patch.object(SchedulerLeaderLock, "try_acquire", return_value=False):
+            names = start_scheduler_jobs(jobs, ProcessRole.SCHEDULER, leader_lock=True)
+
+        assert names == ["scheduler-standby"]
+        _, state, threads = _fresh_runtime.call_args.args
+        assert state() == "standby" and threads() == {}
 
     def test_scheduler_role_starts_every_job_once(self, monkeypatch):
         monkeypatch.setattr("src.config.settings.CT_MONITOR_ENABLED", True)

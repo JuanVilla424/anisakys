@@ -1,0 +1,18 @@
+{
+  "_comment": "Quality targets agreed for v2 (docs/ROADMAP.md, D25). `python -m src.eval run` checks the detection targets on the deployed verdict at the auto-report operating point, overall and for every brand in the split; `python -m src.eval ops` checks the pipeline medians. A target with too little data is `not_resolvable`, never met. brand_overrides replaces thresholds for one brand, e.g. {\"bancolombia\": {\"recall\": {\"min\": 0.9}}}.",
+  "operating_point": "auto_report",
+  "detection": {
+    "precision": { "min": 0.95 },
+    "recall": { "min": 0.8 },
+    "fpr": { "max": 0.001 }
+  },
+  "min_positives": 10,
+  "min_predicted_positives": 10,
+  "brand_overrides": {},
+  "pipeline_hours": {
+    "time_to_detect": { "max_median": 24 },
+    "time_to_report": { "max_median": 1 },
+    "time_to_first_outage": { "max_median": 48 }
+  },
+  "min_pipeline_events": 5
+}

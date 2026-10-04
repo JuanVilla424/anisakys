@@ -54,6 +54,8 @@ a test. Numbers in this file are measured, never estimated.
 | D22 | Evaluation datasets version their manifest (sources, parameters, counts, SHA-256) and the seed lists in git; samples built from third-party feeds and run reports stay local. URLs are sanitised (no query, fragment, credentials or port; e-mail/token path segments redacted). | Feed licences forbid redistribution; no personal data in samples. |
 | D23 | The baseline score is ordinal (threat level first, confidence second) and explicitly uncalibrated; `unknown` is an abstention reported as coverage, never as clean; TPR at a fixed FPR is flagged as not resolvable with fewer than 1/FPR negatives. | Honest numbers until phase 2 calibrates the fusion on `labels`. |
 | D24 | Operational metrics (TTD/TTR/TTT, queues, outcomes) are computed from the shared database and exposed through `GET /api/v1/metrics/operational` and a Prometheus collector on `/metrics` (60 s cache). | Every process writes to the database; one measurement point instead of per-process exporters. |
+| D25 | Quality targets live in `eval/targets.json` and every `python -m src.eval run`/`ops` checks them: detection targets on the deployed verdict at the `auto_report` operating point (level high/critical with confidence ≥ `AUTO_REPORT_THRESHOLD_CONFIDENCE`, the detection side of `src/detection/analyzer.py`), overall and for every brand; pipeline targets on medians. A target is `met`, `missed` or `not_resolvable`: precision needs ≥ 10 flagged samples, recall ≥ 10 positives, an FPR ceiling ≥ 1/FPR negatives, a median ≥ 5 events. | Phase 2 has a fixed, versioned bar; too little data never reads as success. |
+| D26 | The scheduler (no HTTP) writes a heartbeat file every 30 s; it is healthy while the heartbeat is < 120 s old, the database answers and it is either the leader with its four job loops alive or a hot standby (`python -m src.runtime.health`, compose healthcheck). | A dead job loop or a lost database shows as `unhealthy` instead of a false alarm on an HTTP probe. |
 
 ## Risks
 
@@ -141,7 +143,7 @@ a test. Numbers in this file are measured, never estimated.
 - [ ] URLVoid/APIVoid, PhishTank and Web Risk Submission clients follow vendor documentation but could not be exercised live from the sandbox; verify with real credentials before enabling.
 - [ ] Coverage of `src/detection` (57 %) and `src/monitoring` (62 %) below the 75 % target → phases 2–3.
 - [ ] API gaps reported by the console (phase 0 round 2) → phase 1 (labels/approval) and phase 6 (API):
-  - approval queue for `/report` submissions waiting on `report_send` (list + approve/reject);
+  - ~~approval queue for `/report` submissions waiting on `report_send` (list + approve/reject)~~ — done in phase 1;
   - audit trail of closed analyst tasks (outcome, note, who, when) and filters by report/channel;
   - `/campaigns` search and status filters; paging of the threats inside a cluster; `/sites` registrar filter;
   - `/sites` filter for `source IS NULL`; stable IOC ids;
@@ -157,7 +159,8 @@ a test. Numbers in this file are measured, never estimated.
 - [x] `python -m src.eval run` (`live`, `heuristic`, `stored` predictors): precision/recall/F1 per operating point, PR-AUC, TPR at FPR 1e-3/1e-4 (flagged when not resolvable), precision@k, per-brand and per-category confusion, reliability diagram + ECE, coverage, latency and cost per stage (`eval/costs.json`); JSON + self-contained HTML (D23).
 - [x] Operational metrics from the shared database: `GET /api/v1/metrics/operational`, Prometheus gauges on `/metrics`, `python -m src.eval ops` — TTD, TTR, TTT (first/last outage, re-emergence), lead over public feeds, queue depth, deliveries, responses, screenshot and abuse-contact success (D24).
 - [x] Baseline published here.
-- [ ] Per-brand targets agreed with the owner (proposal below).
+- [x] Per-brand targets agreed with the owner (2026-10-04): `eval/targets.json`, checked by every run (D25); status at the baseline below.
+- [x] Scheduler healthcheck from a heartbeat instead of the inherited HTTP probe (D26).
 
 ### Phase 1 baseline (measured 2026-10-04)
 
@@ -189,7 +192,21 @@ Findings for phase 2:
 
 Operational baseline (demo database, `python -m src.eval ops`): in the last 30 days 1 site was first seen and no report, delivery or outage happened, so TTD/TTR/TTT have n = 0 and every queue is empty. Over 365 days (18 sites) TTD has a median of 18 h (n = 16), but p90 is 135 443 h because old or compromised domains count from their registration date (TTD needs a second definition for those in phase 3); no abuse report has been sent from this database, so TTR, TTT, response and enrichment rates stay unmeasured until the pipeline runs on real traffic.
 
-Proposed targets (owner to confirm, per protected brand): precision ≥ 0.95 and FPR ≤ 0.1 % at the auto-report operating point; recall ≥ 0.80 for live phishing of protected brands; median TTD ≤ 24 h, TTR ≤ 1 h, TTT ≤ 48 h.
+### Targets (agreed 2026-10-04, `eval/targets.json`, D25)
+
+At the `auto_report` operating point, overall and for every brand: precision ≥ 0.95, recall ≥ 0.80, FPR ≤ 0.1 %. Pipeline medians: TTD ≤ 24 h, TTR ≤ 1 h, time to first outage ≤ 48 h. Thresholds can be raised per brand with `brand_overrides`.
+
+Status at the baseline (the same scans, `python -m src.eval run eval/datasets/baseline/2026-10-04 --predictor live --reuse-cache eval/cache/live-baseline-2026-10-04-2f189a1-dirty.jsonl --auto-report-confidence 85`; 85 is the product default, the demo `.env` uses 99):
+
+| Target | Value | Status |
+|---|---|---|
+| Precision ≥ 0.95 | 1.0 (1 flagged) | not resolvable: needs ≥ 10 flagged |
+| Recall ≥ 0.80 | 0.037 (1 of 27) | missed |
+| FPR ≤ 0.1 % | 0 (0 of 111) | not resolvable: needs ≥ 1 000 negatives |
+| Per brand | 1 brand in the test split (`paypal`, 1 sample) | not resolvable |
+| TTD / TTR / first outage medians | n = 0 in the demo's last 30 days | not resolvable |
+
+At the auto-report point the deployed detector flags 1 of 27 live phishing sites and none of the benign ones: the two `critical` false positives stay below confidence 85. Phase 2 must lift recall without losing that precision, and the dataset needs ≥ 1 000 negatives and ≥ 10 positives per protected brand for the FPR and per-brand targets to become measurable.
 
 ## Phase 2 — Detection core v2
 - [ ] Brand catalogue in the database (aliases, official eTLD+1, apps, reference logos/favicons with pHash + mmh3, reference logins, Spanish/English lure vocabulary, priority, takedown preferences), managed from the UI.
@@ -240,3 +257,4 @@ Proposed targets (owner to confirm, per protected brand): precision ≥ 0.95 and
 - 2026-10-03 — Created with the audit baseline; phase 0 foundation done.
 - 2026-10-04 — Phase 0 completed: workstreams A, A2, B, C, D (backend) and F (frontend) merged; results table and decisions D11–D19 added.
 - 2026-10-04 — Phase 1 completed: labels, approval queue, evaluation harness and operational metrics; measured baseline and decisions D20–D24 added; file renamed from `ROADMAP-v2.md`.
+- 2026-10-04 — Targets agreed and measured at the baseline (D25); scheduler heartbeat healthcheck (D26). Ready for phase 2.

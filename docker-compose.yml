@@ -64,6 +64,14 @@ services:
     command: ["python", "anisakys.py", "--role", "scheduler"]
     depends_on:
       backend: { condition: service_healthy }
+    # No HTTP here: the process writes a heartbeat every 30 s (database answers,
+    # leader with live job loops or hot standby) and this reads it.
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.runtime.health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
     networks: [anisakys-net]
 
   frontend:

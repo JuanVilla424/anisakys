@@ -30,7 +30,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from sqlalchemy import text
 from sqlalchemy.engine import Connection, Engine
@@ -45,6 +45,9 @@ STANDBY_RETRY_SECONDS = 60
 _start_guard = threading.Lock()
 _jobs_started = False
 _held_leader_lock: Optional["SchedulerLeaderLock"] = None
+# Job loop threads by name and the scheduler state, as the heartbeat reports them.
+_job_threads: Dict[str, threading.Thread] = {}
+_scheduler_state = "standby"
 
 
 class ProcessRole(str, Enum):
@@ -243,10 +246,27 @@ def start_scheduler_jobs(
                 "Another scheduler holds the leader lock; this process stands by and "
                 f"retries every {STANDBY_RETRY_SECONDS}s"
             )
-            _spawn("scheduler-standby", lambda: _standby(lock, jobs))
+            _spawn("scheduler-standby", lambda: _standby(lock, jobs), job_loop=False)
+            _start_heartbeat(jobs)
             return ["scheduler-standby"]
         _held_leader_lock = lock
-    return _launch(jobs)
+    names = _launch(jobs)
+    _start_heartbeat(jobs)
+    return names
+
+
+def _start_heartbeat(jobs: SchedulerJobs) -> None:
+    """Start the liveness heartbeat that the scheduler's container healthcheck reads.
+
+    Args:
+        jobs: The job objects (their database engine is checked on every beat).
+    """
+    # Imported here: `python -m src.runtime.health` must not find it already imported.
+    from src.runtime import health
+
+    health.start_heartbeat(
+        jobs.db_manager.engine, lambda: _scheduler_state, lambda: dict(_job_threads)
+    )
 
 
 def _standby(lock: SchedulerLeaderLock, jobs: SchedulerJobs) -> None:
@@ -270,16 +290,19 @@ def _standby(lock: SchedulerLeaderLock, jobs: SchedulerJobs) -> None:
             return
 
 
-def _spawn(name: str, target: Callable[[], None]) -> None:
+def _spawn(name: str, target: Callable[[], None], job_loop: bool = True) -> None:
     """Start and register a daemon thread.
 
     Args:
         name: Thread name.
         target: Thread body.
+        job_loop: Report the thread's liveness in the heartbeat.
     """
     thread = threading.Thread(target=target, name=name, daemon=True)
     thread.start()
     register_thread(thread)
+    if job_loop:
+        _job_threads[name] = thread
 
 
 def _launch(jobs: SchedulerJobs) -> List[str]:
@@ -291,9 +314,11 @@ def _launch(jobs: SchedulerJobs) -> List[str]:
     Returns:
         Names of the jobs started.
     """
+    global _scheduler_state
     from src.intelligence import AUTO_ANALYSIS_ENABLED
     from src.monitoring import start_gsb_rescan_job
 
+    _scheduler_state = "leader"
     names = ["takedown-monitor", "abuse-reporting", "outbox-dispatch", "followup-worker"]
     _spawn("takedown-monitor", jobs.takedown_monitor.run)
     _spawn("abuse-reporting", jobs.report_manager.report_phishing_sites)
@@ -333,9 +358,14 @@ def _launch(jobs: SchedulerJobs) -> List[str]:
 
 def _reset_for_tests() -> None:
     """Forget that jobs were started and drop any held leader lock (tests only)."""
-    global _jobs_started, _held_leader_lock
+    global _jobs_started, _held_leader_lock, _scheduler_state
     with _start_guard:
         _jobs_started = False
     if _held_leader_lock is not None:
         _held_leader_lock.release()
         _held_leader_lock = None
+    _job_threads.clear()
+    _scheduler_state = "standby"
+    from src.runtime import health
+
+    health._reset_for_tests()

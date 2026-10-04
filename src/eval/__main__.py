@@ -26,6 +26,23 @@ DEFAULT_SEEDS = ROOT / "eval" / "seeds"
 DEFAULT_CACHE = ROOT / "eval" / "cache"
 DEFAULT_RUNS = ROOT / "eval" / "runs"
 DEFAULT_COSTS = ROOT / "eval" / "costs.json"
+DEFAULT_TARGETS = ROOT / "eval" / "targets.json"
+
+
+def _targets(path: Optional[str]) -> Optional[Dict[str, Any]]:
+    """Load the quality targets, if the file exists.
+
+    Args:
+        path: Targets file (``""`` disables the check).
+
+    Returns:
+        The targets document, or ``None``.
+    """
+    from src.eval.targets import load_targets
+
+    if not path or not Path(path).exists():
+        return None
+    return load_targets(Path(path))
 
 
 def code_commit() -> Optional[str]:
@@ -215,7 +232,12 @@ def cmd_run(args: argparse.Namespace) -> int:
         Path(args.cache)
         / f"{args.predictor}-{manifest['name']}-{manifest['version']}-{commit or 'nogit'}.jsonl"
     )
+    max_scans = args.max_scans
     notes: List[str] = []
+    if args.reuse_cache:
+        # Score with the scans of an earlier run: the same predictions, no new network calls.
+        cache, max_scans = Path(args.reuse_cache), 0
+        notes.append(f"Predictions reused from {cache.name} (no new scans in this run)")
     predictor: Any
     if args.predictor == "stored":
         predictor = StoredPredictor(_engine())
@@ -226,7 +248,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             factory,
             cache_path=cache,
             workers=args.workers,
-            max_scans=args.max_scans,
+            max_scans=max_scans,
             progress=_progress,
         )
         configured = providers_configured()
@@ -255,6 +277,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         costs=costs.get("usd_per_call", costs),
         code_commit=commit,
         notes=notes,
+        targets=_targets(args.targets),
+        auto_report_min_confidence=args.auto_report_confidence,
     )
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out = (
@@ -276,6 +300,18 @@ def cmd_run(args: argparse.Namespace) -> int:
                 },
                 "pr_auc": deployed["pr_auc"],
                 "heuristic_pr_auc": report["verdicts"].get("heuristic", {}).get("pr_auc"),
+                "targets": (
+                    {
+                        "operating_point": report["targets"]["operating_point"],
+                        **{
+                            metric: result["status"]
+                            for metric, result in report["targets"]["overall"]["targets"].items()
+                        },
+                        "brands": report["targets"]["summary"],
+                    }
+                    if report.get("targets")
+                    else None
+                ),
             },
             indent=2,
         )
@@ -292,9 +328,13 @@ def cmd_ops(args: argparse.Namespace) -> int:
     Returns:
         Exit code.
     """
+    from src.eval.targets import check_pipeline
     from src.observability.operational import compute_operational_metrics
 
     metrics = compute_operational_metrics(_engine(), args.days)
+    targets = _targets(args.targets)
+    if targets and targets.get("pipeline_hours"):
+        metrics["targets"] = check_pipeline(metrics["durations_hours"], targets)
     text = json.dumps(metrics, indent=2, default=str)
     if args.out:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
@@ -348,12 +388,27 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--max-scans", type=int, default=None, help="new scans this run (resumable)")
     run.add_argument("--workers", type=int, default=4)
     run.add_argument("--cache", default=str(DEFAULT_CACHE))
+    run.add_argument(
+        "--reuse-cache",
+        default=None,
+        metavar="FILE",
+        help="score with the cached scans of an earlier run (no new scans)",
+    )
     run.add_argument("--costs", default=str(DEFAULT_COSTS))
+    run.add_argument("--targets", default=str(DEFAULT_TARGETS), help='"" disables the check')
+    run.add_argument(
+        "--auto-report-confidence",
+        type=int,
+        default=None,
+        help="confidence of the auto_report operating point (default: "
+        "AUTO_REPORT_THRESHOLD_CONFIDENCE)",
+    )
     run.add_argument("--out", default=str(DEFAULT_RUNS))
     run.set_defaults(handler=cmd_run)
 
     ops = commands.add_parser("ops", help="operational metrics of the configured database")
     ops.add_argument("--days", type=int, default=30)
+    ops.add_argument("--targets", default=str(DEFAULT_TARGETS), help='"" disables the check')
     ops.add_argument("--out", default=None, help="also write the JSON to this file")
     ops.set_defaults(handler=cmd_ops)
     return parser
