@@ -9,18 +9,21 @@ covered by a test. Numbers in this file are measured, never estimated.
 - Frontend: `JuanVilla424/anisakys-frontend` (base `dev`)
 - Audit baseline: backend `c1640eb`, frontend `a49b3bf` (2026-10-03)
 
-## Baseline (measured 2026-10-03, before phase 0)
+## Baseline and phase 0 results (measured)
 
-| Metric | Value | How |
-|---|---|---|
-| Backend tests | 576 passed, 1 failed (env-dependent) | `pytest -k "not real"` against PostgreSQL 16 |
-| Backend coverage | 47.9 % overall (detection 46.2 %, intelligence 41.2 %, reporting 45.0 %, api 45.1 %) | `pytest --cov=src` |
-| Undefined names (F821) | 31 | `ruff check --select F821` |
-| Other pyflakes findings | 324 | `ruff check --select F` |
-| Files not black-formatted | 31 | `black --check -l 100 src tests` |
-| CI running tests | No | `.github/workflows/*.yml` |
-| Frontend test files | 6 | `src/**/__tests__` |
-| Detection quality (precision/recall/TTD/TTT) | **Not measurable** — no labels, no harness | Phase 1 |
+| Metric | Before phase 0 (2026-10-03) | After phase 0 (2026-10-04) | How |
+|---|---|---|---|
+| Backend tests | 576 passed, 1 failed (env-dependent) | 1332 passed, 0 failed | `pytest` (network tests excluded by marker) against PostgreSQL 16 |
+| Backend coverage | 47.9 % (detection 46.2 %, intelligence 41.2 %, reporting 45.0 %, api 45.1 %) | 69.6 % (detection 57.0 %, intelligence 67.4 %, reporting 82.2 %, api 74.9 %) | `pytest --cov=src`; CI floor raised to 69 % |
+| Undefined names (F821) | 31 | 0 (blocking gate) | `ruff check src tests` |
+| Other pyflakes findings | 324 | 0 (blocking gate) | `ruff check src tests` |
+| Type checking | none | pyright clean on the modules listed in `pyrightconfig.json` (blocking) | `pyright` |
+| Runtime DDL statements in `src/` | dozens, incl. `DROP TABLE abuse_reports CASCADE` | 0 (regression test) | `tests/regressions/test_no_runtime_ddl.py` |
+| CI running tests | No | Yes: lint, types, tests + coverage floor, pip-audit, Docker build | `.github/workflows/ci.yml` |
+| Known vulnerable dependencies | requests 2.32.5 (PYSEC-2026-2275) | none | `pip-audit` |
+| Frontend tests | 9 files / 45 tests | 52 files / 367 tests + Playwright smoke under the production CSP | `npm run test`, `npm run test:e2e` |
+| Fabricated data in the console | Takedowns view, latency sparklines, demo pivots, fake thread controls/queue/progress, invented identity | none | frontend phase 0 review |
+| Detection quality (precision/recall/TTD/TTT) | **Not measurable** — no labels, no harness | still not measurable | Phase 1 |
 
 ## Decisions
 
@@ -36,6 +39,15 @@ covered by a test. Numbers in this file are measured, never estimated.
 | D8 | STIX bundles are generated server-side from phase 0 (`POST /api/v2/stix/bundle`, STIX 2.1, TLP 2.0, AMBER by default); the frontend only sends indicators and downloads. | Moves trust-sensitive formatting to the server as required. |
 | D9 | All DDL moves into Alembic in phase 0 (migration `003`), runtime `CREATE/ALTER/DROP` is removed and tests build their schema with `alembic upgrade head`. | Needed to create `redirect_chains`, kill the `DROP TABLE` self-healing and stop schema drift. |
 | D10 | Providers that cannot be verified from the build sandbox (URLVoid endpoint) are disabled by default with a startup warning until verified with a real key. | Avoids presenting a dead integration as a clean verdict. |
+| D11 | Process roles `all`/`api`/`scanner`/`scheduler`; only `scheduler` (or `all` in single-process dev) runs background jobs, guarded by a PostgreSQL advisory leader lock; gunicorn workers never run jobs. | One sender of abuse e-mail; docker-compose gains a `scheduler` service. |
+| D12 | Abuse e-mail goes through a transactional outbox claimed with `SKIP LOCKED`; at-most `max_attempts` copies per (report, recipient, follow-up) with a stable `Message-ID`; the SMTP cap is a database ledger shared by every process. | Exactly-once over SMTP is impossible; this bounds duplicates and makes them identifiable. |
+| D13 | Each primary recipient gets its own message without `Cc`; the CC list gets one copy; escalation level 2/3 CCs only from the 2nd/3rd follow-up. | No address receives N duplicates; first contact never escalates. |
+| D14 | Form-only providers (Cloudflare, GoDaddy, …) produce analyst tasks (`/api/v1/reports/tasks`) instead of e-mails. | The providers ignore e-mail; tasks make the manual step visible. |
+| D15 | API scopes gain `report_send` (send without approval), `email_admin` (mailbox monitors, allowlisted) and `metrics`; `/report` without `report_send` waits for analyst approval. | Least privilege for external integrations. |
+| D16 | API timestamps are ISO-8601 with `+00:00`; naive legacy DB values are treated as UTC (DB and app run in UTC); unknown values are `null`, never `now()`/0/"medium". | Honest console; full TIMESTAMPTZ normalisation is phase 6. |
+| D17 | A site is `down` only after N consecutive failing probe cycles from every client profile, with a canary check against local outages; WAF challenges and parking never count as down; only the takedown monitor writes `down`. | Removes false takedowns that auto-closed reports. |
+| D18 | Origin-IP candidates behind Cloudflare (from `origin.`/`direct.` sub-domains) are informational only. | The phishing operator controls that DNS and could aim complaints at a third party. |
+| D19 | `pyproject.toml` (PEP 621) is the single dependency source, locked with Poetry; `requirements*.txt` are generated (`tools/sync-requirements.sh`, checked in CI). | Reproducible installs for Docker/systemd. |
 
 ## Risks
 
@@ -56,61 +68,72 @@ covered by a test. Numbers in this file are measured, never estimated.
 - [x] Pyflakes clean; ruff `F` configured as the gate; `.env.test.example`.
 
 ### A — API, auth & HTTP serving
-- [ ] `PATCH /api/v1/reports` int/bool `CASE` (always 500).
-- [ ] `/multi-scan` uses `conn` outside its `with`.
-- [ ] `/reports` parses JSON recipients by splitting on commas.
-- [ ] `/graph` `focus` case bug; `/campaigns` N+1.
-- [ ] Validated query parameters (no unhandled `int()`), no `str(e)` in responses.
-- [ ] gunicorn entrypoint, no debug server, bind `127.0.0.1` by default, configurable `ProxyFix`.
-- [ ] Rate limiting backed by Redis (shared across workers).
-- [ ] `/metrics` requires a token; `/health` pings the DB via `observability/health.py`.
-- [ ] Scopes `email_admin` and `report_send`; mailbox allowlist; API-submitted URLs require analyst approval before any report; SSRF check on `/report`.
-- [ ] `POST /api/v2/stix/bundle` (STIX 2.1, TLP 2.0, AMBER default); stop exporting registrar abuse mailboxes as IOCs.
+- [x] `PATCH /api/v1/reports` int/bool `CASE` (always 500).
+- [x] `/multi-scan` uses `conn` outside its `with`.
+- [x] `/reports` parses JSON recipients by splitting on commas.
+- [x] `/graph` `focus` case bug; `/campaigns` N+1.
+- [x] Validated query parameters (no unhandled `int()`), no `str(e)` in responses.
+- [x] gunicorn entrypoint, no debug server, bind `127.0.0.1` by default, configurable `ProxyFix`.
+- [x] Rate limiting backed by Redis (shared across workers).
+- [x] `/metrics` requires a token; `/health` pings the DB via `observability/health.py`.
+- [x] Scopes `email_admin` and `report_send`; mailbox allowlist; API-submitted URLs require analyst approval before any report; SSRF check on `/report`.
+- [x] `POST /api/v2/stix/bundle` (STIX 2.1, TLP 2.0, AMBER default); stop exporting registrar abuse mailboxes as IOCs.
 
 ### B — Reporting pipeline & process roles
-- [ ] One scheduler process role runs reporting/takedown/follow-up/GSB jobs; API and scanner roles do not.
-- [ ] Workers claim rows with `SELECT … FOR UPDATE SKIP LOCKED`; short per-site transactions.
-- [ ] SMTP rate limiter shared through the database.
-- [ ] Outbox `pending → sending → sent/failed`, idempotent per (site, recipient, report).
-- [ ] Stable report IDs carried in the subject; escalation CCs only when escalating.
-- [ ] Template: no hard-coded FCM/SIMIT text, no "manual report" wording, renders threat level and confidence, `text/plain` part, defanged URL.
-- [ ] Screenshot actually reaches GSB submission (reads the file, base64-encodes it).
-- [ ] Form-only providers produce an analyst task instead of an e-mail.
-- [ ] Recipient safety: never registrant/WHOIS-wide addresses, never MX hosts as hosting; recipient domain validated against the site's eTLD+1 (public suffix list).
-- [ ] Follow-up advances `sla_deadline`.
+- [x] One scheduler process role runs reporting/takedown/follow-up/GSB jobs; API and scanner roles do not.
+- [x] Workers claim rows with `SELECT … FOR UPDATE SKIP LOCKED`; short per-site transactions.
+- [x] SMTP rate limiter shared through the database.
+- [x] Outbox `pending → sending → sent/failed`, idempotent per (site, recipient, report).
+- [x] Stable report IDs carried in the subject; escalation CCs only when escalating.
+- [x] Template: no hard-coded FCM/SIMIT text, no "manual report" wording, renders threat level and confidence, `text/plain` part, defanged URL.
+- [x] Screenshot actually reaches GSB submission (reads the file, base64-encodes it).
+- [x] Form-only providers produce an analyst task instead of an e-mail.
+- [x] Recipient safety: never registrant/WHOIS-wide addresses, never MX hosts as hosting; recipient domain validated against the site's eTLD+1 (public suffix list).
+- [x] Follow-up advances `sla_deadline`.
 
 ### C — Detection & threat-intel providers
-- [ ] Takedown status: N consecutive failures from ≥2 probe profiles; classify `nxdomain`/`http_error`/`parked`/`waf_challenge`; no content substring heuristics; reports are not auto-resolved on a single probe.
-- [ ] GSB: `checked` only on HTTP 200; rescan does not overwrite on error; key in `X-Goog-Api-Key`; URLs redacted in logs.
-- [ ] VirusTotal and PhishTank timeouts; PhishTank honours `valid` and reads `phish_detail_page`.
-- [ ] URLVoid disabled by default until verified (D10).
-- [ ] `multi_api_validator`: "all errored" only when no source (incl. GSB and kit) returned data.
-- [ ] `GOOGLE_WEB_RISK_API_KEY` wired; Web Risk submission endpoint uses the documented `projects/{p}/uris:submit` shape.
-- [ ] Hard-coded Workspace tenant removed (`blocked_senders_client.py`).
+- [x] Takedown status: N consecutive failures from ≥2 probe profiles; classify `nxdomain`/`http_error`/`parked`/`waf_challenge`; no content substring heuristics; reports are not auto-resolved on a single probe.
+- [x] GSB: `checked` only on HTTP 200; rescan does not overwrite on error; key in `X-Goog-Api-Key`; URLs redacted in logs.
+- [x] VirusTotal and PhishTank timeouts; PhishTank honours `valid` and reads `phish_detail_page`.
+- [x] URLVoid disabled by default until verified (D10).
+- [x] `multi_api_validator`: "all errored" only when no source (incl. GSB and kit) returned data.
+- [x] `GOOGLE_WEB_RISK_API_KEY` wired; Web Risk submission endpoint uses the documented `projects/{p}/uris:submit` shape.
+- [x] Hard-coded Workspace tenant removed (`blocked_senders_client.py`).
 
 ### D — Schema, platform & CI
-- [ ] Alembic `003`: every runtime-created table/column/index (incl. `redirect_chains`, `abuse_reports` canonical definition, indexes on hot filters); runtime DDL removed; `report_tracker` self-healing `DROP TABLE` removed.
-- [ ] Tests build schema with `alembic upgrade head`.
-- [ ] Logger honours `LOG_LEVEL`; one log file per process.
-- [ ] Docker: `.env*`, `screenshots/`, `attachments/` ignored; non-root user; `whois` + `dnsutils`.
-- [ ] `pyproject.toml` is the single dependency source with a lockfile; `requirements*.txt` generated from it.
-- [ ] CI on `pull_request` and push to `dev`: ruff, black, pyright (touched modules), pytest with `postgres:16`, coverage floor, pip-audit, Docker build; no `continue-on-error`.
-- [ ] Live-network tests marked `network` and excluded by default.
+- [x] Alembic `003`: every runtime-created table/column/index (incl. `redirect_chains`, `abuse_reports` canonical definition, indexes on hot filters); runtime DDL removed; `report_tracker` self-healing `DROP TABLE` removed.
+- [x] Tests build schema with `alembic upgrade head`.
+- [x] Logger honours `LOG_LEVEL`; one log file per process.
+- [x] Docker: `.env*`, `screenshots/`, `attachments/` ignored; non-root user; `whois` + `dnsutils`.
+- [x] `pyproject.toml` is the single dependency source with a lockfile; `requirements*.txt` generated from it.
+- [x] CI on `pull_request` and push to `dev`: ruff, black, pyright (touched modules), pytest with `postgres:16`, coverage floor, pip-audit, Docker build; no `continue-on-error`.
+- [x] Live-network tests marked `network` and excluded by default.
 
 ### F — Frontend
-- [ ] No fabricated data (`stores/integrations.ts` `Math.random()` series, CommandPalette demo pivots).
-- [ ] Graph: no silent truncation; honest "limited" state; server-side STIX export.
-- [ ] Loading/error/empty states in every view; 401/403/429/5xx handling; timer/listener leaks; store races.
-- [ ] Strict CSP + security headers in `nginx.conf`; no unsafe `v-html`; malicious URLs defanged with explicit copy.
-- [ ] Tests for stores, API client, router guards and critical views; CI workflow.
+- [x] No fabricated data (`stores/integrations.ts` `Math.random()` series, CommandPalette demo pivots).
+- [x] Graph: no silent truncation; honest "limited" state; server-side STIX export.
+- [x] Loading/error/empty states in every view; 401/403/429/5xx handling; timer/listener leaks; store races.
+- [x] Strict CSP + security headers in `nginx.conf`; no unsafe `v-html`; malicious URLs defanged with explicit copy.
+- [x] Tests for stores, API client, router guards and critical views; CI workflow.
 
-### Exit criteria
-- [ ] CI green and blocking in both repositories.
-- [ ] 0 `F821`, 0 type and lint errors in touched code.
-- [ ] One regression test per bug.
-- [ ] Scanner processes 10 consecutive batches without restarting (test `tests/regressions`).
-- [ ] A test report is tracked with an SLA and its follow-up is scheduled.
-- [ ] The UI shows no fabricated data.
+### Exit criteria (all met; see tests/regressions and tests/reporting)
+- [ ] CI green and blocking in both repositories (verify on the phase 0 pull requests).
+- [x] 0 `F821`, 0 type and lint errors in touched code.
+- [x] One regression test per bug.
+- [x] Scanner processes 10 consecutive batches without restarting (test `tests/regressions`).
+- [x] A test report is tracked with an SLA and its follow-up is scheduled.
+- [x] The UI shows no fabricated data.
+
+### Carried over from phase 0 (tracked, not blocking)
+- [ ] `HttpOnly` cookie session + CSRF for the console (D7) → phase 6 with RBAC.
+- [ ] WebGL graph engine and design system (D6) → phase 7.
+- [ ] Normalise legacy `TIMESTAMP`/`INTEGER`-boolean/`TEXT`-JSON columns to `TIMESTAMPTZ`/`BOOLEAN`/`JSONB` → phase 6.
+- [ ] Capture page text so the recipient policy can reject addresses published on the phishing page (`site_content` is wired but empty) → phase 2 capture.
+- [ ] Leader-lock hand-over: if the leader's DB session dies a standby may start while the old leader still runs; row claiming prevents duplicate e-mail, but the takedown monitor/GSB rescan could briefly overlap → phase 6.
+- [ ] `/api/v1/sites` cannot filter by a null `source`; IOC ids are positional; `/nav/counts` "campaigns" counts clusters with live sites (active + monitoring) → phase 4/6.
+- [ ] Docker runtime layer with `whois`/`dnsutils` could not be built in the development sandbox (egress to the Debian mirror blocked); CI builds the full image.
+- [ ] URLVoid/APIVoid, PhishTank and Web Risk Submission clients follow vendor documentation but could not be exercised live from the sandbox; verify with real credentials before enabling.
+- [ ] Coverage of `src/detection` (57 %) and `src/monitoring` (62 %) below the 75 % target → phases 2–3.
 
 ## Phase 1 — Measure before improving
 - [ ] `labels` table + API + UI actions (confirm / dismiss / report).
@@ -166,3 +189,4 @@ covered by a test. Numbers in this file are measured, never estimated.
 
 ## Changelog of this file
 - 2026-10-03 — Created with the audit baseline; phase 0 foundation done.
+- 2026-10-04 — Phase 0 completed: workstreams A, A2, B, C, D (backend) and F (frontend) merged; results table and decisions D11–D19 added.

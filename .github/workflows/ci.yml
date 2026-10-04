@@ -29,7 +29,7 @@ env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   # Measured line coverage of src/ (network tests excluded) when the gate was
   # introduced, rounded down. Raise it as coverage grows; never lower it.
-  COVERAGE_FLOOR: "50"
+  COVERAGE_FLOOR: "69"
 
 jobs:
   lint:
