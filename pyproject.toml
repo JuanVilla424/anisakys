@@ -28,7 +28,7 @@ pylint = "^4.0.5"
 yamllint = "^1.35.0"
 isort = "^6.0.0"
 toml = "^0.10.0"
-black = "^25.1.0"
+black = ">=25.1,<27.0"
 pytest = "^9.0.2"
 httpx = { version = ">=0.24.0", optional = true }
 pytest-cov = { version = "^6.0.0", optional = true }
