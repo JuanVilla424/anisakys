@@ -249,3 +249,58 @@ class TestCompleteTask:
             resp = _complete(client, bearer, task, {"outcome": "submitted"})
         assert resp.status_code == 200
         assert resp.get_json()["task"]["completed_by"] == "analyst"
+
+
+class TestDeliveryState:
+    def test_stats_report_real_delivery_state(self, pg_api):
+        client, db_manager, headers = pg_api
+        before = client.get("/api/v1/stats", headers=headers).get_json()
+        queued = _report(db_manager, status="queued")
+        _report(db_manager, status="pending_manual")
+        _task(db_manager, queued, channel="email", recipient="abuse@x.example", status="sent")
+        _task(db_manager, queued)
+
+        after = client.get("/api/v1/stats", headers=headers).get_json()
+
+        assert "reports_sent" in after  # kept for compatibility
+        reports, outbox = after["reports_by_status"], after["outbox_by_status"]
+        for status in ("queued", "sent", "failed", "pending_manual", "timeout"):
+            assert status in reports
+        assert reports["queued"] == before["reports_by_status"]["queued"] + 1
+        assert reports["pending_manual"] == before["reports_by_status"]["pending_manual"] + 1
+        assert set(outbox) == {"pending", "sending", "sent", "failed", "pending_manual"}
+        assert outbox["sent"] == before["outbox_by_status"]["sent"] + 1
+        assert outbox["pending_manual"] == before["outbox_by_status"]["pending_manual"] + 1
+
+    def test_reports_can_be_filtered_by_pipeline_statuses(self, pg_api):
+        client, db_manager, headers = pg_api
+        report_id = _report(db_manager, status="pending_manual")
+
+        resp = client.get("/api/v1/reports?status=pending_manual&limit=500", headers=headers)
+
+        assert resp.status_code == 200
+        assert report_id in {r["report_id"] for r in resp.get_json()["items"]}
+
+    def test_pipeline_statuses_cannot_be_set_by_hand(self, pg_api):
+        client, db_manager, headers = pg_api
+        report_id = _report(db_manager, status="sent")
+
+        resp = client.patch(
+            f"/api/v1/reports/{report_id}", json={"status": "queued"}, headers=headers
+        )
+
+        assert resp.status_code == 400
+        assert _report_status(db_manager, report_id) == "sent"
+
+    def test_null_report_status_is_null_not_sent(self, pg_api):
+        client, db_manager, headers = pg_api
+        report_id = _report(db_manager)
+        with db_manager.engine.begin() as conn:
+            conn.execute(
+                text("UPDATE abuse_reports SET status = NULL WHERE report_id = :r"),
+                {"r": report_id},
+            )
+
+        items = client.get("/api/v1/reports?limit=500", headers=headers).get_json()["items"]
+
+        assert next(r for r in items if r["report_id"] == report_id)["status"] is None

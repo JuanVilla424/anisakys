@@ -74,8 +74,8 @@ from src.observability.health import (
     create_health_checker,
 )
 from src.reporting.db import short_transaction
-from src.reporting.outbox import ManualTaskOutcome, OutboxRepository, OutboxRow
-from src.reporting.report_tracker import ReportTracker
+from src.reporting.outbox import ManualTaskOutcome, OutboxRepository, OutboxRow, OutboxStatus
+from src.reporting.report_tracker import ReportStatus, ReportTracker
 from src.shutdown import register_thread
 from src.utils.timeouts import OperationTimeoutError, timeout
 from src.dns.network_utils import assess_url_target, is_cloudflare_ip
@@ -210,9 +210,13 @@ def parse_recipients(raw: Optional[str]) -> List[str]:
 # Accepted values of enum-like query parameters.
 SITE_STATUSES = frozenset({"up", "down"})
 PRIORITIES = frozenset({"critical", "high", "medium", "low"})
-REPORT_STATUSES = frozenset(
+# Statuses an analyst may set with PATCH /api/v1/reports/<id>.
+REPORT_UPDATE_STATUSES = frozenset(
     {"sent", "acknowledged", "in_progress", "resolved", "rejected", "timeout", "bounced", "pending"}
 )
+# Statuses GET /api/v1/reports can filter on: the above plus those only the
+# reporting pipeline sets (queued, failed, pending_manual).
+REPORT_STATUSES = REPORT_UPDATE_STATUSES | {"queued", "failed", "pending_manual"}
 IOC_TYPES = frozenset({"domain", "ip", "email"})
 IOC_SEARCH_MAX_LENGTH = 200
 
@@ -1463,7 +1467,20 @@ class PhishingAPI:
         @self.limiter.limit("120 per minute")
         @require_api_key(scope="read")
         def get_stats():
-            """Get statistics about phishing reports with authentication."""
+            """Platform statistics for the console overview.
+
+            ``reports_sent`` (kept for compatibility) counts sites flagged
+            ``abuse_report_sent``, which the reporting pipeline also sets for
+            sites whose only output was an analyst task. The real delivery
+            state is in ``reports_by_status`` (``abuse_reports.status``: every
+            pipeline status, 0 when absent, plus any other stored value; NULL
+            statuses are not listed) and ``outbox_by_status``
+            (``abuse_report_outbox.status``: pending, sending, sent, failed,
+            pending_manual).
+
+            Returns:
+                JSON object of counters.
+            """
             try:
                 with self.db_manager.engine.begin() as conn:
                     stats = {
@@ -1506,6 +1523,23 @@ class PhishingAPI:
                         )
                     ).fetchall()
                     stats["threat_breakdown"] = {r[0]: r[1] for r in rows}
+
+                    # Delivery state of the reporting pipeline.
+                    reports_by_status = {status.value: 0 for status in ReportStatus}
+                    for status, count in conn.execute(
+                        text(
+                            "SELECT status, COUNT(*) FROM abuse_reports "
+                            "WHERE status IS NOT NULL GROUP BY status"
+                        )
+                    ).fetchall():
+                        reports_by_status[status] = int(count)
+                    outbox_by_status = {status.value: 0 for status in OutboxStatus}
+                    for status, count in conn.execute(
+                        text("SELECT status, COUNT(*) FROM abuse_report_outbox GROUP BY status")
+                    ).fetchall():
+                        outbox_by_status[status] = int(count)
+                    stats["reports_by_status"] = reports_by_status
+                    stats["outbox_by_status"] = outbox_by_status
 
                     return jsonify(stats), 200
 
@@ -1963,7 +1997,7 @@ class PhishingAPI:
                         "report_id": r[0],
                         "site_url": r[1],
                         "recipients": parse_recipients(r[2]),
-                        "status": r[3] or "sent",
+                        "status": r[3],
                         "report_date": r[4].isoformat() if r[4] else None,
                         "sla_deadline": r[5].isoformat() if r[5] else None,
                         "response_received": bool(r[6]),
@@ -1991,12 +2025,12 @@ class PhishingAPI:
             try:
                 data = request.get_json() or {}
                 new_status = data.get("status")
-                if not new_status or new_status not in REPORT_STATUSES:
+                if not new_status or new_status not in REPORT_UPDATE_STATUSES:
                     return (
                         jsonify(
                             {
                                 "error": "Invalid status. Must be one of: "
-                                + ", ".join(sorted(REPORT_STATUSES))
+                                + ", ".join(sorted(REPORT_UPDATE_STATUSES))
                             }
                         ),
                         400,
