@@ -27,6 +27,8 @@ services:
     environment:
       PGHOST: postgres
       PGPORT: "5432"
+      # Containers log to stdout (docker logs); no per-process log files.
+      LOG_DIR: ""
     volumes:
       - ./queries.txt:/app/queries.txt:ro
       - ./entrypoint-backend.sh:/app/entrypoint-backend.sh:ro
@@ -35,11 +37,33 @@ services:
       postgres: { condition: service_healthy }
     ports: ["8091:8091"]
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "-m", "3", "http://localhost:8091/api/v1/health"]
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/api/v1/health', timeout=3)"
       interval: 10s
       timeout: 5s
       retries: 30
       start_period: 20s
+    networks: [anisakys-net]
+
+  # Background jobs (abuse reporting, outbox delivery, follow-ups, takedown
+  # monitor, GSB rescan, schedulers). The API container only serves HTTP, so
+  # without this service nothing is reported or verified. Starts after the
+  # backend is healthy, i.e. after migrations ran.
+  scheduler:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      PGHOST: postgres
+      PGPORT: "5432"
+      LOG_DIR: ""
+      PROCESS_ROLE: scheduler
+    command: ["python", "anisakys.py", "--role", "scheduler"]
+    depends_on:
+      backend: { condition: service_healthy }
     networks: [anisakys-net]
 
   frontend:

@@ -3,7 +3,6 @@
 import json
 import threading
 import time
-from datetime import datetime, timedelta
 
 from sqlalchemy import text
 
@@ -64,9 +63,7 @@ class ImageTrackingScheduler:
 
             # --- image_tracking threads ---
             if self.client:
-                rows = conn.execute(
-                    text(
-                        """
+                rows = conn.execute(text("""
                         SELECT id, image_s3_key FROM analysis_threads
                         WHERE thread_type = 'image_tracking'
                           AND status = 'active'
@@ -75,9 +72,7 @@ class ImageTrackingScheduler:
                               last_searched_at IS NULL
                               OR last_searched_at < NOW() - (search_interval_hours || ' hours')::INTERVAL
                           )
-                        """
-                    )
-                ).fetchall()
+                        """)).fetchall()
 
                 for row in rows:
                     if not row.image_s3_key:
@@ -86,9 +81,7 @@ class ImageTrackingScheduler:
 
             # --- google_ads threads ---
             if self.ads_client:
-                ads_rows = conn.execute(
-                    text(
-                        """
+                ads_rows = conn.execute(text("""
                         SELECT id, details FROM analysis_threads
                         WHERE thread_type = 'google_ads'
                           AND status = 'active'
@@ -97,9 +90,7 @@ class ImageTrackingScheduler:
                               last_searched_at IS NULL
                               OR last_searched_at < NOW() - (search_interval_hours || ' hours')::INTERVAL
                           )
-                        """
-                    )
-                ).fetchall()
+                        """)).fetchall()
 
                 for row in ads_rows:
                     self._run_google_ads(conn, row.id, row.details)

@@ -1,13 +1,27 @@
 """
 Enhanced Abuse Email Detector for Anisakys Phishing Detection Engine.
 
-Provides enhanced abuse email detection with multiple sources and validation.
+Finds the abuse contacts a phishing report should go to, and only those:
+
+* Registration data contributes abuse-role contacts only (the RDAP ``abuse``
+  entity, labelled ``... Abuse Contact Email`` lines, ``abuse@``-style
+  addresses). Registrant, admin and tech addresses are never returned: they
+  belong to whoever registered the phishing domain.
+* Hosting contacts come from the IP the site resolves to. When that IP is a
+  Cloudflare proxy, mail-server (MX) addresses are never taken as the real
+  host: mail and web hosting are unrelated, so that sent complaints to
+  Google/Microsoft for sites they do not host.
+* Contacts are returned ordered by trust: RDAP abuse > curated database >
+  ASN abuse-c (see ``src.reporting.recipient_policy``).
+* Every address is checked against the reported site's registrable domain
+  (Public Suffix List) and against the site's own content.
 """
 
 import datetime
 import re
 import socket
 import subprocess
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import dns.exception
@@ -17,7 +31,6 @@ import validators
 import whois
 from ipwhois import IPWhois
 
-from src.config import settings
 from src.data import (
     ASN_ABUSE_EMAIL_DB,
     PROVIDER_ABUSE_EMAIL_DB,
@@ -28,9 +41,44 @@ from sqlalchemy import text
 from src.dns.network_utils import is_cloudflare_ip
 from src.intelligence.abuse_contact_resolver import AbuseContactResolver
 from src.logger import logger
+from src.reporting.recipient_policy import (
+    ContactCandidate,
+    ContactTier,
+    emails_in_text,
+    holder_emails_in_whois,
+    is_abuse_role_address,
+    labelled_abuse_emails_in_whois,
+    normalize_email,
+    order_by_trust,
+    recipient_rejection_reason,
+)
 
 # RDAP Bootstrap cache (TLD -> RDAP server URL)
 _RDAP_BOOTSTRAP_CACHE: Dict[str, str] = {}
+
+
+@dataclass
+class AbuseContactResolution:
+    """Abuse contacts for a domain plus the network facts behind them."""
+
+    emails: List[str] = field(default_factory=list)
+    candidates: List[ContactCandidate] = field(default_factory=list)
+    resolved_ip: Optional[str] = None
+    is_cloudflare: bool = False
+    hosting_provider: Optional[str] = None
+    asn: Optional[str] = None
+    # Non-Cloudflare IP of an origin-style sub-domain. Informational only: the
+    # phishing operator controls that DNS, so it never selects recipients.
+    origin_ip_candidate: Optional[str] = None
+
+
+@dataclass
+class _NetworkInfo:
+    """IP-level facts from an RDAP lookup of the hosting network."""
+
+    provider_name: Optional[str]
+    asn: Optional[str]
+    rdap: Dict[str, Any]
 
 
 class EnhancedAbuseEmailDetector:
@@ -60,51 +108,78 @@ class EnhancedAbuseEmailDetector:
             logger.debug(f"Domain validation failed for email: {email}")
             return False
 
+    @staticmethod
+    def _whois_text(whois_info: Any) -> str:
+        """Best raw-text view of a WHOIS/RDAP result.
+
+        Args:
+            whois_info: python-whois object, RDAP/parsed dict or raw text.
+
+        Returns:
+            The raw WHOIS text when available, else ``str(whois_info)``.
+        """
+        if whois_info is None:
+            return ""
+        if isinstance(whois_info, str):
+            return whois_info
+        if isinstance(whois_info, dict):
+            raw = whois_info.get("raw_whois") or whois_info.get("text")
+            return raw if isinstance(raw, str) else ""
+        raw = getattr(whois_info, "text", None)
+        return raw if isinstance(raw, str) else str(whois_info)
+
     def extract_emails_from_whois(self, whois_info: Any) -> List[str]:
-        """Extract email addresses from WHOIS data."""
-        emails = []
+        """Extract abuse-role contacts from WHOIS/RDAP data.
 
-        # 1. Use emails attribute directly from whois object (python-whois already parses these)
-        if hasattr(whois_info, "emails") and whois_info.emails:
-            whois_emails = (
-                whois_info.emails if isinstance(whois_info.emails, list) else [whois_info.emails]
-            )
-            emails.extend(whois_emails)
-            logger.debug(
-                f"📧 Extracted {len(whois_emails)} emails from WHOIS object: {whois_emails}"
-            )
+        Only the RDAP ``abuse`` entity, addresses on lines labelled as an
+        abuse contact and addresses with an abuse-like local part are kept.
+        There is no "take every address" fallback, and any address that
+        appears on a registrant/admin/tech/billing line is dropped.
 
-        # 2. Fallback: search in raw text if no emails found
-        if not emails:
-            whois_str = str(whois_info)
-            general_pattern = r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
-            all_emails = re.findall(general_pattern, whois_str, re.IGNORECASE)
+        Args:
+            whois_info: python-whois object, RDAP/parsed dict or raw text.
 
-            # Prioritize abuse-related emails
-            abuse_keywords = [
-                "abuse",
-                "security",
-                "admin",
-                "postmaster",
-                "hostmaster",
-                "webmaster",
-                "noc",
-            ]
-            for email in all_emails:
-                if any(keyword in email.lower() for keyword in abuse_keywords):
-                    emails.append(email)
+        Returns:
+            Lowercased, de-duplicated abuse contacts, RDAP entity first.
+        """
+        raw_text = self._whois_text(whois_info)
+        holder = set(holder_emails_in_whois(raw_text))
+        found: List[str] = []
 
-            # If no abuse emails found, add all found emails
-            if not emails:
-                emails.extend(all_emails)
+        if isinstance(whois_info, dict):
+            rdap_abuse = whois_info.get("abuse_contacts") or []
+            found.extend(rdap_abuse if isinstance(rdap_abuse, list) else [rdap_abuse])
+            listed = whois_info.get("emails") or []
+        else:
+            listed = getattr(whois_info, "emails", None) or []
+        if isinstance(listed, str):
+            listed = [listed]
 
-        # Remove duplicates and normalize
-        unique_emails = list(dict.fromkeys([e.lower() for e in emails]))
+        found.extend(labelled_abuse_emails_in_whois(raw_text))
+        found.extend(email for email in listed if is_abuse_role_address(str(email)))
+        found.extend(email for email in emails_in_text(raw_text) if is_abuse_role_address(email))
 
-        return unique_emails
+        unique: List[str] = []
+        for email in found:
+            address = normalize_email(str(email))
+            if address and address not in holder and address not in unique:
+                unique.append(address)
+        if unique:
+            logger.debug(f"Abuse contacts in registration data: {unique}")
+        return unique
 
     def get_abuse_email_from_dns(self, domain: str) -> Optional[str]:
-        """Try to get abuse email from DNS TXT records."""
+        """Try to get an abuse email from the domain's own DNS TXT records.
+
+        Not used to pick report recipients: the TXT records of a phishing
+        domain are controlled by the attacker.
+
+        Args:
+            domain: Domain to query.
+
+        Returns:
+            The first abuse-like address found, or ``None``.
+        """
         try:
             txt_records = self.dns_resolver.resolve(domain, "TXT")
             for record in txt_records:
@@ -114,16 +189,20 @@ class EnhancedAbuseEmailDetector:
                         r"([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})", record_str
                     )
                     if email_match and self.validate_email(email_match.group(1)):
-                        logger.info(
-                            f"🔍 Found abuse email in DNS TXT for {domain}: {email_match.group(1)}"
-                        )
                         return email_match.group(1)
         except dns.exception.DNSException:
             logger.debug(f"DNS TXT query failed for {domain}")
         return None
 
     def get_abuse_email_from_whois_servers(self, domain: str) -> Optional[str]:
-        """Query multiple WHOIS servers for abuse information."""
+        """Query multiple WHOIS servers for an abuse contact of ``domain``.
+
+        Args:
+            domain: Domain to query.
+
+        Returns:
+            The first abuse-role contact found, or ``None``.
+        """
         whois_servers = [
             f"whois.{domain.split('.')[-1]}",
             "whois.internic.net",
@@ -142,7 +221,7 @@ class EnhancedAbuseEmailDetector:
                 if result.returncode == 0:
                     emails = self.extract_emails_from_whois(result.stdout)
                     if emails:
-                        logger.info(f"🔍 Found abuse email from WHOIS server {server}: {emails[0]}")
+                        logger.info(f"Found abuse contact via WHOIS server {server}: {emails[0]}")
                         return emails[0]
             except (subprocess.TimeoutExpired, FileNotFoundError):
                 continue
@@ -182,190 +261,142 @@ class EnhancedAbuseEmailDetector:
 
         return None
 
-    def get_enhanced_abuse_email(
-        self, domain: str, whois_info: Any = None, registrar: str = None
-    ) -> List[str]:
-        """Get abuse email using multiple enhanced detection methods."""
-        logger.info(f"🔍 Starting enhanced abuse email detection for domain: {domain}")
-        abuse_emails = []
+    def resolve_abuse_contacts(
+        self,
+        domain: str,
+        whois_info: Any = None,
+        registrar: Optional[str] = None,
+        site_content: Optional[str] = None,
+    ) -> AbuseContactResolution:
+        """Find the abuse contacts for ``domain``, most trusted first.
 
-        # 1. Check a cached registrar database
+        Tiers (lower is more trusted):
+
+        1. RDAP abuse: the registrar's abuse entity / labelled abuse contact
+           in the domain's registration data, then the hosting network's RDAP
+           abuse contact.
+        2. Curated database: registrar and hosting-provider abuse databases.
+        3. ASN abuse-c: the ASN abuse database.
+
+        Args:
+            domain: Reported host name.
+            whois_info: Registration data already fetched for ``domain``.
+            registrar: Registrar name, when known.
+            site_content: Content served by the site; addresses published
+                there are rejected.
+
+        Returns:
+            The ordered, policy-checked contacts and the network facts.
+        """
+        resolution = AbuseContactResolution()
+        candidates: List[ContactCandidate] = []
+
+        def add(emails: Any, tier: ContactTier, source: str) -> None:
+            values = emails if isinstance(emails, (list, tuple, set)) else [emails]
+            for email in sorted(str(value) for value in values if value):
+                candidates.append(ContactCandidate(email=email, tier=tier, source=source))
+
+        registration = self.extract_emails_from_whois(whois_info) if whois_info else []
+        add(registration, ContactTier.RDAP_ABUSE, "registration data")
+
         if registrar:
-            registrar_email = self.get_abuse_email_by_registrar(registrar)
-            if registrar_email and self.validate_abuse_email_domain(registrar_email, domain):
-                abuse_emails.append(registrar_email)
-                logger.info(f"✅ Added registrar abuse email: {registrar_email}")
-
-        # 2. Extract from WHOIS data (exclude same domain)
-        if whois_info:
-            whois_emails = self.extract_emails_from_whois(whois_info)
-            for email in whois_emails:
-                if self.validate_abuse_email_domain(email, domain):
-                    abuse_emails.append(email)
-                    logger.info(f"✅ Added WHOIS abuse email: {email}")
-
-        # 3. Try DNS TXT records
-        dns_email = self.get_abuse_email_from_dns(domain)
-        if dns_email and self.validate_abuse_email_domain(dns_email, domain):
-            abuse_emails.append(dns_email)
-
-        # 4. Try alternative WHOIS servers
-        if not abuse_emails:
-            whois_server_email = self.get_abuse_email_from_whois_servers(domain)
-            if whois_server_email and self.validate_abuse_email_domain(whois_server_email, domain):
-                abuse_emails.append(whois_server_email)
-
-        # 5. Check hosting provider and ASN information
-        try:
-            domain_ip = socket.gethostbyname(domain)
-            logger.info(f"🌐 Resolved {domain} to IP: {domain_ip}")
-
-            if is_cloudflare_ip(domain_ip):
-                logger.info(
-                    f"☁️  Domain {domain} is behind Cloudflare, investigating real hosting..."
-                )
-
-                # Try to find real IP behind Cloudflare
-                real_ip = self.get_real_ip_behind_cloudflare(domain)
-                if real_ip:
-                    logger.info(f"🔍 Found potential real IP behind Cloudflare: {real_ip}")
-                    provider_name, provider_abuse, asn, asn_abuse_email = (
-                        self.get_hosting_provider_info(real_ip)
-                    )
-
-                    # Add provider abuse email
-                    if provider_abuse and self.validate_abuse_email_domain(provider_abuse, domain):
-                        abuse_emails.append(provider_abuse)
-                        logger.info(
-                            f"🏢 Found hosting provider abuse email: {provider_abuse} (Provider: {provider_name})"
-                        )
-
-                    # Add ASN abuse emails (handle both string and list)
-                    if asn_abuse_email:
-                        # Handle both single string and list of emails
-                        asn_emails = (
-                            asn_abuse_email
-                            if isinstance(asn_abuse_email, list)
-                            else [asn_abuse_email]
-                        )
-                        for email in asn_emails:
-                            if email and self.validate_abuse_email_domain(email, domain):
-                                abuse_emails.append(email)
-                                logger.info(f"🏷️  Found ASN abuse email: {email} (ASN: {asn})")
-                else:
-                    logger.warning(f"⚠️  Could not find real IP behind Cloudflare for {domain}")
-
-                # Always add Cloudflare as a secondary option
-                cloudflare_email = "abuse@cloudflare.com"
-                if cloudflare_email not in abuse_emails:
-                    abuse_emails.append(cloudflare_email)
-                    logger.info(
-                        f"☁️  Added Cloudflare abuse email as secondary option: {cloudflare_email}"
-                    )
-            else:
-                # Not behind Cloudflare, check hosting provider directly
-                logger.info(f"🏢 Checking hosting provider for IP: {domain_ip}")
-                provider_name, provider_abuse, asn, asn_abuse_email = (
-                    self.get_hosting_provider_info(domain_ip)
-                )
-
-                logger.info(f"🏢 Hosting Provider: {provider_name or 'Unknown'}")
-                logger.info(f"🏷️  ASN: {asn or 'Unknown'}")
-
-                # Add provider abuse email
-                if provider_abuse and self.validate_abuse_email_domain(provider_abuse, domain):
-                    abuse_emails.append(provider_abuse)
-                    logger.info(
-                        f"✅ Found hosting provider abuse email: {provider_abuse} (Provider: {provider_name})"
-                    )
-                else:
-                    if provider_abuse:
-                        logger.warning(
-                            f"❌ Provider abuse email rejected (same domain): {provider_abuse}"
-                        )
-                    else:
-                        logger.warning(f"⚠️  No provider abuse email found in WHOIS data")
-
-                # Add ASN abuse emails (handle both string and list)
-                asn_emails_added = False
-                if asn_abuse_email:
-                    # Handle both single string and list of emails
-                    asn_emails = (
-                        asn_abuse_email if isinstance(asn_abuse_email, list) else [asn_abuse_email]
-                    )
-                    for email in asn_emails:
-                        if email and self.validate_abuse_email_domain(email, domain):
-                            abuse_emails.append(email)
-                            logger.info(f"✅ Found ASN abuse email: {email} (ASN: {asn})")
-                            asn_emails_added = True
-                        elif email:
-                            logger.warning(f"❌ ASN abuse email rejected (same domain): {email}")
-
-                if not asn_emails_added:
-                    if asn_abuse_email:
-                        logger.debug("All ASN abuse emails were rejected (same domain)")
-                    else:
-                        logger.warning(f"⚠️  No ASN abuse email found for ASN: {asn}")
-
-                        # EPIC-005: Try provider-based fallback if ASN lookup failed using resolver
-                        provider_abuse_emails = self.abuse_resolver.resolve(
-                            provider_name=provider_name, target_domain=domain
-                        )
-                        if provider_abuse_emails:
-                            for email in provider_abuse_emails:
-                                if email and self.validate_abuse_email_domain(email, domain):
-                                    abuse_emails.append(email)
-                                    logger.info(
-                                        f"✅ Found provider fallback abuse email: {email} (Provider: {provider_name})"
-                                    )
-
-        except Exception as e:
-            logger.debug(f"Failed to get IP/hosting info for {domain}: {e}")
-
-        # 6. Generate common abuse email patterns (exclude same domain)
-        if not abuse_emails:
-            logger.warning(f"⚠️  No abuse emails found through other methods for {domain}")
-            # Try parent domain or known hosting providers
             try:
-                # Get hosting info from IP WHOIS
-                domain_ip = socket.gethostbyname(domain)
-                provider_name, provider_abuse, asn, asn_abuse_email = (
-                    self.get_hosting_provider_info(domain_ip)
+                cached = self.get_abuse_email_by_registrar(registrar)
+            except Exception as e:
+                logger.warning(f"Registrar abuse database lookup failed for {registrar}: {e}")
+                cached = None
+            if cached:
+                add(
+                    self.parse_stored_abuse_emails(cached),
+                    ContactTier.CURATED,
+                    "registrar database",
                 )
 
-                # Add both provider and ASN emails if available
-                if provider_abuse and self.validate_abuse_email_domain(provider_abuse, domain):
-                    abuse_emails.append(provider_abuse)
+        if not candidates:
+            server_email = self.get_abuse_email_from_whois_servers(domain)
+            if server_email:
+                add([server_email], ContactTier.RDAP_ABUSE, "WHOIS server")
 
-                # Handle ASN abuse emails (both string and list)
-                if asn_abuse_email:
-                    asn_emails = (
-                        asn_abuse_email if isinstance(asn_abuse_email, list) else [asn_abuse_email]
+        try:
+            resolution.resolved_ip = socket.gethostbyname(domain)
+        except (socket.gaierror, UnicodeError, OSError) as e:
+            logger.info(f"{domain} does not resolve ({e}); no hosting contacts")
+
+        lookup_ip = resolution.resolved_ip
+        if lookup_ip and is_cloudflare_ip(lookup_ip):
+            resolution.is_cloudflare = True
+            # Origin-style sub-domains (direct., origin., ...) are resolved by the
+            # attacker's own DNS, which can point them at any third party's IP.
+            # Keep the candidate for the analyst; never derive recipients from it.
+            # Cloudflare itself is reached through its own channel (web form).
+            resolution.origin_ip_candidate = self.get_real_ip_behind_cloudflare(domain)
+            lookup_ip = None
+            if resolution.origin_ip_candidate:
+                logger.info(
+                    f"{domain} is behind Cloudflare; origin candidate "
+                    f"{resolution.origin_ip_candidate} needs analyst confirmation"
+                )
+            else:
+                logger.info(f"{domain} is behind Cloudflare and no origin IP is known")
+
+        if lookup_ip:
+            network = self._lookup_network(lookup_ip)
+            if network:
+                resolution.hosting_provider = network.provider_name
+                resolution.asn = network.asn
+                add(
+                    self.abuse_resolver.resolve(whois_data=network.rdap),
+                    ContactTier.RDAP_ABUSE,
+                    "hosting network RDAP",
+                )
+                if network.provider_name:
+                    add(
+                        self.abuse_resolver.resolve(provider_name=network.provider_name),
+                        ContactTier.CURATED,
+                        "hosting provider database",
                     )
-                    for email in asn_emails:
-                        if email and self.validate_abuse_email_domain(email, domain):
-                            abuse_emails.append(email)
+                if network.asn:
+                    add(
+                        self.abuse_resolver.resolve(asn=network.asn.replace("AS", "")),
+                        ContactTier.ASN_ABUSE,
+                        "ASN database",
+                    )
 
-            except:
-                pass
+        accepted: List[ContactCandidate] = []
+        for candidate in candidates:
+            reason = recipient_rejection_reason(candidate.email, domain, site_content)
+            if reason:
+                logger.warning(f"Rejected abuse contact {candidate.email}: {reason}")
+                continue
+            accepted.append(candidate)
 
-        # Remove duplicates while preserving order
-        unique_emails = []
-        seen = set()
-        for email in abuse_emails:
-            if email not in seen:
-                unique_emails.append(email)
-                seen.add(email)
-
-        # Enhanced logging with final results
-        if unique_emails:
-            logger.info(
-                f"✅ Found {len(unique_emails)} valid abuse email(s) for {domain}: {unique_emails}"
-            )
+        resolution.candidates = accepted
+        resolution.emails = order_by_trust(accepted)
+        if resolution.emails:
+            logger.info(f"Abuse contacts for {domain} (most trusted first): {resolution.emails}")
         else:
-            logger.warning(f"❌ No valid abuse emails found for {domain}")
+            logger.warning(f"No usable abuse contacts found for {domain}")
+        return resolution
 
-        return unique_emails
+    def get_enhanced_abuse_email(
+        self,
+        domain: str,
+        whois_info: Any = None,
+        registrar: Optional[str] = None,
+        site_content: Optional[str] = None,
+    ) -> List[str]:
+        """Get abuse contacts for ``domain`` ordered by trust.
+
+        Args:
+            domain: Reported host name.
+            whois_info: Registration data already fetched for ``domain``.
+            registrar: Registrar name, when known.
+            site_content: Content served by the site, when available.
+
+        Returns:
+            Policy-checked abuse contacts, most trusted first.
+        """
+        return self.resolve_abuse_contacts(domain, whois_info, registrar, site_content).emails
 
     @staticmethod
     def extract_registrar(whois_info) -> Optional[str]:
@@ -384,38 +415,30 @@ class EnhancedAbuseEmailDetector:
         return None
 
     @staticmethod
-    def validate_abuse_email_domain(email: str, reported_domain: str) -> bool:
+    def validate_abuse_email_domain(
+        email: str, reported_domain: str, site_content: Optional[str] = None
+    ) -> bool:
         """
-        Validate that abuse email is not from the same domain being reported.
+        Validate that an abuse e-mail is not controlled by the reported site.
+
+        The recipient's registrable domain (eTLD+1, Public Suffix List) must
+        differ from the site's, so ``abuse@evil.com.co`` is rejected for
+        ``login.evil.com.co``; addresses published in the site's own content
+        are rejected too.
 
         Args:
             email (str): Abuse email to validate
-            reported_domain (str): Domain being reported for phishing
+            reported_domain (str): Domain (or URL) being reported for phishing
+            site_content (Optional[str]): Content served by the site, if known
 
         Returns:
-            bool: True if email is valid for reporting, False if same domain
+            bool: True if the address may receive the report
         """
-        try:
-            email_domain = email.split("@")[1].lower()
-            reported_domain_clean = reported_domain.lower().replace("www.", "")
-
-            # Check if it's the same domain
-            if email_domain == reported_domain_clean:
-                logger.warning(
-                    f"❌ Cannot send abuse report to same domain: {email} for {reported_domain}"
-                )
-                return False
-
-            # Check if it's a subdomain of the reported domain
-            if email_domain.endswith("." + reported_domain_clean):
-                logger.warning(
-                    f"❌ Cannot send abuse report to subdomain: {email} for {reported_domain}"
-                )
-                return False
-
-            return True
-        except IndexError:
+        reason = recipient_rejection_reason(email, reported_domain, site_content)
+        if reason:
+            logger.warning(f"Cannot send abuse report to {email} for {reported_domain}: {reason}")
             return False
+        return True
 
     @staticmethod
     def parse_stored_abuse_emails(stored_abuse: str) -> List[str]:
@@ -477,113 +500,108 @@ class EnhancedAbuseEmailDetector:
 
     def get_real_ip_behind_cloudflare(self, domain: str) -> Optional[str]:
         """
-        Try to get the real IP behind Cloudflare using various methods.
+        Look for a candidate origin IP of a Cloudflare-proxied site.
+
+        The result is informational: the site's operator controls these DNS
+        names, so callers must not send complaints to the network it points at
+        without an analyst confirming it.
+
+        Only origin-style sub-domains of the site itself are probed. MX records
+        are deliberately not used: the mail host of a domain says nothing about
+        where its website runs (it is usually Google or Microsoft), so treating
+        it as the hosting provider sent complaints to uninvolved providers.
 
         Args:
             domain (str): Domain to investigate
 
         Returns:
-            Optional[str]: Real IP if found, None otherwise
+            Optional[str]: Non-Cloudflare IP of an origin sub-domain, or None
         """
-        real_ips = []
-
-        # Method 1: Check common subdomains that might not be behind Cloudflare
         common_subdomains = ["direct", "origin", "real", "server", "host", "main", "www-origin"]
 
         for subdomain in common_subdomains:
+            test_domain = f"{subdomain}.{domain}"
             try:
-                test_domain = f"{subdomain}.{domain}"
                 ip = socket.gethostbyname(test_domain)
-                if not is_cloudflare_ip(ip):
-                    real_ips.append(ip)
-                    logger.info(f"🔍 Found potential real IP via subdomain {test_domain}: {ip}")
-            except:
+            except (socket.gaierror, UnicodeError, OSError):
                 continue
+            if not is_cloudflare_ip(ip):
+                logger.info(f"Potential origin IP via {test_domain}: {ip}")
+                return ip
+        return None
 
-        # Method 2: Check MX records (mail servers often reveal real hosting)
+    def _lookup_network(self, ip: str) -> Optional[_NetworkInfo]:
+        """RDAP lookup of the network an IP belongs to.
+
+        Args:
+            ip: IP address.
+
+        Returns:
+            Provider name, ASN (``AS123``) and the raw RDAP result, or ``None``
+            when the lookup fails.
+        """
         try:
-            mx_records = self.dns_resolver.resolve(domain, "MX")
-            for mx in mx_records:
-                mx_domain = str(mx.exchange).rstrip(".")
-                try:
-                    ip = socket.gethostbyname(mx_domain)
-                    if not is_cloudflare_ip(ip):
-                        real_ips.append(ip)
-                        logger.info(f"🔍 Found potential real IP via MX record {mx_domain}: {ip}")
-                except:
-                    continue
-        except:
-            pass
-
-        return real_ips[0] if real_ips else None
+            res = IPWhois(ip).lookup_rdap(depth=1)
+        except Exception as e:
+            logger.warning(f"Hosting lookup failed for IP {ip}: {e}")
+            return None
+        network_info = res.get("network") or {}
+        provider_name = ""
+        if isinstance(network_info, dict):
+            provider_name = network_info.get("name") or ""
+        provider_name = provider_name or res.get("asn_description") or ""
+        asn = str(res.get("asn") or "").strip()
+        if asn and not asn.upper().startswith("AS"):
+            asn = f"AS{asn}"
+        return _NetworkInfo(provider_name=provider_name or None, asn=asn or None, rdap=res)
 
     def get_hosting_provider_info(
         self, ip: str
-    ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
+    ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[List[str]]]:
         """
-        Get hosting provider information from IP address with enhanced ASN support.
+        Get hosting provider information from an IP address.
+
+        The legacy fourth element (``asn_abuse_email``) is the list of hosting
+        abuse contacts, now ordered by trust: the network's RDAP abuse contact,
+        then the curated provider database, then the ASN database.
 
         Args:
             ip (str): IP address to investigate
 
         Returns:
-            Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
-            (provider_name, provider_abuse_email, asn, asn_abuse_email)
+            (provider_name, provider_abuse_email, asn, abuse_emails); all
+            ``None`` when the lookup fails.
         """
-        try:
-            logger.info(f"🔍 Looking up hosting information for IP: {ip}")
-            obj = IPWhois(ip)
-            res = obj.lookup_rdap(depth=1)
-
-            # Get provider name - handle None values safely
-            provider_name = ""
-            network_info = res.get("network", {})
-            if network_info and isinstance(network_info, dict):
-                provider_name = network_info.get("name") or ""
-                if not provider_name:
-                    provider_name = res.get("asn_description") or ""
-
-            # Ensure provider_name is string and handle None
-            if provider_name is None:
-                provider_name = ""
-
-            # Safely convert to string and handle potential None
-            provider_name = str(provider_name) if provider_name else "Unknown"
-
-            # Get ASN information
-            asn = res.get("asn", "")
-            if asn and not str(asn).startswith("AS"):
-                asn = f"AS{asn}"
-
-            # Clean ASN format for lookup
-            asn_clean = str(asn).replace("AS", "").strip() if asn else ""
-
-            logger.info(f"🏢 Provider: {provider_name}, ASN: {asn}")
-
-            # EPIC-005: Use AbuseContactResolver to get all abuse emails
-            # This consolidates ASN, provider, and WHOIS lookups with deduplication
-            all_abuse_emails = self.abuse_resolver.resolve(
-                asn=asn_clean if asn_clean else None,
-                provider_name=provider_name if provider_name != "Unknown" else None,
-                whois_data=res,
-                target_domain=None,  # No domain filtering at this stage
-            )
-
-            # For backward compatibility, extract first email for legacy fields
-            asn_abuse_email = all_abuse_emails[0] if all_abuse_emails else None
-            provider_abuse_email = all_abuse_emails[0] if all_abuse_emails else None
-
-            logger.info(
-                f"📊 IP {ip} analysis complete: Provider={provider_name}, ASN={asn}, "
-                f"Resolved {len(all_abuse_emails)} abuse contact(s): {all_abuse_emails[:3]}{'...' if len(all_abuse_emails) > 3 else ''}"
-            )
-
-            # Return: provider_name, provider_abuse_email, asn, all_abuse_emails
-            return provider_name, provider_abuse_email, asn, all_abuse_emails
-
-        except Exception as e:
-            logger.error(f"❌ Failed to get hosting provider info for IP {ip}: {e}")
+        network = self._lookup_network(ip)
+        if network is None:
             return None, None, None, None
+        candidates: List[ContactCandidate] = []
+        asn_number = (network.asn or "").replace("AS", "") or None
+        tiers = (
+            (ContactTier.RDAP_ABUSE, self.abuse_resolver.resolve(whois_data=network.rdap)),
+            (
+                ContactTier.CURATED,
+                (
+                    self.abuse_resolver.resolve(provider_name=network.provider_name)
+                    if network.provider_name
+                    else []
+                ),
+            ),
+            (
+                ContactTier.ASN_ABUSE,
+                self.abuse_resolver.resolve(asn=asn_number) if asn_number else [],
+            ),
+        )
+        for tier, emails in tiers:
+            for email in sorted(emails):
+                candidates.append(ContactCandidate(email=email, tier=tier, source=tier.name))
+        abuse_emails = order_by_trust(candidates)
+        logger.info(
+            f"IP {ip}: provider={network.provider_name or 'unknown'}, ASN={network.asn}, "
+            f"{len(abuse_emails)} abuse contact(s)"
+        )
+        provider_abuse_email = abuse_emails[0] if abuse_emails else None
+        return network.provider_name, provider_abuse_email, network.asn, abuse_emails
 
     # EPIC-005: Removed get_abuse_email_by_asn() and get_abuse_email_by_provider()
     # These are now handled by AbuseContactResolver class in src/intelligence/
@@ -876,7 +894,9 @@ class EnhancedAbuseEmailDetector:
                         logger.info(f"📋 Got WHOIS data for {domain} using {whois_server}")
                         return whois_dict
                     else:
-                        logger.warning(f"⚠️ Invalid WHOIS response from {whois_server} for {domain}")
+                        logger.warning(
+                            f"⚠️ Invalid WHOIS response from {whois_server} for {domain}"
+                        )
         except Exception as e:
             logger.debug(f"Direct WHOIS query failed for {domain}: {e}")
 

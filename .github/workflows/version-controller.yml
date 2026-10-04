@@ -17,12 +17,12 @@ jobs:
     steps:
       - name: Checkout Repository
         id: checkout_repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Set up Python
         id: setup_python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Install Dependencies
@@ -32,7 +32,7 @@ jobs:
       - name: Get Current Version
         id: get_version
         run: |
-          VERSION=$(python -c "import toml; print(toml.load('pyproject.toml')['tool']['poetry']['version'])")
+          VERSION=$(python -c "import toml; print(toml.load('pyproject.toml')['project']['version'])")
           echo "current_version=$VERSION" >> $GITHUB_OUTPUT
       - name: Get Latest Commit Message
         id: get_commit
@@ -102,7 +102,7 @@ jobs:
       - name: Create Pull Request
         id: create_pull_request
         if: steps.check_arrow.outputs.contains_arrow == 'true' && github.ref != 'refs/heads/main'
-        uses: actions/github-script@v6
+        uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |

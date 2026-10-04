@@ -1,0 +1,427 @@
+"""Integration tests for aggregate endpoints (graph, campaigns) on real PostgreSQL."""
+
+import uuid
+from typing import Optional
+
+from sqlalchemy import text
+
+
+def _insert_site(
+    db_manager,
+    url: str,
+    *,
+    registrar: Optional[str] = None,
+    ip: Optional[str] = None,
+    status: str = "up",
+    last_seen: str = "2026-01-02 00:00:00",
+) -> None:
+    """Insert one phishing_sites row into the migrated schema.
+
+    Args:
+        db_manager: DatabaseManager bound to the isolated schema.
+        url: Site URL (unique).
+        registrar: Registrar name.
+        ip: Resolved IP address.
+        status: site_status value.
+        last_seen: last_seen timestamp literal.
+    """
+    with db_manager.engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO phishing_sites (url, registrar_name, resolved_ip, site_status, "
+                "first_seen, last_seen, api_confidence_score, multi_api_threat_level) "
+                "VALUES (:url, :reg, :ip, :status, '2026-01-01', :last_seen, 80, 'high')"
+            ),
+            {"url": url, "reg": registrar, "ip": ip, "status": status, "last_seen": last_seen},
+        )
+
+
+class TestGraphFocusOnPostgres:
+    def test_registrar_focus_finds_rows_beyond_the_limit(self, pg_api):
+        client, db_manager, headers = pg_api
+        tag = uuid.uuid4().hex[:8]
+        registrar = f"Mixed Case Registrar {tag}"
+        _insert_site(
+            db_manager, f"https://old-{tag}.example/", registrar=registrar, last_seen="2020-01-01"
+        )
+        for i in range(3):
+            _insert_site(db_manager, f"https://new-{i}-{tag}.example/", last_seen="2026-06-01")
+
+        resp = client.get(
+            "/api/v1/graph",
+            query_string={"focus": f"registrar:{registrar.upper()}", "limit": 1},
+            headers=headers,
+        )
+
+        assert resp.status_code == 200, resp.get_json()
+        ids = {n["id"] for n in resp.get_json()["nodes"]}
+        assert ids == {f"registrar:{registrar}", f"domain:old-{tag}.example"}
+
+    def test_old_entity_beyond_the_limit_can_be_pivoted(self, pg_api):
+        """More rows than the limit: the unfocused graph misses the oldest domain
+        (and says so via total_rows/limited), while a focus on it or on its IP
+        still finds it because the focus filter runs before LIMIT."""
+        client, db_manager, headers = pg_api
+        tag = uuid.uuid4().hex[:8]
+        old = f"pivot-old-{tag}.example"
+        old_ip = "192.0.2.77"
+        _insert_site(db_manager, f"https://{old}/login", ip=old_ip, last_seen="2019-01-01")
+        for i in range(5):
+            _insert_site(
+                db_manager, f"https://pivot-new-{i}-{tag}.example/", last_seen=f"2026-09-0{i + 1}"
+            )
+
+        unfocused = client.get("/api/v1/graph", query_string={"limit": 3}, headers=headers)
+        body = unfocused.get_json()
+        assert unfocused.status_code == 200, body
+        assert f"domain:{old}" not in {n["id"] for n in body["nodes"]}
+        assert body["meta"]["limit"] == 3
+        assert body["meta"]["total_rows"] >= 6
+        assert body["meta"]["limited"] is True
+
+        by_domain = client.get(
+            "/api/v1/graph",
+            query_string={"focus": f"domain:{old.upper()}", "limit": 3},
+            headers=headers,
+        ).get_json()
+        assert {n["id"] for n in by_domain["nodes"]} == {f"domain:{old}", f"ip:{old_ip}"}
+        assert by_domain["meta"]["total_rows"] == 1
+        assert by_domain["meta"]["limited"] is False
+
+        by_ip = client.get(
+            "/api/v1/graph", query_string={"focus": f"ip:{old_ip}", "limit": 1}, headers=headers
+        ).get_json()
+        assert f"domain:{old}" in {n["id"] for n in by_ip["nodes"]}
+
+    def test_graph_values_come_from_stored_data(self, pg_api):
+        client, db_manager, headers = pg_api
+        tag = uuid.uuid4().hex[:8]
+        domain = f"stored-{tag}.example"
+        _insert_site(db_manager, f"https://{domain}/", ip="192.0.2.88", registrar=f"Reg {tag}")
+        with db_manager.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE phishing_sites SET detected_kit_type = 'evilginx', "
+                    "kit_confidence = 60, is_cloudflare = NULL WHERE url = :url"
+                ),
+                {"url": f"https://{domain}/"},
+            )
+
+        body = client.get(
+            "/api/v1/graph", query_string={"focus": f"domain:{domain}"}, headers=headers
+        ).get_json()
+
+        nodes = {n["id"]: n for n in body["nodes"]}
+        assert nodes[f"domain:{domain}"]["severity"] == "high"
+        assert nodes["ip:192.0.2.88"]["severity"] is None
+        assert nodes["kit:evilginx"]["severity"] is None
+        meta = nodes[f"domain:{domain}"]["meta"]
+        assert meta["First seen"] == "2026-01-01T00:00:00+00:00"
+        assert meta["Last seen"] == "2026-01-02T00:00:00+00:00"
+        assert "Hosting" not in meta
+        confidences = {e["relation"]: e["confidence"] for e in body["edges"]}
+        assert confidences == {"resolves_to": None, "registered_with": None, "detected_as": 0.6}
+
+
+class TestCampaignsOnPostgres:
+    def test_clusters_come_from_one_query_with_recent_threats(self, pg_api):
+        client, db_manager, headers = pg_api
+        tag = uuid.uuid4().hex[:8]
+        registrar = f"Cluster Registrar {tag}"
+        for i in range(3):
+            _insert_site(
+                db_manager,
+                f"https://c{i}-{tag}.example/",
+                registrar=registrar,
+                ip=f"198.51.100.{i + 1}",
+                status="down" if i == 0 else "up",
+            )
+        _insert_site(db_manager, f"https://lonely-{tag}.example/", registrar=f"Solo {tag}")
+
+        resp = client.get("/api/v1/campaigns", headers=headers)
+
+        assert resp.status_code == 200, resp.get_json()
+        body = resp.get_json()
+        item = next(c for c in body["items"] if c["registrar"] == registrar)
+        assert item["sites"] == 3
+        assert item["takedowns"] == 1
+        assert item["confidence"] == 80
+        assert sorted(item["resolved_ips"]) == ["198.51.100.1", "198.51.100.2", "198.51.100.3"]
+        assert {t["url"] for t in item["threats"]} == {
+            f"https://c{i}-{tag}.example/" for i in range(3)
+        }
+        threat = item["threats"][0]
+        assert set(threat) == {"url", "status", "first_seen", "threat_level"}
+        assert threat["first_seen"] == "2026-01-01T00:00:00+00:00"
+        assert not any(c["registrar"] == f"Solo {tag}" for c in body["items"])
+
+    def test_campaign_ids_are_stable_hashes_of_the_registrar(self, pg_api):
+        from src.api.phishing_api import campaign_id
+
+        client, db_manager, headers = pg_api
+        tag = uuid.uuid4().hex[:8]
+        registrar = f"Stable Registrar {tag}"
+        for i in range(2):
+            _insert_site(db_manager, f"https://s{i}-{tag}.example/", registrar=registrar)
+
+        first = client.get("/api/v1/campaigns", headers=headers).get_json()
+        # A newer, more active cluster changes the ordering but not the IDs.
+        for i in range(3):
+            _insert_site(
+                db_manager,
+                f"https://n{i}-{tag}.example/",
+                registrar=f"Newer {tag}",
+                last_seen="2026-09-01",
+            )
+        second = client.get("/api/v1/campaigns", headers=headers).get_json()
+
+        expected = campaign_id("registrar", registrar)
+        assert expected.startswith("CAMP-") and len(expected) == 15
+        for body in (first, second):
+            item = next(c for c in body["items"] if c["registrar"] == registrar)
+            assert item["id"] == expected
+
+
+class TestCampaignPaginationOnPostgres:
+    def _cluster(self, db_manager, registrar: str, *, scored: bool = True) -> None:
+        tag = uuid.uuid4().hex[:8]
+        for i in range(2):
+            _insert_site(db_manager, f"https://p{i}-{tag}.example/", registrar=registrar)
+        if not scored:
+            with db_manager.engine.begin() as conn:
+                conn.execute(
+                    text(
+                        "UPDATE phishing_sites SET api_confidence_score = NULL "
+                        "WHERE registrar_name = :r"
+                    ),
+                    {"r": registrar},
+                )
+
+    def test_confidence_is_null_when_no_site_was_scored(self, pg_api):
+        client, db_manager, headers = pg_api
+        registrar = f"Unscored {uuid.uuid4().hex[:8]}"
+        self._cluster(db_manager, registrar, scored=False)
+
+        body = client.get("/api/v1/campaigns?limit=500", headers=headers).get_json()
+
+        item = next(c for c in body["items"] if c["registrar"] == registrar)
+        assert item["confidence"] is None  # was 0
+
+    def test_pages_share_total_and_kpi_over_all_clusters(self, pg_api):
+        client, db_manager, headers = pg_api
+        for _ in range(3):
+            self._cluster(db_manager, f"Paged {uuid.uuid4().hex[:8]}")
+
+        everything = client.get("/api/v1/campaigns?limit=500", headers=headers).get_json()
+        first = client.get("/api/v1/campaigns?limit=1", headers=headers).get_json()
+        second = client.get("/api/v1/campaigns?limit=1&offset=1", headers=headers).get_json()
+        past_end = client.get(
+            f"/api/v1/campaigns?limit=1&offset={everything['total']}", headers=headers
+        ).get_json()
+
+        assert everything["total"] == len(everything["items"]) >= 3
+        assert [c["id"] for c in first["items"] + second["items"]] == [
+            c["id"] for c in everything["items"][:2]
+        ]
+        for page in (first, second, past_end):
+            assert page["total"] == everything["total"]
+            assert page["kpi"] == everything["kpi"]
+        assert (first["limit"], first["offset"], second["offset"]) == (1, 0, 1)
+        assert past_end["items"] == []
+        assert everything["kpi"]["total_sites"] == sum(c["sites"] for c in everything["items"])
+
+    def test_cluster_timestamps_carry_a_utc_offset(self, pg_api):
+        client, db_manager, headers = pg_api
+        registrar = f"Dated {uuid.uuid4().hex[:8]}"
+        self._cluster(db_manager, registrar)
+
+        body = client.get("/api/v1/campaigns?limit=500", headers=headers).get_json()
+
+        item = next(c for c in body["items"] if c["registrar"] == registrar)
+        assert item["first_seen"] == "2026-01-01T00:00:00+00:00"
+        assert item["last_activity"] == "2026-01-02T00:00:00+00:00"
+        assert item["status"] == "monitoring"  # live sites, no activity in 24 h
+
+
+def test_campaigns_issue_a_single_query():
+    """The endpoint used to run one extra query per registrar group (N+1)."""
+    from unittest.mock import MagicMock, patch
+
+    from src.reporting.email_detector import EnhancedAbuseEmailDetector
+
+    with (
+        patch("src.api.phishing_api.GrinderReportClient"),
+        patch("src.api.phishing_api.MultiAPIValidator"),
+    ):
+        from src.api.phishing_api import PhishingAPI
+
+        db = MagicMock()
+        api = PhishingAPI(db, MagicMock(spec=EnhancedAbuseEmailDetector), api_key="k")
+    conn = db.engine.begin.return_value.__enter__.return_value
+    totals = (2, 1, 0, 1, 5, 4)  # total, active, monitoring, closed, sites, takedowns
+    conn.execute.return_value.fetchall.return_value = [
+        ("Reg A", 2, "active", 1, None, None, ["192.0.2.1"], 50.0, [], *totals),
+        ("Reg B", 3, "closed", 3, None, None, None, None, '[{"url": "u"}]', *totals),
+    ]
+
+    resp = api.app.test_client().get("/api/v1/campaigns", headers={"Authorization": "Bearer k"})
+
+    assert resp.status_code == 200
+    assert conn.execute.call_count == 1
+    body = resp.get_json()
+    assert body["items"][1]["threats"] == [{"url": "u"}]
+    assert body["items"][1]["confidence"] is None
+    assert body["total"] == 2
+    assert body["kpi"] == {
+        "active": 1,
+        "monitoring": 0,
+        "closed": 1,
+        "total_sites": 5,
+        "total_takedowns": 4,
+    }
+
+
+class TestIocsOnPostgres:
+    def test_abuse_desk_mailboxes_are_not_exported_as_email_iocs(self, pg_api):
+        client, db_manager, headers = pg_api
+        tag = uuid.uuid4().hex[:8]
+        _insert_site(db_manager, f"https://ioc-{tag}.example/", ip="198.51.100.77")
+        with db_manager.engine.begin() as conn:
+            conn.execute(
+                text("UPDATE phishing_sites SET all_abuse_emails = :e WHERE url = :u"),
+                {
+                    "e": "abuse@registrar.example, abuse@hoster.example",
+                    "u": f"https://ioc-{tag}.example/",
+                },
+            )
+
+        email = client.get("/api/v1/intelligence/iocs?type=email", headers=headers).get_json()
+        domains = client.get("/api/v1/intelligence/iocs?type=domain&limit=500", headers=headers)
+
+        assert email["items"] == []
+        assert email["counts"]["email"] == 0
+        assert domains.status_code == 200
+        assert f"ioc-{tag}.example" in {i["value"] for i in domains.get_json()["items"]}
+        serialized = domains.get_data(as_text=True) + str(email)
+        assert "abuse@registrar.example" not in serialized
+
+    def test_total_counts_every_matching_item_not_the_page(self, pg_api):
+        client, db_manager, headers = pg_api
+        tag = uuid.uuid4().hex[:8]
+        for i in range(3):
+            _insert_site(db_manager, f"https://total-{i}-{tag}.example/x")
+
+        page = client.get(
+            "/api/v1/intelligence/iocs", query_string={"search": tag, "limit": 2}, headers=headers
+        ).get_json()
+        beyond = client.get(
+            "/api/v1/intelligence/iocs",
+            query_string={"search": tag, "limit": 2, "offset": 10},
+            headers=headers,
+        ).get_json()
+
+        assert len(page["items"]) == 2
+        assert page["total"] == 3
+        assert beyond["items"] == []
+        assert beyond["total"] == 3
+
+    def test_search_is_a_case_insensitive_substring_of_the_value(self, pg_api):
+        client, db_manager, headers = pg_api
+        tag = uuid.uuid4().hex[:8]
+        _insert_site(db_manager, f"https://login-{tag}.example/")
+        _insert_site(db_manager, f"https://other-{tag}.example/")
+
+        body = client.get(
+            "/api/v1/intelligence/iocs",
+            query_string={"search": f"LOGIN-{tag.upper()}"},
+            headers=headers,
+        ).get_json()
+
+        assert [i["value"] for i in body["items"]] == [f"login-{tag}.example"]
+        assert body["total"] == 1
+        item = body["items"][0]
+        assert item["first_seen"] == "2026-01-01T00:00:00+00:00"
+        assert item["last_seen"] == "2026-01-02T00:00:00+00:00"
+
+    def test_search_treats_like_wildcards_literally(self, pg_api):
+        client, _, headers = pg_api
+
+        body = client.get(
+            "/api/v1/intelligence/iocs", query_string={"search": "%"}, headers=headers
+        ).get_json()
+
+        assert body["items"] == [] and body["total"] == 0
+
+    def test_threat_filter_matches_the_stored_level(self, pg_api):
+        client, db_manager, headers = pg_api
+        tag = uuid.uuid4().hex[:8]
+        _insert_site(db_manager, f"https://crit-{tag}.example/")
+        _insert_site(db_manager, f"https://high-{tag}.example/")
+        with db_manager.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE phishing_sites SET multi_api_threat_level = 'critical' WHERE url = :u"
+                ),
+                {"u": f"https://crit-{tag}.example/"},
+            )
+
+        body = client.get(
+            "/api/v1/intelligence/iocs",
+            query_string={"search": tag, "threat": "CRITICAL"},
+            headers=headers,
+        ).get_json()
+
+        assert [(i["value"], i["threat"]) for i in body["items"]] == [
+            (f"crit-{tag}.example", "critical")
+        ]
+        assert body["total"] == 1
+
+    def test_ip_items_derive_threat_and_do_not_invent_hosting(self, pg_api):
+        client, db_manager, headers = pg_api
+        tag = uuid.uuid4().hex[:8]
+        ip = f"198.18.{int(tag[:2], 16)}.{int(tag[2:4], 16)}"
+        _insert_site(db_manager, f"https://ip-a-{tag}.example/", ip=ip)
+        _insert_site(db_manager, f"https://ip-b-{tag}.example/", ip=ip)
+        with db_manager.engine.begin() as conn:
+            conn.execute(
+                text(
+                    "UPDATE phishing_sites SET multi_api_threat_level = 'unknown', "
+                    "is_cloudflare = NULL WHERE url = :u"
+                ),
+                {"u": f"https://ip-b-{tag}.example/"},
+            )
+
+        body = client.get(
+            "/api/v1/intelligence/iocs",
+            query_string={"type": "ip", "search": ip},
+            headers=headers,
+        ).get_json()
+        critical = client.get(
+            "/api/v1/intelligence/iocs",
+            query_string={"type": "ip", "search": ip, "threat": "critical"},
+            headers=headers,
+        ).get_json()
+
+        item = next(i for i in body["items"] if i["value"] == ip)
+        assert item["threat"] == "high"
+        assert item["hits"] == 2
+        # is_cloudflare was never recorded for these rows: no tag, not "direct".
+        assert item["tags"] == []
+        assert critical["items"] == [] and critical["total"] == 0
+
+    def test_ip_tags_reflect_the_stored_cloudflare_flag(self, pg_api):
+        client, db_manager, headers = pg_api
+        tag = uuid.uuid4().hex[:8]
+        ip = f"198.19.{int(tag[:2], 16)}.{int(tag[2:4], 16)}"
+        _insert_site(db_manager, f"https://cf-{tag}.example/", ip=ip)
+        with db_manager.engine.begin() as conn:
+            conn.execute(
+                text("UPDATE phishing_sites SET is_cloudflare = 0 WHERE url = :u"),
+                {"u": f"https://cf-{tag}.example/"},
+            )
+
+        body = client.get(
+            "/api/v1/intelligence/iocs", query_string={"type": "ip", "search": ip}, headers=headers
+        ).get_json()
+
+        assert next(i for i in body["items"] if i["value"] == ip)["tags"] == ["direct"]

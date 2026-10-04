@@ -20,7 +20,6 @@ import shutil
 import time
 from typing import Any, Callable, Dict, Optional
 
-
 # ---------------------------------------------------------------------------
 # Status constants
 # ---------------------------------------------------------------------------

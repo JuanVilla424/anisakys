@@ -13,12 +13,9 @@ Tests cover:
 """
 
 import unittest
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 from src.detection.redirect_analyzer import (
     RedirectAnalyzer,
-    RedirectChain,
-    RedirectHop,
-    REDIRECT_STATUS_CODES,
 )
 
 

@@ -6,18 +6,19 @@ Main scanner class for detecting phishing sites through keyword analysis.
 
 from __future__ import annotations
 
+import datetime
+import gc
+import json
+import logging
 import os
-import re
-import socket
-import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List
 
 import requests
+from sqlalchemy import text
 
 from src.config import (
     settings,
-    CLOUDFLARE_IP_RANGES,
     ALLOWED_HEAD_STATUS,
     BROWSER_HEADERS,
     DNS_ERROR_KEY_PHRASES,
@@ -26,15 +27,14 @@ from src.data import ASN_ABUSE_EMAIL_DB, PROVIDER_ABUSE_EMAIL_DB
 from src.database import DatabaseManager, DATABASE_URL
 from src.detection.redirect_analyzer import RedirectAnalyzer
 from src.detection.utils import PhishingUtils
-from src.dns.network_utils import get_ip_info, is_cloudflare_ip
 from src.generators.query_generator import generate_queries_file
 from src.intelligence import MultiAPIValidator, AUTO_ANALYSIS_ENABLED, AbuseContactResolver
 from src.logger import logger
 from src.models import DynamicBatchConfig
 from src.monitoring.takedown import get_offset, save_offset
 from src.observability.metrics import increment_counter, METRIC_REDIRECT_CHAINS_TOTAL
-from src.observability.structured_logger import log_error
-from src.shutdown import shutdown_requested
+from src.observability.structured_logger import log_error, log_with_context
+from src.shutdown import is_shutdown_requested, wait_for_shutdown
 
 QUERIES_FILE = getattr(settings, "QUERIES_FILE", None)
 ENABLE_REDIRECT_ANALYSIS = getattr(settings, "ENABLE_REDIRECT_ANALYSIS", True)
@@ -257,17 +257,16 @@ class PhishingScanner:
 
                         log_with_context(
                             logger,
-                            "info",
-                            f"Redirect analysis complete: {redirect_chain.hop_count} hops, risk_score={redirect_chain.risk_score}",
-                            {
-                                "original_url": url,
-                                "final_url": final_url,
-                                "hop_count": redirect_chain.hop_count,
-                                "risk_score": redirect_chain.risk_score,
-                                "has_cloudflare": redirect_chain.has_cloudflare,
-                                "has_suspicious_tld": redirect_chain.has_suspicious_tld,
-                                "event_type": "redirect_analysis_complete",
-                            },
+                            logging.INFO,
+                            f"Redirect analysis complete: {redirect_chain.hop_count} hops, "
+                            f"risk_score={redirect_chain.risk_score}",
+                            original_url=url,
+                            final_url=final_url,
+                            hop_count=redirect_chain.hop_count,
+                            risk_score=redirect_chain.risk_score,
+                            has_cloudflare=redirect_chain.has_cloudflare,
+                            has_suspicious_tld=redirect_chain.has_suspicious_tld,
+                            event_type="redirect_analysis_complete",
                         )
                     except Exception as redirect_error:
                         log_error(
@@ -349,8 +348,7 @@ class PhishingScanner:
 
                                                 # Insert redirect chain
                                                 conn.execute(
-                                                    text(
-                                                        """
+                                                    text("""
                                                         INSERT INTO redirect_chains (
                                                             site_id, original_url, final_url, hop_count,
                                                             chain_urls, status_codes, risk_score,
@@ -358,12 +356,11 @@ class PhishingScanner:
                                                             has_cross_domain, has_loop, total_time_ms, analyzed_at
                                                         ) VALUES (
                                                             :site_id, :original_url, :final_url, :hop_count,
-                                                            :chain_urls::jsonb, :status_codes::jsonb, :risk_score,
+                                                            CAST(:chain_urls AS JSONB), CAST(:status_codes AS JSONB), :risk_score,
                                                             :has_cloudflare, :has_suspicious_tld, :has_url_shortener,
                                                             :has_cross_domain, :has_loop, :total_time_ms, NOW()
                                                         )
-                                                    """
-                                                    ),
+                                                    """),
                                                     {
                                                         "site_id": site_id,
                                                         "original_url": redirect_chain.original_url,
@@ -430,8 +427,7 @@ class PhishingScanner:
                                     # Store immediate results
                                     with self.db_manager.engine.begin() as conn:
                                         conn.execute(
-                                            text(
-                                                """
+                                            text("""
                                                 UPDATE phishing_sites
                                                 SET auto_analysis_status = 'completed',
                                                     auto_analysis_timestamp = :timestamp,
@@ -442,8 +438,7 @@ class PhishingScanner:
                                                     api_confidence_score = :confidence_score,
                                                     priority = 'high'
                                                 WHERE url = :url
-                                            """
-                                            ),
+                                            """),
                                             {
                                                 "timestamp": datetime.datetime.now().strftime(
                                                     "%Y-%m-%d %H:%M:%S"
@@ -503,7 +498,7 @@ class PhishingScanner:
         logger.debug(f"📊 Total queries to process: {self.total_queries}")
 
         cycle_count = 0
-        while not shutdown_requested:
+        while not is_shutdown_requested():
             cycle_count += 1
             logger.debug(f"🔄 Starting scan cycle #{cycle_count}")
 
@@ -556,4 +551,4 @@ class PhishingScanner:
             gc.collect()
 
             # Very short pause to prevent overwhelming (1 second)
-            time.sleep(1)
+            wait_for_shutdown(1)

@@ -8,16 +8,14 @@ Integrates with existing Anisakys infrastructure
 import re
 import requests
 import urllib.parse
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional
 import hashlib
 import json
-from datetime import datetime, timedelta
-import dns.resolver
+from datetime import datetime
 import whois
 from bs4 import BeautifulSoup
-import asyncio
 import time
-from urllib.parse import quote, parse_qs
+from urllib.parse import parse_qs
 import os
 
 from src.config import settings
@@ -205,7 +203,7 @@ class GoogleAdsPhishingDetector:
         if self._check_suspicious_tld(results["final_destination"]):
             results["indicators"].append("SUSPICIOUS_TLD")
             results["risk_score"] += 25
-            logger.warning(f"⚠️ Suspicious TLD detected")
+            logger.warning("⚠️ Suspicious TLD detected")
 
         # Check for phishing keywords in URL
         phishing_keywords = self._check_phishing_keywords(results["final_destination"])
@@ -229,7 +227,7 @@ class GoogleAdsPhishingDetector:
         if not ssl_info.get("valid", False):
             results["indicators"].append("INVALID_SSL_CERTIFICATE")
             results["risk_score"] += 25
-            logger.warning(f"⚠️ Invalid SSL certificate")
+            logger.warning("⚠️ Invalid SSL certificate")
 
         # Analyze landing page content
         page_analysis = self._analyze_landing_page(results["final_destination"])
@@ -671,7 +669,6 @@ class GoogleAdsPhishingDetector:
 
             time.sleep(random.uniform(2, 8))
 
-            search_url = f"https://www.{domain}/search?q={quote(keyword)}"
             logger.info(f"🔍 Searching Google Ads for: '{keyword}' on {domain}")
 
             # Get randomized headers
@@ -951,7 +948,7 @@ class GoogleAdsPhishingDetector:
 
             return ad_info if ad_info.get("url") else None
 
-        except Exception as e:
+        except Exception:
             return None
 
     def _extract_actual_url(self, google_url: str) -> str:
@@ -1177,15 +1174,13 @@ def main():
     # Perform quick scan
     scan_results = detector.quick_scan()
 
-    logger.info(f"📊 Quick scan completed:")
+    logger.info("📊 Quick scan completed:")
     logger.info(f"  Total ads found: {scan_results['total_ads']}")
     logger.info(f"  Suspicious ads: {scan_results['suspicious_count']}")
 
     # Generate report if ads were found
     if scan_results["total_ads"] > 0:
-        report = detector.generate_report(
-            scan_results["ads_analyzed"], "google_ads_monitoring_report.json"
-        )
+        detector.generate_report(scan_results["ads_analyzed"], "google_ads_monitoring_report.json")
 
     # Start continuous monitoring
     logger.info("\n" + "=" * 50)

@@ -4,7 +4,6 @@ Tests for ICANN compliance features: screenshots, contact validation, report tra
 
 import pytest
 import tempfile
-import json
 from unittest.mock import patch, MagicMock
 from pathlib import Path
 import importlib.util
@@ -17,8 +16,8 @@ main = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(main)
 
 # Import services
-from src.screenshot_service import ScreenshotService, capture_phishing_screenshot
-from src.reporting.abuse_contact_validator import AbuseContactValidator, validate_abuse_email
+from src.screenshot_service import ScreenshotService
+from src.reporting.abuse_contact_validator import AbuseContactValidator
 from src.reporting.report_tracker import ReportTracker, create_report_record, ReportStatus
 
 # User's test email
@@ -246,8 +245,9 @@ class TestReportTracker:
         tracker = ReportTracker(mock_engine)
 
         assert tracker.db_engine == mock_engine
-        # Should have called table creation
-        mock_engine.begin.assert_called()
+        # The schema is owned by Alembic: constructing a tracker touches no table
+        mock_engine.begin.assert_not_called()
+        mock_engine.connect.assert_not_called()
 
     def test_generate_report_id(self, mock_engine):
         """Test report ID generation"""
@@ -289,7 +289,7 @@ class TestReportTracker:
 
         assert result is True
         # Should have called database operations
-        assert mock_engine.begin.called
+        assert mock_engine.begin.called or mock_engine.connect.called
 
     def test_update_report_status(self, mock_engine):
         """Test updating report status"""

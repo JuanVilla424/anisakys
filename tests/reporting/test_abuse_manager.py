@@ -23,7 +23,6 @@ from src import main  # noqa: F401 — side-effect import to seed sys.modules
 import src.reporting.abuse_manager as abuse_manager_module
 from src.reporting.abuse_manager import AbuseReportManager
 
-
 # ---------------------------------------------------------------------------
 # Module-level patches (autouse)
 # ---------------------------------------------------------------------------
@@ -175,6 +174,36 @@ class TestAbuseReportManagerInit:
         assert mgr.cc_emails == []
 
 
+class TestCcLists:
+    """The first send CC'd escalation levels 2 and 3: __init__ defaulted the CC
+    list to DEFAULT_CC_EMAILS_ESCALATION_LEVEL2 and the send added level 3."""
+
+    def test_default_cc_list_is_default_cc_emails_not_escalation(
+        self, mock_db, mock_abuse_detector, mock_settings
+    ):
+        mock_settings.DEFAULT_CC_EMAILS = "CERT@example.org, team@example.org"
+        mock_settings.DEFAULT_CC_EMAILS_ESCALATION_LEVEL2 = "l2@example.org"
+        mock_settings.DEFAULT_CC_EMAILS_ESCALATION_LEVEL3 = "l3@example.org"
+        with (
+            patch("src.reporting.abuse_manager.MultiAPIValidator"),
+            patch("src.reporting.abuse_manager.GrinderReportClient"),
+            patch("src.reporting.abuse_manager.AbuseContactValidator"),
+            patch("src.reporting.abuse_manager.get_screenshot_service"),
+            patch("src.reporting.abuse_manager.ReportTracker"),
+        ):
+            mgr = AbuseReportManager(mock_db, mock_abuse_detector, cc_emails=None, timeout=5)
+
+        assert mgr.cc_emails == ["cert@example.org", "team@example.org"]
+
+    def test_escalation_starts_at_the_second_follow_up(self, manager, mock_settings):
+        mock_settings.DEFAULT_CC_EMAILS_ESCALATION_LEVEL2 = "l2@example.org"
+        mock_settings.DEFAULT_CC_EMAILS_ESCALATION_LEVEL3 = "l3@example.org"
+
+        assert manager._escalation_contacts(1) == []
+        assert manager._escalation_contacts(2) == ["l2@example.org"]
+        assert manager._escalation_contacts(3) == ["l2@example.org", "l3@example.org"]
+
+
 # ---------------------------------------------------------------------------
 # TestReportIpToGrinder
 # ---------------------------------------------------------------------------
@@ -307,14 +336,14 @@ class TestSendAbuseReport:
     def test_returns_false_when_template_rendering_fails(self, manager, mock_settings):
         """Should return False immediately when Jinja2 template rendering raises."""
         with (
-            patch("src.reporting.abuse_manager.Environment") as mock_env,
+            patch(
+                "src.reporting.abuse_manager.render_initial_report",
+                side_effect=Exception("template not found"),
+            ),
             patch(
                 "src.reporting.abuse_manager.AttachmentConfig.get_all_attachments", return_value=[]
             ),
         ):
-            mock_env.return_value.get_template.return_value.render.side_effect = Exception(
-                "template not found"
-            )
             manager.screenshot_service.capture_screenshot.return_value = {"success": False}
 
             result = manager.send_abuse_report(
@@ -331,7 +360,6 @@ class TestSendAbuseReport:
         mock_server = MagicMock()
 
         with (
-            patch("src.reporting.abuse_manager.Environment") as mock_env,
             patch("src.reporting.abuse_manager.smtplib.SMTP") as mock_smtp_class,
             patch(
                 "src.reporting.abuse_manager.AttachmentConfig.get_all_attachments", return_value=[]
@@ -339,9 +367,6 @@ class TestSendAbuseReport:
         ):
             mock_smtp_class.return_value.__enter__ = MagicMock(return_value=mock_server)
             mock_smtp_class.return_value.__exit__ = MagicMock(return_value=False)
-            mock_env.return_value.get_template.return_value.render.return_value = (
-                "<html>report</html>"
-            )
             manager.screenshot_service.capture_screenshot.return_value = {"success": False}
             manager.abuse_detector.validate_email.return_value = True
             manager.abuse_detector.validate_abuse_email_domain.return_value = True
@@ -365,7 +390,6 @@ class TestSendAbuseReport:
         mock_server = MagicMock()
 
         with (
-            patch("src.reporting.abuse_manager.Environment") as mock_env,
             patch("src.reporting.abuse_manager.smtplib.SMTP") as mock_smtp_class,
             patch(
                 "src.reporting.abuse_manager.AttachmentConfig.get_all_attachments", return_value=[]
@@ -373,9 +397,6 @@ class TestSendAbuseReport:
         ):
             mock_smtp_class.return_value.__enter__ = MagicMock(return_value=mock_server)
             mock_smtp_class.return_value.__exit__ = MagicMock(return_value=False)
-            mock_env.return_value.get_template.return_value.render.return_value = (
-                "<html>report</html>"
-            )
             manager.screenshot_service.capture_screenshot.return_value = {"success": False}
             manager.abuse_detector.validate_email.return_value = True
             manager.abuse_detector.validate_abuse_email_domain.return_value = True
@@ -395,7 +416,6 @@ class TestSendAbuseReport:
     def test_returns_false_when_smtp_raises(self, manager, mock_settings):
         """Should return False (not raise) when SMTP connection fails."""
         with (
-            patch("src.reporting.abuse_manager.Environment") as mock_env,
             patch(
                 "src.reporting.abuse_manager.smtplib.SMTP",
                 side_effect=ConnectionRefusedError("SMTP unavailable"),
@@ -404,9 +424,6 @@ class TestSendAbuseReport:
                 "src.reporting.abuse_manager.AttachmentConfig.get_all_attachments", return_value=[]
             ),
         ):
-            mock_env.return_value.get_template.return_value.render.return_value = (
-                "<html>report</html>"
-            )
             manager.screenshot_service.capture_screenshot.return_value = {"success": False}
             manager.abuse_detector.validate_email.return_value = True
             manager.abuse_detector.validate_abuse_email_domain.return_value = True
@@ -425,15 +442,11 @@ class TestSendAbuseReport:
         manager.abuse_detector.validate_email.return_value = False
 
         with (
-            patch("src.reporting.abuse_manager.Environment") as mock_env,
             patch("src.reporting.abuse_manager.smtplib.SMTP"),
             patch(
                 "src.reporting.abuse_manager.AttachmentConfig.get_all_attachments", return_value=[]
             ),
         ):
-            mock_env.return_value.get_template.return_value.render.return_value = (
-                "<html>report</html>"
-            )
             manager.screenshot_service.capture_screenshot.return_value = {"success": False}
 
             result = manager.send_abuse_report(
@@ -481,14 +494,7 @@ class TestProcessOverdueFollowups:
             }
         ]
 
-        with (
-            patch("src.reporting.abuse_manager.get_ip_info", return_value=("1.2.3.4", "ASN")),
-            patch(
-                "src.reporting.abuse_manager.PhishingUtils.determine_site_status",
-                return_value=("active", None),
-            ),
-            patch.object(manager, "send_abuse_report", return_value=True),
-        ):
+        with patch.object(manager, "send_abuse_report", return_value=True):
             manager.process_overdue_followups()
 
         # With one overdue report and site still active, send_abuse_report may be called

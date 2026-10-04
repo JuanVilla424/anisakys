@@ -3,9 +3,8 @@ Tests for abuse reporting functionality
 """
 
 import pytest
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import MagicMock
 import smtplib
-from email.mime.multipart import MIMEMultipart
 from src import main
 
 # Import needed classes
@@ -76,6 +75,8 @@ class TestAbuseReporting:
         engine.abuse_detector = mock_abuse_detector
         return engine
 
+    # Live network: validate_email() resolves the MX records of a real domain.
+    @pytest.mark.network
     def test_send_abuse_report_with_user_email(self):
         """Test that abuse reports use safe @passinbox.com email"""
         # Simply verify that our test email configuration is safe
@@ -102,6 +103,8 @@ class TestAbuseReporting:
         # Verify the email is set correctly for test mode
         assert mock_args.abuse_email == TEST_USER_EMAIL
 
+    # Live network: validate_email() resolves the MX records of a real domain.
+    @pytest.mark.network
     def test_enhanced_abuse_detector(self):
         """Test enhanced abuse email detection"""
         # Mock database manager for detector
@@ -155,7 +158,6 @@ class TestAbuseReporting:
     def test_email_error_handling(self):
         """Test email sending error handling"""
         # Test that we can simulate SMTP errors
-        import smtplib
 
         # Verify exception exists
         assert hasattr(smtplib, "SMTPException")

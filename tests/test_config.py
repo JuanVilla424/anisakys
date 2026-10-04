@@ -55,3 +55,40 @@ class TestDefaultScreenshotWorkerSocket:
         """Regression guard: the original literal assumed /run/anisakys
         existed and was writable, a deployment-specific assumption."""
         assert "/run/anisakys" not in DEFAULT_SCREENSHOT_WORKER_SOCKET
+
+
+class TestSecretSettings:
+    """Credentials are SecretStr so they never leak through repr/logs."""
+
+    def test_credentials_are_masked_in_repr(self):
+        from pydantic import SecretStr
+
+        from src.config import Settings
+
+        # Plain strings, exactly as they arrive from the environment / .env file.
+        cfg = Settings.model_validate(
+            {
+                "KEYWORDS": "k",
+                "DOMAINS": "d",
+                "SMTP_HOST": "h",
+                "SMTP_PORT": 25,
+                "ABUSE_EMAIL_SENDER": "s@example.invalid",
+                "ABUSE_EMAIL_SUBJECT": "x",
+                "VIRUSTOTAL_API_KEY": "vt-secret-value",
+                "SMTP_PASS": "smtp-secret-value",
+            }
+        )
+
+        assert isinstance(cfg.VIRUSTOTAL_API_KEY, SecretStr)
+        assert "vt-secret-value" not in repr(cfg)
+        assert "smtp-secret-value" not in repr(cfg)
+
+    def test_secret_value_unwraps_secrets_and_plain_strings(self):
+        from pydantic import SecretStr
+
+        from src.config import secret_value
+
+        assert secret_value(SecretStr("abc")) == "abc"
+        assert secret_value("plain") == "plain"
+        assert secret_value(SecretStr("")) is None
+        assert secret_value(None) is None

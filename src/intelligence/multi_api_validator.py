@@ -7,9 +7,9 @@ Aggregates results from multiple threat intelligence APIs
 
 import datetime
 import logging
-import re
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
+from urllib.parse import urlparse
 
 from src.config import settings
 from src.logger import logger
@@ -25,9 +25,16 @@ from src.dns.network_utils import safe_get_with_redirects
 
 # Import integrations
 from src.intelligence.virustotal import VirusTotalIntegration, VIRUSTOTAL_API_KEY
-from src.intelligence.urlvoid import URLVoidIntegration, URLVOID_API_KEY
+from src.intelligence.urlvoid import URLVoidIntegration, URLVOID_API_KEY, URLVOID_ENABLED
 from src.intelligence.phishtank import PhishTankIntegration, PHISHTANK_API_KEY
 from src.intelligence.google_safe_browsing import GoogleSafeBrowsingIntegration
+from src.intelligence.provider_common import (
+    ERROR,
+    LISTED,
+    NO_DATA,
+    NOT_LISTED,
+    PROVIDER_STATUSES,
+)
 from src.detection.url_analyzer import URLAnalyzer
 from src.detection.kit_fingerprint import score_kit_indicators
 
@@ -37,9 +44,125 @@ AUTO_REPORT_THRESHOLD_CONFIDENCE = getattr(settings, "AUTO_REPORT_THRESHOLD_CONF
 MANUAL_REVIEW_THRESHOLD_CONFIDENCE = getattr(settings, "MANUAL_REVIEW_THRESHOLD_CONFIDENCE", 50)
 
 # Auto-analysis is only truly enabled if we have API keys AND the setting is enabled
+# (a URLVoid key only counts while the unverified URLVoid client is enabled).
 AUTO_ANALYSIS_ENABLED = AUTO_MULTI_API_SCAN and (
-    VIRUSTOTAL_API_KEY or URLVOID_API_KEY or PHISHTANK_API_KEY
+    VIRUSTOTAL_API_KEY or (URLVOID_ENABLED and URLVOID_API_KEY) or PHISHTANK_API_KEY
 )
+
+
+_THREAT_ORDER = ["clean", "low", "medium", "high", "critical"]
+
+
+def _raise_floor(current: Optional[str], new: str) -> str:
+    """Return the more severe of two minimum threat levels.
+
+    Args:
+        current: Current floor (``None`` when there is none).
+        new: Candidate floor.
+
+    Returns:
+        The higher of the two levels.
+    """
+    if current is None or _THREAT_ORDER.index(new) > _THREAT_ORDER.index(current):
+        return new
+    return current
+
+
+def provider_status(result: Optional[Mapping[str, Any]]) -> str:
+    """Return the provider status of a VirusTotal/URLVoid/PhishTank result.
+
+    Results produced by the current clients carry ``status``; older stored or
+    hand-built results are classified from their legacy fields. Errors and
+    missing data never come out as ``not_listed``.
+
+    Args:
+        result: Provider result dict (may be ``None``).
+
+    Returns:
+        One of ``listed``, ``not_listed``, ``error`` or ``no_data``.
+    """
+    if not result:
+        return NO_DATA
+    status = result.get("status")
+    if status in PROVIDER_STATUSES:
+        return str(status)
+    if result.get("error"):
+        return ERROR
+    if result.get("is_phishing"):
+        return LISTED
+    threat_level = result.get("threat_level")
+    if threat_level in ("critical", "high", "medium", "low"):
+        return LISTED
+    if threat_level == "clean":
+        return NOT_LISTED
+    if "is_phishing" in result:
+        return NOT_LISTED
+    return NO_DATA
+
+
+def gsb_status(result: Optional[Mapping[str, Any]]) -> str:
+    """Return the provider status of a Google Safe Browsing result.
+
+    Only a checked lookup is an answer; ``safe`` is ignored unless
+    ``checked`` is true, so an errored lookup can never read as clean.
+
+    Args:
+        result: Result from ``GoogleSafeBrowsingIntegration`` (may be ``None``).
+
+    Returns:
+        One of ``listed``, ``not_listed``, ``error`` or ``no_data``.
+    """
+    if not result:
+        return NO_DATA
+    status = result.get("status")
+    if status in PROVIDER_STATUSES:
+        if status in (LISTED, NOT_LISTED) and not result.get("checked"):
+            return ERROR
+        return str(status)
+    # Legacy shape (stored before results carried a status): the old client
+    # set checked=True even on HTTP errors, so an error message wins.
+    if result.get("error"):
+        return ERROR
+    if not result.get("checked"):
+        return NO_DATA
+    return LISTED if result.get("safe") is False else NOT_LISTED
+
+
+def _gsb_threat_types(result: Optional[Mapping[str, Any]]) -> List[str]:
+    """List the threat types of a listed GSB result.
+
+    Args:
+        result: Google Safe Browsing result.
+
+    Returns:
+        Threat types, empty unless the result is ``listed``.
+    """
+    if gsb_status(result) != LISTED:
+        return []
+    assert result is not None
+    return [t.get("threat_type", "UNKNOWN") for t in result.get("threats_found", []) or []]
+
+
+def extract_domain(url: str) -> str:
+    """Extract the host name of a URL for domain-level lookups.
+
+    Uses ``urllib.parse`` so userinfo, port, path, query and fragment are
+    dropped (``http://paypal.com@evil.com:8080/x`` -> ``evil.com``).
+
+    Args:
+        url: URL, with or without a scheme.
+
+    Returns:
+        Lower-case host name without a trailing dot, or ``""`` if none.
+    """
+    candidate = url.strip()
+    if "://" not in candidate:
+        candidate = f"http://{candidate}"
+    try:
+        host = urlparse(candidate).hostname
+    except ValueError:
+        host = None
+    return (host or "").rstrip(".")
 
 
 class MultiAPIValidator:
@@ -73,7 +196,7 @@ class MultiAPIValidator:
         _scan_start = time.time()
 
         # Extract domain for domain-specific checks
-        domain = re.sub(r"^https?://", "", url).strip().split("/")[0]
+        domain = extract_domain(url)
 
         results = {
             "url": url,
@@ -104,14 +227,22 @@ class MultiAPIValidator:
         results["virustotal"] = vt_result
 
         # Step 1.5: VirusTotal domain report for registrar info
-        vt_domain = self.virustotal.get_domain_report(domain)
+        vt_domain: Dict[str, Any] = (
+            self.virustotal.get_domain_report(domain)
+            if domain
+            else {"status": NO_DATA, "error": "No host name in URL"}
+        )
         if not vt_domain.get("error"):
             results["virustotal"]["registrar"] = vt_domain.get("registrar")
             results["virustotal"]["creation_date"] = vt_domain.get("creation_date")
 
         # Step 2: URLVoid domain analysis
         logger.info(f"📊 Step 2: URLVoid domain analysis for {domain}")
-        uv_result = self.urlvoid.analyze_domain(domain)
+        uv_result: Dict[str, Any] = (
+            self.urlvoid.analyze_domain(domain)
+            if domain
+            else {"status": NO_DATA, "error": "No host name in URL"}
+        )
         results["urlvoid"] = uv_result
 
         # Merge registrar info from VT into urlvoid for consistent storage
@@ -220,7 +351,7 @@ class MultiAPIValidator:
         logger.info(f"📊 Step 5: Google Safe Browsing check for {url}")
         gsb_result = self.google_safe_browsing.check_url(url)
         results["google_safe_browsing"] = gsb_result
-        if not gsb_result.get("safe", True):
+        if gsb_status(gsb_result) == LISTED:
             logger.warning(
                 f"🚨 Google Safe Browsing threats found: {gsb_result.get('threat_count', 0)}"
             )
@@ -261,9 +392,11 @@ class MultiAPIValidator:
             vt_result, uv_result, pt_result, domain_age, url_analysis, gsb_result, kit_result
         )
 
-        # If every external threat API errored, heuristics alone (domain age,
-        # lexical score) must not claim a verdict — report unknown, zero trust.
-        if vt_result.get("error") and uv_result.get("error") and pt_result.get("error"):
+        # If no external source produced evidence (every threat-intel lookup
+        # errored or had no data, GSB was not checked and no kit was found),
+        # heuristics alone (domain age, lexical score) must not claim a
+        # verdict: report unknown, zero trust.
+        if not self._has_external_evidence(vt_result, uv_result, pt_result, gsb_result, kit_result):
             results["aggregated_threat_level"] = "unknown"
             results["confidence_score"] = 0
 
@@ -293,7 +426,7 @@ class MultiAPIValidator:
             threat_level=results["aggregated_threat_level"],
             confidence_score=results["confidence_score"],
             virustotal_threat=vt_result.get("threat_level", "unknown"),
-            urlvoid_safety_score=uv_result.get("safety_score", 0),
+            urlvoid_safety_score=uv_result.get("safety_score"),
             phishtank_verified=pt_result.get("verified", False),
             event_type="multi_api_scan_complete",
         )
@@ -303,6 +436,36 @@ class MultiAPIValidator:
             increment_counter(METRIC_DETECTIONS_TOTAL)
 
         return results
+
+    @staticmethod
+    def _has_external_evidence(
+        vt_result: Dict[str, Any],
+        uv_result: Dict[str, Any],
+        pt_result: Dict[str, Any],
+        gsb_result: Optional[Dict[str, Any]],
+        kit_result: Optional[Dict[str, Any]],
+    ) -> bool:
+        """Tell whether any external source returned usable data.
+
+        Args:
+            vt_result: VirusTotal result.
+            uv_result: URLVoid result.
+            pt_result: PhishTank result.
+            gsb_result: Google Safe Browsing result.
+            kit_result: Kit fingerprint result.
+
+        Returns:
+            ``True`` if a threat-intel provider answered (listed/not_listed),
+            GSB was checked, or a phishing kit was detected.
+        """
+        answered = (LISTED, NOT_LISTED)
+        return (
+            provider_status(vt_result) in answered
+            or provider_status(uv_result) in answered
+            or provider_status(pt_result) in answered
+            or gsb_status(gsb_result) in answered
+            or bool(kit_result and kit_result.get("kit_type"))
+        )
 
     @staticmethod
     def _aggregate_threat_level(
@@ -316,6 +479,10 @@ class MultiAPIValidator:
     ) -> str:
         """
         Aggregate threat levels from multiple APIs into single assessment.
+
+        Only provider answers vote: an errored, unconfigured, pending or stale
+        lookup is skipped, never counted as a clean vote. A Google Safe
+        Browsing SOCIAL_ENGINEERING listing sets a floor of ``high``.
 
         Args:
             vt_result (Dict[str, Any]): VirusTotal scan result
@@ -338,23 +505,24 @@ class MultiAPIValidator:
         if kit_result and kit_result.get("kit_type"):
             return "critical"
 
+        pt_listed = provider_status(pt_result) == LISTED and pt_result.get("is_phishing")
         # PhishTank has the highest priority (verified community reports)
-        if pt_result.get("is_phishing") and pt_result.get("verified"):
+        if pt_listed and pt_result.get("verified"):
             return "critical"
-        elif pt_result.get("is_phishing"):
+        elif pt_listed:
             threat_scores.append(4)  # High threat from PhishTank
 
+        min_threat_level: Optional[str] = None
+
         # Google Safe Browsing threats (very high priority)
-        if gsb_result and not gsb_result.get("safe", True):
-            threats = gsb_result.get("threats_found", [])
-            for threat in threats:
-                if threat.get("threat_type") == "MALWARE":
-                    return "critical"
-                elif threat.get("threat_type") == "SOCIAL_ENGINEERING":
-                    threat_scores.append(5)  # Phishing confirmed by Google
+        for threat_type in _gsb_threat_types(gsb_result):
+            if threat_type == "MALWARE":
+                return "critical"
+            elif threat_type == "SOCIAL_ENGINEERING":
+                threat_scores.append(5)  # Phishing confirmed by Google
+                min_threat_level = _raise_floor(min_threat_level, "high")
 
         # URL Analysis (typosquatting, homoglyphs, etc.)
-        min_threat_level = None
         if url_analysis:
             url_risk = url_analysis.get("risk_score", 0)
             # Homoglyphs are extremely suspicious - CRITICAL
@@ -368,7 +536,7 @@ class MultiAPIValidator:
                 threat_scores.append(5)
             # Suspicious TLD forces minimum "medium"
             if url_analysis.get("suspicious_tld", {}).get("detected"):
-                min_threat_level = "medium"
+                min_threat_level = _raise_floor(min_threat_level, "medium")
                 threat_scores.append(3)
             # High URL risk score
             if url_risk >= 70:
@@ -391,8 +559,9 @@ class MultiAPIValidator:
             else:
                 threat_scores.append(1)  # Established domain = clean
 
-        # VirusTotal threat level mapping
-        vt_threat = vt_result.get("threat_level", "unknown")
+        # VirusTotal threat level mapping (answers only: no vote on error/no data)
+        vt_answered = provider_status(vt_result) in (LISTED, NOT_LISTED)
+        vt_threat = vt_result.get("threat_level", "unknown") if vt_answered else "unknown"
         if vt_threat == "high":
             threat_scores.append(4)
         elif vt_threat == "medium":
@@ -402,8 +571,9 @@ class MultiAPIValidator:
         elif vt_threat == "clean":
             threat_scores.append(1)
 
-        # URLVoid threat level mapping
-        uv_threat = uv_result.get("threat_level", "unknown")
+        # URLVoid threat level mapping (answers only: no vote on error/no data)
+        uv_answered = provider_status(uv_result) in (LISTED, NOT_LISTED)
+        uv_threat = uv_result.get("threat_level", "unknown") if uv_answered else "unknown"
         if uv_threat == "high":
             threat_scores.append(4)
         elif uv_threat == "medium":
@@ -430,10 +600,8 @@ class MultiAPIValidator:
             result = "clean"
 
         # Enforce minimum threat level from suspicious indicators
-        if min_threat_level:
-            threat_order = ["clean", "low", "medium", "high", "critical"]
-            if threat_order.index(result) < threat_order.index(min_threat_level):
-                return min_threat_level
+        if min_threat_level and _THREAT_ORDER.index(result) < _THREAT_ORDER.index(min_threat_level):
+            return min_threat_level
 
         return result
 
@@ -449,6 +617,19 @@ class MultiAPIValidator:
     ) -> int:
         """
         Calculate confidence score based on API response quality and agreement.
+
+        Only provider answers contribute: errored or unconfigured lookups,
+        pending/stale analyses and the mere absence of a PhishTank listing are
+        not counted as (clean) evidence.
+
+        Args:
+            vt_result: VirusTotal result.
+            uv_result: URLVoid result.
+            pt_result: PhishTank result.
+            domain_age_days: Domain age in days.
+            url_analysis: URL lexical analysis result.
+            gsb_result: Google Safe Browsing result.
+            kit_result: Kit fingerprint result.
 
         Returns:
             int: Confidence score (0-100)
@@ -476,10 +657,11 @@ class MultiAPIValidator:
             else:
                 confidence += 60
 
-        # Google Safe Browsing confidence
-        if gsb_result and gsb_result.get("checked"):
+        # Google Safe Browsing confidence (checked lookups only)
+        gsb = gsb_status(gsb_result)
+        if gsb in (LISTED, NOT_LISTED):
             factors += 1
-            if not gsb_result.get("safe", True):
+            if gsb == LISTED:
                 confidence += 98  # Very high confidence from Google
             else:
                 confidence += 70  # Base confidence for clean result
@@ -496,31 +678,38 @@ class MultiAPIValidator:
             else:
                 confidence += 70  # Established domain
 
-        # PhishTank confidence
-        if not pt_result.get("error"):
+        # PhishTank confidence: a listing, or an explicit community verdict
+        # that the URL is not a phish. Absence from the database is no evidence.
+        pt = provider_status(pt_result)
+        if pt == LISTED and pt_result.get("is_phishing"):
             factors += 1
             if pt_result.get("verified"):
                 confidence += 95  # High confidence for verified reports
-            elif pt_result.get("is_phishing"):
-                confidence += 75  # Medium confidence for unverified reports
             else:
-                confidence += 60  # Base confidence for a clean result
-
-        # VirusTotal confidence
-        if not vt_result.get("error"):
+                confidence += 75  # Medium confidence for unverified reports
+        elif pt == NOT_LISTED and pt_result.get("verified_not_phish"):
             factors += 1
-            total_engines = vt_result.get("total_engines", 0)
+            confidence += 60  # Community verified the URL is not a phish
+
+        # VirusTotal confidence (answers with engine results only)
+        total_engines = vt_result.get("total_engines", 0) or 0
+        if provider_status(vt_result) in (LISTED, NOT_LISTED) and total_engines > 0:
+            factors += 1
             if total_engines >= 50:
                 confidence += 90  # High confidence with many engines
             elif total_engines >= 20:
                 confidence += 75  # Medium confidence
-            elif total_engines > 0:
+            else:
                 confidence += 60  # Low confidence
 
-        # URLVoid confidence
-        if not uv_result.get("error"):
+        # URLVoid confidence (answers with a numeric safety score only)
+        safety_score = uv_result.get("safety_score")
+        if (
+            provider_status(uv_result) in (LISTED, NOT_LISTED)
+            and isinstance(safety_score, (int, float))
+            and not isinstance(safety_score, bool)
+        ):
             factors += 1
-            safety_score = uv_result.get("safety_score", 50)
             confidence += min(90, safety_score + 20)  # Scale safety score
 
         return int(confidence / factors) if factors > 0 else 0
@@ -537,6 +726,15 @@ class MultiAPIValidator:
     ) -> List[str]:
         """
         Generate actionable recommendations based on scan results.
+
+        Args:
+            vt_result: VirusTotal result.
+            uv_result: URLVoid result.
+            pt_result: PhishTank result.
+            domain_age_days: Domain age in days.
+            url_analysis: URL lexical analysis result.
+            gsb_result: Google Safe Browsing result.
+            kit_result: Kit fingerprint result.
 
         Returns:
             List[str]: List of recommendations
@@ -597,16 +795,13 @@ class MultiAPIValidator:
                 )
 
         # Google Safe Browsing recommendations
-        if gsb_result and not gsb_result.get("safe", True):
-            threats = gsb_result.get("threats_found", [])
-            for threat in threats:
-                threat_type = threat.get("threat_type", "UNKNOWN")
-                if threat_type == "SOCIAL_ENGINEERING":
-                    recommendations.append("🚨 GOOGLE SAFE BROWSING: Confirmed phishing site")
-                elif threat_type == "MALWARE":
-                    recommendations.append("🚨 GOOGLE SAFE BROWSING: Malware distribution detected")
-                else:
-                    recommendations.append(f"🚨 GOOGLE SAFE BROWSING: {threat_type} detected")
+        for threat_type in _gsb_threat_types(gsb_result):
+            if threat_type == "SOCIAL_ENGINEERING":
+                recommendations.append("🚨 GOOGLE SAFE BROWSING: Confirmed phishing site")
+            elif threat_type == "MALWARE":
+                recommendations.append("🚨 GOOGLE SAFE BROWSING: Malware distribution detected")
+            else:
+                recommendations.append(f"🚨 GOOGLE SAFE BROWSING: {threat_type} detected")
 
         # Domain age recommendations
         if domain_age_days is not None:
@@ -619,7 +814,7 @@ class MultiAPIValidator:
                 recommendations.append(f"⚠️ CAUTION: New domain ({domain_age_days} days old)")
 
         # PhishTank recommendations
-        if pt_result.get("is_phishing"):
+        if provider_status(pt_result) == LISTED and pt_result.get("is_phishing"):
             if pt_result.get("verified"):
                 recommendations.append(
                     "🚨 CRITICAL: URL verified as phishing by PhishTank community"
@@ -631,7 +826,7 @@ class MultiAPIValidator:
                 recommendations.append("⚠️ WARNING: URL reported as phishing (unverified)")
 
         # VirusTotal recommendations
-        if not vt_result.get("error"):
+        if provider_status(vt_result) in (LISTED, NOT_LISTED):
             malicious = vt_result.get("malicious", 0)
             total = vt_result.get("total_engines", 0)
 
@@ -645,11 +840,11 @@ class MultiAPIValidator:
                     )
 
         # URLVoid recommendations
-        if not uv_result.get("error"):
-            safety_score = uv_result.get("safety_score", 100)
-            blacklists = uv_result.get("blacklists", [])
+        if provider_status(uv_result) in (LISTED, NOT_LISTED):
+            safety_score = uv_result.get("safety_score")
+            blacklists = uv_result.get("blacklists") or []
 
-            if safety_score <= 50:
+            if isinstance(safety_score, (int, float)) and safety_score <= 50:
                 recommendations.append(f"⚠️ URLVoid: Low safety score ({safety_score}/100)")
 
             if blacklists:

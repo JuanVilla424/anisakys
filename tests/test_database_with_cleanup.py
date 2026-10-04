@@ -88,12 +88,10 @@ class TestDatabaseWithCleanup:
 
         # Insert within transaction
         db_session.execute(
-            text(
-                """
+            text("""
                 INSERT INTO phishing_sites (url, manual_flag, first_seen)
                 VALUES (:url, 1, CURRENT_TIMESTAMP)
-            """
-            ),
+            """),
             {"url": test_url},
         )
 

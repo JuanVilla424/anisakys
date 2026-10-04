@@ -8,7 +8,6 @@ from pathlib import Path
 import importlib.util
 import time
 import threading
-import json
 
 # Load main module
 module_path = Path(__file__).parent.parent / "src" / "main.py"
@@ -117,7 +116,7 @@ class TestFunctionalE2E:
             ]
 
             for url in test_urls:
-                result = engine.scanner.scan_site(url)
+                engine.scanner.scan_site(url)
 
             assert len(detected_sites) == 2
             assert "https://paypal-verify.com" in detected_sites
@@ -142,7 +141,6 @@ class TestFunctionalE2E:
         # Test 3: Abuse reporting (send_abuse_report lives in report_manager)
         with (
             patch("src.reporting.abuse_manager.smtplib.SMTP") as mock_smtp,
-            patch("src.reporting.abuse_manager.Environment") as mock_env_tpl,
             patch(
                 "src.reporting.abuse_manager.AttachmentConfig.get_all_attachments",
                 return_value=[],
@@ -151,9 +149,6 @@ class TestFunctionalE2E:
             mock_server = MagicMock()
             mock_smtp.return_value.__enter__ = MagicMock(return_value=mock_server)
             mock_smtp.return_value.__exit__ = MagicMock(return_value=False)
-            mock_env_tpl.return_value.get_template.return_value.render.return_value = (
-                "<html>Phishing Report</html>"
-            )
 
             with (
                 patch.object(
@@ -215,17 +210,13 @@ class TestFunctionalE2E:
                     "WHERE url IN ('https://test-phish1.com', 'https://test-phish2.com')"
                 )
             )
-            conn.execute(
-                main.text(
-                    """
+            conn.execute(main.text("""
                 INSERT INTO phishing_sites
                 (url, manual_flag, auto_detected, first_seen, auto_analysis_status, priority)
                 VALUES
                 ('https://test-phish1.com', 0, 1, CURRENT_TIMESTAMP, 'pending', 'high'),
                 ('https://test-phish2.com', 0, 1, CURRENT_TIMESTAMP, 'pending', 'medium')
-            """
-                )
-            )
+            """))
 
         # Mock multi-API scan
         with patch.object(engine, "perform_multi_api_scan") as mock_scan:
@@ -249,14 +240,10 @@ class TestFunctionalE2E:
 
         # Check status
         with engine.db_manager.engine.connect() as conn:
-            result = conn.execute(
-                main.text(
-                    """
+            result = conn.execute(main.text("""
                 SELECT COUNT(*) FROM phishing_sites
                 WHERE auto_analysis_status = 'pending'
-            """
-                )
-            ).scalar()
+            """)).scalar()
 
             # Should have pending sites
             assert result >= 0
@@ -265,7 +252,6 @@ class TestFunctionalE2E:
         """Test REST API endpoints"""
         import argparse
         from flask import Flask
-        from flask.testing import FlaskClient
 
         args = argparse.Namespace(
             start_api=True,
@@ -284,7 +270,7 @@ class TestFunctionalE2E:
         )
 
         # Create Flask app for testing
-        app = Flask(__name__)
+        Flask(__name__)
 
         # Mock the API setup
         with patch("flask.Flask") as mock_flask:
@@ -292,14 +278,9 @@ class TestFunctionalE2E:
             mock_flask.return_value = mock_app
 
             # Initialize API endpoints
-            engine = Engine(args)
+            Engine(args)
 
             # Test report endpoint
-            report_data = {
-                "url": "https://phishing-test.com",
-                "priority": "high",
-                "description": "Confirmed phishing site",
-            }
 
             # Mock the route decorator and handler
             @mock_app.route("/api/v1/report", methods=["POST"])
@@ -449,7 +430,7 @@ class TestFunctionalE2E:
 
             # Should handle error gracefully
             try:
-                with engine.db_manager.engine.connect() as conn:
+                with engine.db_manager.engine.connect():
                     pass
             except Exception as e:
                 assert "Database connection failed" in str(e)

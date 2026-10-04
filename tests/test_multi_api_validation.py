@@ -3,8 +3,7 @@ Tests for multi-API validation functionality
 """
 
 import pytest
-from unittest.mock import patch, MagicMock
-import json
+from unittest.mock import patch
 from src import main
 
 # Import needed classes

@@ -8,10 +8,13 @@ Providers NOT in this DB accept email — covered by WHOIS all_abuse_emails.
 Methods:
 - form_only: Email reports are ignored/rejected. Web form is the ONLY way.
 - form_and_email: Both web form and email work. Form is usually faster.
+
+Form-only entries also list ``email_domains``: abuse mailboxes on those
+registrable domains are not monitored, so the reporting pipeline turns an
+e-mail to them into an analyst web-form task (see ``lookup_form_by_email``).
 """
 
 from typing import Dict, List, Optional
-
 
 # Each entry: patterns (lowercase substrings to match against registrar_name),
 # form_url, and method
@@ -22,36 +25,42 @@ REGISTRAR_FORM_DB: List[Dict] = [
         "name": "GoDaddy",
         "form_url": "https://supportcenter.godaddy.com/abusereport/phishing",
         "method": "form_only",
+        "email_domains": ["godaddy.com", "secureserver.net"],
     },
     {
         "patterns": ["cloudflare, inc", "cloudflare registrar"],
         "name": "Cloudflare Registrar",
         "form_url": "https://abuse.cloudflare.com/phishing",
         "method": "form_only",
+        "email_domains": ["cloudflare.com"],
     },
     {
         "patterns": ["porkbun"],
         "name": "Porkbun",
         "form_url": "https://porkbun.com/abuse",
         "method": "form_only",
+        "email_domains": ["porkbun.com"],
     },
     {
         "patterns": ["ovh", "ovhcloud"],
         "name": "OVHcloud",
         "form_url": "https://www.ovhcloud.com/en/abuse/",
         "method": "form_only",
+        "email_domains": ["ovh.net", "ovh.com", "ovh.ca", "ovhcloud.com"],
     },
     {
         "patterns": ["google llc", "google domains"],
         "name": "Google Cloud",
         "form_url": "https://support.google.com/code/contact/cloud_platform_report",
         "method": "form_only",
+        "email_domains": ["google.com"],
     },
     {
         "patterns": ["microsoft"],
         "name": "Microsoft Azure",
         "form_url": "https://msrc.microsoft.com/report/abuse",
         "method": "form_only",
+        "email_domains": ["microsoft.com"],
     },
     # === FORM AND EMAIL (both work, form is faster) ===
     {
@@ -200,5 +209,35 @@ def lookup_registrar_form(registrar_name: Optional[str]) -> Optional[Dict]:
                 "form_url": entry["form_url"],
                 "method": entry["method"],
             }
+
+    return None
+
+
+def lookup_form_by_email(email: Optional[str]) -> Optional[Dict]:
+    """
+    Find the provider whose abuse e-mail domain matches ``email``.
+
+    Only form-only entries declare ``email_domains``; a match means the
+    address is not a working abuse channel and the web form must be used.
+
+    Args:
+        email: Abuse e-mail address (e.g. "abuse@godaddy.com").
+
+    Returns:
+        Dict with form_url, method, name if the address belongs to a listed
+        provider (exact domain or a subdomain of it); None otherwise.
+    """
+    if not email or "@" not in email:
+        return None
+
+    domain = email.rsplit("@", 1)[1].strip().lower().rstrip(".")
+    for entry in REGISTRAR_FORM_DB:
+        for listed in entry.get("email_domains", ()):
+            if domain == listed or domain.endswith("." + listed):
+                return {
+                    "name": entry["name"],
+                    "form_url": entry["form_url"],
+                    "method": entry["method"],
+                }
 
     return None

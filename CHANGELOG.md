@@ -1,3 +1,33 @@
+## [Unreleased] - v2 phase 0 (stabilisation)
+
+### Security
+
+- **api**: serve through gunicorn, never run the Werkzeug debugger, bind to 127.0.0.1 by default; configurable ProxyFix
+- **api**: scopes `report_send`, `email_admin` and `metrics`; `/report` submissions wait for analyst approval; SSRF check on `/report`; mailbox allowlist for e-mail monitors
+- **api**: `/metrics` requires a token or API key; errors never echo exception text and carry a request id
+- **config**: every credential is a `SecretStr`; secrets are redacted from logs
+- **reporting**: never e-mail registrant/WHOIS-wide addresses, MX hosts or networks reached through attacker-controlled origin DNS; SMTP credentials only over TLS
+- **docker**: secrets and data directories kept out of the image; non-root user
+- **deps**: requests bumped past PYSEC-2026-2275
+
+### Bug Fixes
+
+- **core**: 31 undefined names that silently broke scanning, report tracking, auto-analysis, `/stats` and `--reset-offset`
+- **core**: shutdown is observable by every worker loop; signals are handled gracefully
+- **core**: testing mode now actually blocks CC recipients
+- **db**: all schema in Alembic (revisions 003–005); runtime DDL, including a `DROP TABLE abuse_reports CASCADE` fallback, removed
+- **reporting**: transactional outbox with row claiming (no duplicate e-mails across processes), shared SMTP rate limit, stable report ids, follow-ups that advance the SLA, brand-neutral templates with a text part and defanged URLs, screenshot submission to Safe Browsing
+- **monitoring**: a site is down only after consecutive failing probes from several profiles; WAF challenges and parked pages no longer close reports
+- **intel**: provider errors and missing data are never counted as clean; Safe Browsing social engineering raises the verdict to at least high; VirusTotal/PhishTank timeouts and field fixes; Web Risk submission via the documented API; URLVoid disabled until verified
+- **api**: PATCH `/reports`, `/multi-scan`, `/reports` recipients, `/graph` focus, `/campaigns` N+1 and stable ids, validated parameters, honest nulls instead of invented values, JSON 429s with Retry-After
+- **scripts**: manual report CLI escapes HTML, strips `www.` correctly and uses the shared mailer
+
+### Features
+
+- **api**: `POST /api/v2/stix/bundle` (STIX 2.1, TLP 2.0), `GET /api/v1/session`, `GET /api/v1/sites/sources`, analyst tasks for form-only providers, delivery state in `/api/v1/stats`
+- **core**: process roles with a single scheduler and a docker-compose scheduler service
+- **ci**: one blocking pipeline (ruff, black, pyright, pytest with PostgreSQL and a 69 % coverage floor, pip-audit, Docker build); dependencies locked from `pyproject.toml`
+
 ## [1.1.2] - 2026-10-02
 
 ### Features

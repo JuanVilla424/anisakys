@@ -327,19 +327,19 @@ pip install -r requirements.txt
 **🔹 Using Poetry (Alternative)**
 
 ```bash
-# Install Poetry
-pip install poetry
+# Install Poetry (>= 2.2)
+pipx install poetry
 
-# Setup project
-poetry lock
-poetry install
+# Install the locked dependencies (incl. dev tools)
+poetry install --with dev
 
 # Activate environment
-poetry shell
-
-# When done
-deactivate
+eval $(poetry env activate)
 ```
+
+> 📦 `pyproject.toml` is the single source of truth for dependencies and
+> `poetry.lock` pins them. `requirements*.txt` are generated from the lock:
+> after changing dependencies run `poetry lock` and `tools/sync-requirements.sh`.
 
 </td>
 </tr>
@@ -356,6 +356,16 @@ nano .env
 ```
 
 > 💡 **Pro Tip:** The system will work with minimal configuration, but API keys significantly enhance detection capabilities.
+
+#### **Step 4: 🗃️ Apply Database Migrations**
+
+```bash
+# Creates or upgrades the schema in DATABASE_URL (run again after every update)
+alembic upgrade head
+```
+
+> ⚠️ The application never creates tables by itself: every process checks at startup that the
+> database is at the latest Alembic revision and refuses to start otherwise.
 
 ## ⚙️ Configuration
 
@@ -433,20 +443,76 @@ python anisakys.py --show-auto-status
 
 ### 🚀 **REST API Server**
 
-Start the REST API server with authentication:
+Development server (binds `API_BIND_HOST`, `127.0.0.1` by default; the Werkzeug
+debugger is never enabled):
 
 ```bash
 cd anisakys
 python anisakys.py --start-api --api-port 8080 --api-key your_secure_api_key
 ```
 
+Production: serve the WSGI app with gunicorn (as `entrypoint-backend.sh` does). This
+process only serves HTTP; background jobs run in the scheduler role.
+
+```bash
+gunicorn --bind 127.0.0.1:8091 --worker-class gthread --threads 4 'src.api.wsgi:create_app()'
+```
+
+Behind a reverse proxy set `TRUSTED_PROXY_HOPS`; with several workers set
+`RATELIMIT_STORAGE_URL=redis://...` so rate limits are shared.
+
+**API keys and scopes** (`python -m src.cli.api_keys create --help` lists them):
+`read`, `scan`, `report` (submissions wait for analyst approval), `report_send`
+(submissions are reported without approval), `write`, `email_admin` (e-mail monitor
+threads, limited to `EMAIL_MONITOR_ALLOWED_MAILBOXES`), `metrics` and `admin`.
+
 **API Endpoints:**
 
-- `POST /api/v1/report` - Submit phishing reports
+- `POST /api/v1/report` - Submit phishing reports (202 pending approval without `report_send`)
 - `POST /api/v1/multi-scan` - Perform multi-API validation
 - `GET /api/v1/status/<url>` - Check report status
-- `GET /api/v1/stats` - System statistics
-- `GET /api/v1/health` - Health check
+- `GET /api/v1/stats` - System statistics, incl. `reports_by_status` and `outbox_by_status`
+- `GET /api/v1/session` - The calling key: `key_type`, `key_name`, `key_prefix` (8 chars),
+  usable `scopes` and `rate_limit_storage` (`shared`/`per-process`); never the secret
+- `GET /api/v1/sites/sources` - `[{"source": str|null, "count": int}]`
+- `GET /api/v1/reports/tasks` - Open analyst tasks (web-form providers, sites without a contact)
+- `POST /api/v1/reports/tasks/<id>/complete` - Close one: `{"outcome": "submitted"|"not_applicable", "note"?}`
+- `POST /api/v2/stix/bundle` - Build a STIX 2.1 indicator bundle (TLP 2.0, AMBER by default)
+- `GET /api/v1/health` - Health check with a database ping (503 when unhealthy)
+- `GET /metrics` - Prometheus metrics (`METRICS_TOKEN` or a `metrics`/`read` API key)
+
+**Response conventions** (console endpoints):
+
+- Unknown is `null`, never a default: no invented severities, confidences, statuses,
+  sources, priorities, `gsb_safe`/`is_cloudflare` flags or "now" timestamps.
+- Timestamps are ISO-8601 with an explicit offset (`2026-01-02T03:04:05+00:00`).
+  Database columns without time zone are read as UTC (the images and CI run the
+  database and the application in UTC); see `src/api/serializers.py`.
+- Every response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining`,
+  `X-RateLimit-Reset` and `Retry-After`; a 429 is
+  `{"error": "...", "retry_after": <seconds>}` with the same `Retry-After`.
+  `/threads/<id>/results` is limited per API key *and* thread (30/min, 120/min per key).
+- Lists report the real `total` across pages (`/sites`, `/intelligence/iocs`,
+  `/campaigns`, `/reports/tasks`); `/graph` reports `meta.total_rows`, `meta.limit`
+  and `meta.limited`.
+
+**Compatibility notes** (fields that were lying now say so; names are unchanged):
+
+- `/graph`: node `severity` is null except for domains (severest stored threat level);
+  edge `confidence` is null except `detected_as` (stored kit confidence / 100);
+  `meta` counts count the returned nodes.
+- `/intelligence/iocs`: new `search` and `threat` filters; IP `threat` is the severest
+  level of its sites; IP `tags` is empty when the Cloudflare flag is unknown.
+- `/sites`: new `takedown_date`; `source`, `priority`, `is_cloudflare` and `gsb_safe`
+  (until GSB checked the site) can be null.
+- `/threads`: `results_count` = results shown (same as `/threads/<id>/results` total),
+  `total_results` = all recorded results incl. discarded, new `last_execution_results`.
+- `/integrations`: `status` is `unknown` without breaker data; `circuit_breaker` and
+  `error_rate` can be null; `last_success` is null (not recorded), new `state_changed_at`.
+- `/campaigns`: `confidence` can be null; new `limit`/`offset` (default 100, max 500).
+- `/activity`: `timestamp` and `severity` can be null; undated events sort last.
+- `/reports`: `status` can be null; `?status=` accepts `queued`, `failed`, `pending_manual`.
+- `/report`: `processing` can be `scheduled` (the scheduler role reports the site).
 
 ### 🕸️ **Manual Phishing Site Reporting**
 

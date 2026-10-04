@@ -1,8 +1,6 @@
 """Tests for browser headers and user agent functionality"""
 
-import pytest
 from unittest.mock import patch, MagicMock
-import requests
 from src import main
 
 
