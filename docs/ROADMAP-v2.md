@@ -117,7 +117,7 @@ covered by a test. Numbers in this file are measured, never estimated.
 - [x] Tests for stores, API client, router guards and critical views; CI workflow.
 
 ### Exit criteria (all met; see tests/regressions and tests/reporting)
-- [ ] CI green and blocking in both repositories (verify on the phase 0 pull requests).
+- [x] CI green and blocking in both repositories (JuanVilla424/anisakys#214 and JuanVilla424/anisakys-frontend#18, 2026-10-04).
 - [x] 0 `F821`, 0 type and lint errors in touched code.
 - [x] One regression test per bug.
 - [x] Scanner processes 10 consecutive batches without restarting (test `tests/regressions`).
