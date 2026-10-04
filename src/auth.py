@@ -36,7 +36,7 @@ import logging
 import threading
 import time
 from functools import wraps
-from typing import Callable, Dict, FrozenSet, Iterable, Optional, Tuple, Union
+from typing import Any, Callable, Dict, FrozenSet, Iterable, Optional, Tuple, Union
 
 from flask import Response, current_app, g, has_request_context, jsonify, request
 
@@ -64,6 +64,10 @@ SCOPE_DESCRIPTIONS: Dict[str, str] = {
     "admin": "every endpoint (wildcard)",
 }
 VALID_SCOPES = frozenset(SCOPE_DESCRIPTIONS)
+
+# Characters of the stored key prefix (api_keys.key_prefix, e.g. "ank_a1b2...")
+# that GET /api/v1/session may show to identify the key.
+SESSION_KEY_PREFIX_LENGTH = 8
 
 # Scopes that include others: holding the key scope grants the listed ones too.
 IMPLIED_SCOPES: Dict[str, FrozenSet[str]] = {"report_send": frozenset({"report"})}
@@ -132,6 +136,53 @@ def expand_scopes(scopes: Iterable[str]) -> FrozenSet[str]:
     for scope in list(expanded):
         expanded |= IMPLIED_SCOPES.get(scope, frozenset())
     return frozenset(expanded)
+
+
+def effective_scopes(scopes: Iterable[str]) -> FrozenSet[str]:
+    """Return every scope a key can actually use.
+
+    Implied scopes are added (see ``IMPLIED_SCOPES``) and ``admin``, the
+    wildcard, expands to every known scope (``admin`` included).
+
+    Args:
+        scopes: Scopes held by a key.
+
+    Returns:
+        The usable scopes.
+    """
+    expanded = expand_scopes(scopes)
+    if "admin" in expanded:
+        return VALID_SCOPES
+    return expanded
+
+
+def current_key_session() -> Optional[Dict[str, Any]]:
+    """Describe the API key authenticating the current request, without secrets.
+
+    Only meaningful inside a view protected by :func:`require_api_key`. The key
+    itself and its hash are never returned; ``key_prefix`` is the first
+    ``SESSION_KEY_PREFIX_LENGTH`` characters of the identifier the
+    ``api_keys`` table stores for listing and revocation (null for the master
+    key, which has none).
+
+    Returns:
+        ``{"key_type": "master" | "database", "key_name": str | None,
+        "key_prefix": str | None, "scopes": [sorted usable scopes]}``, or None
+        outside an authenticated request.
+    """
+    if not has_request_context():
+        return None
+    scopes = getattr(g, "api_key_scopes", None)
+    if scopes is None:
+        return None
+    is_master = bool(getattr(g, "api_key_is_master", False))
+    prefix = getattr(g, "api_key_prefix", None)
+    return {
+        "key_type": "master" if is_master else "database",
+        "key_name": None if is_master else getattr(g, "api_key_name", None),
+        "key_prefix": (prefix[:SESSION_KEY_PREFIX_LENGTH] if prefix and not is_master else None),
+        "scopes": sorted(effective_scopes(scopes)),
+    }
 
 
 def _required_scopes(required_scope: ScopeRequirement) -> FrozenSet[str]:
@@ -213,7 +264,15 @@ def _update_last_used(key_hash: str) -> None:
 
 
 def _lookup_db_key(key: str):
-    """Return (scopes, allowed_ips) for an active key, or None if not found."""
+    """Look up an active database API key by the hash of its secret.
+
+    Args:
+        key: The bearer token presented by the client.
+
+    Returns:
+        ``{"scopes", "allowed_ips", "key_hash", "name", "key_prefix"}`` for an
+        active, unrevoked key, or None when there is none (or the lookup fails).
+    """
     key_hash = _hash_key(key)
     try:
         from src.database import db_engine
@@ -222,13 +281,19 @@ def _lookup_db_key(key: str):
         with db_engine.connect() as conn:
             row = conn.execute(
                 text(
-                    "SELECT scopes, allowed_ips FROM api_keys "
+                    "SELECT scopes, allowed_ips, name, key_prefix FROM api_keys "
                     "WHERE key_hash = :h AND active = TRUE AND revoked_at IS NULL"
                 ),
                 {"h": key_hash},
             ).fetchone()
         if row:
-            return {"scopes": row[0], "allowed_ips": row[1], "key_hash": key_hash}
+            return {
+                "scopes": row[0],
+                "allowed_ips": row[1],
+                "key_hash": key_hash,
+                "name": row[2],
+                "key_prefix": row[3],
+            }
     except Exception as exc:
         logger.error(f"Auth DB lookup error: {exc}")
     return None
@@ -275,6 +340,8 @@ def authenticate_request(scope: ScopeRequirement = None) -> Optional[Tuple[Respo
         increment_counter(METRIC_AUTH_TOTAL, method="master", status="success")
         g.api_key_scopes = frozenset({"admin"})
         g.api_key_is_master = True
+        g.api_key_name = None
+        g.api_key_prefix = None
         return None
 
     # --- Database key check ---
@@ -305,6 +372,8 @@ def authenticate_request(scope: ScopeRequirement = None) -> Optional[Tuple[Respo
     increment_counter(METRIC_AUTH_TOTAL, method="api_key", status="success")
     g.api_key_scopes = parse_scopes(key_data["scopes"])
     g.api_key_is_master = False
+    g.api_key_name = key_data.get("name")
+    g.api_key_prefix = key_data.get("key_prefix")
     return None
 
 

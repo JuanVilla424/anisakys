@@ -32,7 +32,13 @@ from src.config import settings
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from stix2.exceptions import STIXError
-from src.auth import has_scope, require_api_key, require_metrics_access, _hash_key
+from src.auth import (
+    _hash_key,
+    current_key_session,
+    has_scope,
+    require_api_key,
+    require_metrics_access,
+)
 from src.api.mailbox_policy import is_domain_allowed, is_mailbox_allowed
 from src.api.errors import (
     current_request_id,
@@ -1386,6 +1392,29 @@ class PhishingAPI:
 
             except Exception as e:
                 return internal_error("test_grinder_integration", e)
+
+        @self.app.route("/api/v1/session", methods=["GET"])
+        @self.limiter.limit("60 per minute")
+        @require_api_key
+        def get_session():
+            """Describe the API key session of the caller (any valid key).
+
+            Lets the console show "API key session · scopes" and hide actions
+            the key cannot perform. Never returns the key or its hash.
+
+            Returns:
+                JSON ``{"key_type": "master" | "database", "key_name": str | null,
+                "key_prefix": str | null, "scopes": [str], "rate_limit_storage":
+                "shared" | "per-process"}``; ``scopes`` lists every usable scope
+                (implied ones included; ``admin`` expands to all of them).
+            """
+            session = current_key_session()
+            if session is None:  # pragma: no cover - require_api_key ran
+                return internal_error("get_session")
+            session["rate_limit_storage"] = self._rate_limit_storage_mode()
+            response = jsonify(session)
+            response.headers["Cache-Control"] = "no-store"
+            return response, 200
 
         @self.app.route("/api/v1/stats", methods=["GET"])
         @self.limiter.limit("120 per minute")
@@ -3723,6 +3752,22 @@ class PhishingAPI:
                 generate_latest(),
                 mimetype=CONTENT_TYPE_LATEST,
             )
+
+    def _rate_limit_storage_mode(self) -> str:
+        """Tell whether rate-limit counters are shared by every API worker.
+
+        Returns:
+            ``"shared"`` when counters live in the configured external storage,
+            ``"per-process"`` when they are kept in memory: no
+            ``RATELIMIT_STORAGE_URL``, or the storage became unreachable and
+            flask-limiter fell back to memory.
+        """
+        if self._rate_limit_storage_uri == MEMORY_STORAGE_URI:
+            return "per-process"
+        # flask-limiter has no public flag for its in-memory fallback.
+        if getattr(self.limiter, "_storage_dead", False):
+            return "per-process"
+        return "shared"
 
     def _rate_limited(self, exc: RateLimitExceeded) -> Tuple[Response, int]:
         """Render a rate-limit breach as JSON with the seconds to wait.
