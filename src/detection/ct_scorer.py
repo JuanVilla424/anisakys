@@ -107,6 +107,7 @@ def score_ct_candidate(domain: str, permutation_map: Dict[str, str]) -> Dict:
     matched_brand = (
         base.get("typosquatting", {}).get("target_brand")
         or base.get("combo_squatting", {}).get("target_brand")
+        or base.get("tld_swap", {}).get("target_brand")
         or base.get("homoglyphs", {}).get("target_brand")
     )
 

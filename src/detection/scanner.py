@@ -457,6 +457,9 @@ class PhishingScanner:
                                                 "url": url,
                                             },
                                         )
+                                        from src.capture.service import record_scan_capture
+
+                                        record_scan_capture(conn, url, immediate_results)
 
                                 except Exception as api_error:
                                     logger.error(

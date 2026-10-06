@@ -179,10 +179,11 @@ def apply_reporting_schema(engine) -> None:
     """Create the tables the reporting pipeline needs, exactly as Alembic would.
 
     Runs the baseline revision (001) through a minimal ``op`` stand-in and then
-    the SQL constants of the reporting revision (004) and of the analyst labels
-    revision (006), whose ``label_verdict`` the claim queries read. Every
-    statement is idempotent, so this is safe on a test database that already
-    has some of the tables.
+    the SQL constants of the reporting revision (004), of the analyst labels
+    revision (006), whose ``label_verdict`` the claim queries read, and of the
+    detection-core revision (007: brands, captures, judge audit, fusion columns).
+    Every statement is idempotent, so this is safe on a test database that
+    already has some of the tables.
 
     Args:
         engine: SQLAlchemy engine bound to the test database.
@@ -190,6 +191,7 @@ def apply_reporting_schema(engine) -> None:
     baseline = _load_migration("001_baseline_schema.py")
     reporting = _load_migration("004_reporting_outbox.py")
     labels = _load_migration("006_analyst_labels.py")
+    detection = _load_migration("007_detection_core.py")
     with engine.begin() as conn:
 
         class _Op:
@@ -199,13 +201,17 @@ def apply_reporting_schema(engine) -> None:
 
         setattr(baseline, "op", _Op())
         baseline.upgrade()
-        for statement in (*reporting.UPGRADE_STATEMENTS, *labels.UPGRADE_STATEMENTS):
+        for statement in (
+            *reporting.UPGRADE_STATEMENTS,
+            *labels.UPGRADE_STATEMENTS,
+            *detection.UPGRADE_STATEMENTS,
+        ):
             conn.execute(text(statement))
 
 
 @pytest.fixture(scope="session", autouse=True)
 def reporting_schema(create_test_database):
-    """Apply migrations 001 + 004 + 006 to the test database once per session."""
+    """Apply migrations 001 + 004 + 006 + 007 to the test database once per session."""
     engine = create_engine(create_test_database)
     try:
         apply_reporting_schema(engine)
@@ -229,10 +235,10 @@ def _restore_reporting_schema(reporting_schema, db_engine):
             text(
                 "SELECT COUNT(*) FROM information_schema.columns "
                 "WHERE table_name = 'phishing_sites' "
-                "AND column_name IN ('report_lease_until', 'label_verdict')"
+                "AND column_name IN ('report_lease_until', 'label_verdict', 'fusion_probability')"
             )
         ).scalar()
-    if present != 2:
+    if present != 3:
         apply_reporting_schema(db_engine)
 
 
@@ -346,6 +352,23 @@ def test_urls(unique_test_id):
         "clean": f"https://clean-{unique_test_id}.com",
         "suspicious": f"https://sus-{unique_test_id}.net",
     }
+
+
+@pytest.fixture(autouse=True)
+def _fresh_provider_runtime():
+    """Every test starts with an empty provider cache and full rate-limit buckets.
+
+    The cache is process-wide (src/intelligence/provider_runtime.py): without this, a
+    mocked provider answer of one test would be served to the next.
+    """
+    from src.brands import catalog
+    from src.intelligence import provider_runtime
+
+    provider_runtime.reset()
+    catalog.invalidate()
+    yield
+    provider_runtime.reset()
+    catalog.invalidate()
 
 
 @pytest.fixture(autouse=True)

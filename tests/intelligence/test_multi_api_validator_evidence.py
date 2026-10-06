@@ -10,10 +10,14 @@ from unittest.mock import patch
 
 import pytest
 
+from src.capture.service import PageCapture
+from src.detection.llm_judge import Judgement
+
 from src.intelligence.multi_api_validator import (
     MultiAPIValidator,
     extract_domain,
     gsb_status,
+    kit_brand_hint,
     provider_status,
 )
 
@@ -142,15 +146,23 @@ class TestExtractDomain:
         assert extract_domain(url) == expected
 
 
+OFFLINE_CAPTURE = PageCapture(url="https://phish.example/login", status="error", error="offline")
+PAGE_CAPTURE = PageCapture(
+    url="https://phish.example/login",
+    status="ok",
+    final_url="https://phish.example/login",
+    http_status=200,
+    headers={"x-evilginx": "1"},
+    html="<html><title>Sign in</title><form><input type='password'></form></html>",
+)
+
+
 @pytest.fixture
 def validator():
     v = MultiAPIValidator()
     patches = [
         patch.object(v.url_analyzer, "analyze", return_value={"risk_score": 0}),
-        patch(
-            "src.intelligence.multi_api_validator.safe_get_with_redirects",
-            side_effect=ConnectionError("offline"),
-        ),
+        patch("src.intelligence.multi_api_validator.fetch_page", return_value=OFFLINE_CAPTURE),
         patch(
             "src.reporting.email_detector.EnhancedAbuseEmailDetector.get_enhanced_whois_info",
             return_value={"registrar": "Example Registrar", "creation_date": "2010-01-01"},
@@ -193,14 +205,13 @@ class TestComprehensiveScan:
             patch.object(validator.urlvoid, "analyze_domain", return_value=UV_ERROR),
             patch.object(validator.phishtank, "check_phishing_status", return_value=PT_ERROR),
             patch.object(validator.google_safe_browsing, "check_url", return_value=GSB_ERROR),
-            patch("src.intelligence.multi_api_validator.safe_get_with_redirects"),
-            patch(
-                "src.intelligence.multi_api_validator.score_kit_indicators",
-                return_value={"kit_type": "evilginx", "confidence": 90, "indicators": ["x"]},
-            ),
+            patch("src.intelligence.multi_api_validator.fetch_page", return_value=PAGE_CAPTURE),
         ):
             result = validator.comprehensive_scan("https://phish.example/login")
+        assert result["detected_kit_type"] == "evilginx"
         assert result["aggregated_threat_level"] == "critical"
+        assert result["capture"]["status"] == "ok"
+        assert result["page_features"]["password_fields"] == 1
 
     def test_userinfo_trick_queries_the_actual_host(self, validator):
         with (
@@ -247,7 +258,9 @@ class TestStageInstrumentation:
             "phishtank",
             "whois",
             "google_safe_browsing",
+            "capture",
             "kit_fingerprint",
+            "content_features",
         }
         assert all(ms >= 0 for ms in result["stage_timings_ms"].values())
         assert result["stage_status"] == {
@@ -257,5 +270,182 @@ class TestStageInstrumentation:
             "phishtank": "error",
             "google_safe_browsing": "listed",
             "whois": "not_listed",
+            "capture": "error",
             "kit_fingerprint": "no_data",
         }
+
+    def test_answers_are_shared_through_the_cache(self, validator):
+        validator.virustotal.api_key = "configured"  # only configured providers are cached
+        with (
+            patch.object(validator.virustotal, "scan_url", return_value=VT_CLEAN) as vt,
+            patch.object(validator.urlvoid, "analyze_domain", return_value=UV_DISABLED),
+            patch.object(validator.phishtank, "check_phishing_status", return_value=PT_ERROR) as pt,
+            patch.object(validator.google_safe_browsing, "check_url", return_value=GSB_PHISHING),
+        ):
+            validator.comprehensive_scan("https://phish.example/login")
+            second = validator.comprehensive_scan("https://phish.example/login")
+
+        assert vt.call_count == 1  # the answer was cached for the second scan
+        assert pt.call_count == 2  # errors are never cached
+        assert second["stage_status"]["virustotal_url"] == "not_listed"
+
+
+COMBO = {"combo_squatting": {"detected": True, "target_brand": "google"}}
+SWAP = {"tld_swap": {"detected": True, "target_brand": "google", "suffix": "com.pe"}}
+TYPO = {"typosquatting": {"detected": True, "target_brand": "paypal"}}
+
+
+class TestUnconfiguredProviders:
+    def test_they_answer_at_once_without_spending_the_budget(self, validator):
+        validator.virustotal.api_key = None
+        validator.urlvoid.enabled = False
+        validator.google_safe_browsing.enabled = False
+        with (
+            patch.object(validator.virustotal, "scan_url", return_value=VT_ERROR) as vt,
+            patch.object(validator.urlvoid, "analyze_domain", return_value=UV_DISABLED) as uv,
+            patch.object(validator.phishtank, "check_phishing_status", return_value=PT_ERROR),
+            patch.object(validator.google_safe_browsing, "check_url", return_value=GSB_ERROR),
+            patch(
+                "src.intelligence.multi_api_validator.cached_call",
+                side_effect=lambda stage, key, fn, *args, **kw: (fn(*args), False),
+            ) as budgeted,
+        ):
+            validator.comprehensive_scan("https://phish.example/login")
+
+        assert vt.called and uv.called
+        assert sorted(call.args[0] for call in budgeted.call_args_list) == ["phishtank", "whois"]
+
+
+class TestWhoisUnderLoad:
+    def test_a_rate_limited_lookup_is_no_data_not_an_answer(self, validator):
+        limited = {"status": "no_data", "error": "rate limited", "rate_limited": True}
+        with (
+            patch.object(validator.virustotal, "scan_url", return_value=VT_ERROR),
+            patch.object(validator.urlvoid, "analyze_domain", return_value=UV_DISABLED),
+            patch.object(validator.phishtank, "check_phishing_status", return_value=PT_ERROR),
+            patch.object(validator.google_safe_browsing, "check_url", return_value=GSB_ERROR),
+            patch.object(validator, "_whois_lookup", return_value={}),
+            patch(
+                "src.intelligence.multi_api_validator.cached_call",
+                side_effect=lambda stage, key, fn, *args, **kw: (
+                    (limited, False) if stage == "whois" else (fn(*args), False)
+                ),
+            ),
+        ):
+            result = validator.comprehensive_scan("https://phish.example/login")
+
+        assert result["whois"] == {} and result["stage_status"]["whois"] == "no_data"
+        assert result["domain_age_days"] is None
+
+
+class TestEstablishedDomains:
+    """A brand in the name of an old domain is usually the brand's own property."""
+
+    @pytest.mark.parametrize(
+        "analysis, age, expected",
+        [
+            (TYPO, 5000, "paypal"),  # a lookalike always counts
+            (COMBO, 10, "google"),
+            (COMBO, None, "google"),
+            (COMBO, 4000, None),  # thinkwithgoogle.com
+            (SWAP, 10, "google"),
+            (SWAP, None, None),  # unknown age: no proof it is not the brand's own
+            (SWAP, 9000, None),  # google.com.pe
+            ({}, 10, None),
+        ],
+    )
+    def test_kit_brand_hint(self, analysis, age, expected):
+        assert kit_brand_hint(analysis, age) == expected
+
+    def test_the_rules_do_not_count_an_established_brand_domain(self):
+        url_risk = {"risk_score": 20}
+        young_swap = agg(VT_ERROR, UV_DISABLED, PT_ERROR, 20, {**url_risk, **SWAP}, GSB_ERROR)
+        old_swap = agg(VT_ERROR, UV_DISABLED, PT_ERROR, 9000, {**url_risk, **SWAP}, GSB_ERROR)
+        old_combo = agg(VT_ERROR, UV_DISABLED, PT_ERROR, 9000, {**url_risk, **COMBO}, GSB_ERROR)
+
+        rank = ["unknown", "clean", "low", "medium", "high", "critical"]
+        assert rank.index(young_swap) > rank.index(old_swap)
+        assert rank.index(old_combo) == rank.index(old_swap)
+
+
+# A page with a login form and nothing a provider or the kit fingerprint would flag.
+PLAIN_LOGIN = PageCapture(
+    url="https://phish.example/login",
+    status="ok",
+    final_url="https://phish.example/signin",
+    http_status=200,
+    html="<html><title>Sign in</title><script>var x=1</script><p>Enter your password</p></html>",
+)
+
+
+class StubJudge:
+    """Answers every page with the same judgement and records what it was shown."""
+
+    def __init__(self, judgement: Judgement) -> None:
+        self.judgement = judgement
+        self.calls: list = []
+
+    def judge(self, url, final_url=None, title=None, page_text=None, screenshot=None):
+        self.calls.append((url, final_url, title, page_text))
+        return self.judgement
+
+
+class TestJudgeStep:
+    """The optional LLM judge: evidence attached to the scan, never the verdict itself."""
+
+    def _scan(self, validator, judge, capture):
+        validator.judge = judge
+        with (
+            patch.object(validator.virustotal, "scan_url", return_value=VT_ERROR),
+            patch.object(validator.urlvoid, "analyze_domain", return_value=UV_DISABLED),
+            patch.object(validator.phishtank, "check_phishing_status", return_value=PT_ERROR),
+            patch.object(validator.google_safe_browsing, "check_url", return_value=GSB_ERROR),
+            patch("src.intelligence.multi_api_validator.fetch_page", return_value=capture),
+        ):
+            return validator.comprehensive_scan("https://phish.example/login")
+
+    def test_the_judgement_is_attached_without_changing_the_verdict(self, validator):
+        judge = StubJudge(
+            Judgement(status="ok", verdict={"is_phishing": True, "confidence": 0.97}, cost_usd=0.01)
+        )
+
+        result = self._scan(validator, judge, PLAIN_LOGIN)
+
+        assert judge.calls == [
+            (
+                "https://phish.example/login",
+                "https://phish.example/signin",
+                "Sign in",
+                "Sign in Enter your password",
+            )
+        ]
+        assert result["llm_judge"]["verdict"]["is_phishing"] is True
+        assert result["stage_status"]["llm_judge"] == "listed"
+        assert "llm_judge" in result["stage_timings_ms"]
+        assert result["aggregated_threat_level"] == "unknown"  # nothing external answered
+
+    def test_a_benign_judgement_and_a_failed_one(self, validator):
+        benign = StubJudge(
+            Judgement(status="ok", verdict={"is_phishing": False, "confidence": 0.8})
+        )
+        failed = StubJudge(Judgement(status="error", error="HTTP 500"))
+        undecided = StubJudge(
+            Judgement(status="ok", verdict={"is_phishing": None, "confidence": 0})
+        )
+
+        assert self._scan(validator, benign, PLAIN_LOGIN)["stage_status"]["llm_judge"] == (
+            "not_listed"
+        )
+        assert self._scan(validator, failed, PLAIN_LOGIN)["stage_status"]["llm_judge"] == "error"
+        assert self._scan(validator, undecided, PLAIN_LOGIN)["stage_status"]["llm_judge"] == (
+            "no_data"
+        )
+
+    def test_no_capture_no_question(self, validator):
+        judge = StubJudge(Judgement(status="ok", verdict={"is_phishing": True, "confidence": 1}))
+
+        result = self._scan(validator, judge, OFFLINE_CAPTURE)
+
+        assert judge.calls == []
+        assert result["llm_judge"]["status"] == "no_capture"
+        assert result["stage_status"]["llm_judge"] == "no_data"

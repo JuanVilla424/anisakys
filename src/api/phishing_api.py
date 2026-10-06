@@ -66,6 +66,16 @@ from src.intelligence import (
     GRINDER0X_API_URL,
     GRINDER_INTEGRATION_ENABLED,
 )
+from src.brands import (
+    BrandConflictError,
+    BrandNotFoundError,
+    BrandRecord,
+    BrandRepository,
+    BrandValidationError,
+)
+from src.brands import invalidate as invalidate_brand_catalog
+from src.brands.repository import MAX_ASSET_BYTES
+from src.capture.service import latest_capture, record_scan_capture
 from src.labels import (
     MAX_NOTE_LENGTH,
     MAX_TAG_LENGTH,
@@ -868,6 +878,75 @@ def approval_json(row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def brand_asset_json(asset: Dict[str, Any]) -> Dict[str, Any]:
+    """Serialise a reference image of a brand (hashes only, the image is not kept).
+
+    Args:
+        asset: Row of ``brand_assets``.
+
+    Returns:
+        ``{"id", "kind", "source_url", "sha256", "mmh3", "phash", "dhash", "width",
+        "height", "created_at"}``.
+    """
+    return {
+        "id": asset["id"],
+        "kind": asset["kind"],
+        "source_url": asset["source_url"],
+        "sha256": asset["sha256"],
+        "mmh3": asset["mmh3"],
+        "phash": asset["phash"],
+        "dhash": asset["dhash"],
+        "width": asset["width"],
+        "height": asset["height"],
+        "created_at": iso_utc(asset["created_at"]),
+    }
+
+
+def brand_json(record: BrandRecord) -> Dict[str, Any]:
+    """Serialise a brand of the catalogue.
+
+    Args:
+        record: The brand.
+
+    Returns:
+        Brand fields, ``domains`` and ``assets``.
+    """
+    return {
+        "slug": record.slug,
+        "name": record.name,
+        "category": record.category,
+        "country": record.country,
+        "priority": record.priority,
+        "aliases": record.aliases,
+        "lure_keywords": record.lure_keywords,
+        "takedown_preferences": record.takedown_preferences,
+        "active": record.active,
+        "created_at": iso_utc(record.created_at),
+        "updated_at": iso_utc(record.updated_at),
+        "domains": [
+            {"domain": d["domain"], "kind": d["kind"], "login_url": d["login_url"]}
+            for d in record.domains
+        ],
+        "assets": [brand_asset_json(asset) for asset in record.assets],
+    }
+
+
+def _brand_error(error: Exception):
+    """Map a brand repository error to its HTTP response.
+
+    Args:
+        error: Validation, not-found or conflict error.
+
+    Returns:
+        ``(response, status)``.
+    """
+    if isinstance(error, BrandValidationError):
+        return jsonify({"error": error.message, "parameter": error.field}), 400
+    if isinstance(error, BrandNotFoundError):
+        return jsonify({"error": "Brand not found"}), 404
+    return jsonify({"error": str(error)}), 409
+
+
 def campaign_id(kind: str, key: str) -> str:
     """Return a stable campaign identifier for a grouping key.
 
@@ -1438,6 +1517,9 @@ class PhishingAPI:
                                     ),
                                 },
                             )
+
+                        # The capture, its features and the brand identification (drawer).
+                        record_scan_capture(conn, url, scan_result)
 
                         # Get report status info for response
                         report_info = conn.execute(
@@ -2194,6 +2276,31 @@ class PhishingAPI:
             except Exception as e:
                 return internal_error("get_site_labels", e, extra={"site_id": site_id})
 
+        # ── GET /api/v1/sites/<id>/capture ─────────────────────────────────────
+        @self.app.route("/api/v1/sites/<int:site_id>/capture", methods=["GET"])
+        @self.limiter.limit("60 per minute")
+        @require_api_key(scope="read")
+        def get_site_capture(site_id: int):
+            """The newest capture of a site: what the page served and what was read from it.
+
+            Args:
+                site_id: ``id`` of the site.
+
+            Returns:
+                JSON ``{"capture": {...} | null}`` (null until a scan captures the page),
+                404 for an unknown site.
+            """
+            try:
+                with self.db_manager.engine.connect() as conn:
+                    site = conn.execute(
+                        text("SELECT 1 FROM phishing_sites WHERE id = :s"), {"s": site_id}
+                    ).first()
+                    if site is None:
+                        return jsonify({"error": "Site not found"}), 404
+                    return jsonify({"capture": latest_capture(conn, site_id)}), 200
+            except Exception as e:
+                return internal_error("get_site_capture", e, extra={"site_id": site_id})
+
         # ── GET /api/v1/labels ─────────────────────────────────────────────────
         @self.app.route("/api/v1/labels", methods=["GET"])
         @self.limiter.limit("30 per minute")
@@ -2225,6 +2332,188 @@ class PhishingAPI:
                 )
             except Exception as e:
                 return internal_error("get_labels", e)
+
+        # ── Brand catalogue (/api/v1/brands) ──────────────────────────────────
+        @self.app.route("/api/v1/brands", methods=["GET"])
+        @self.limiter.limit("60 per minute")
+        @require_api_key(scope="read")
+        def list_brands():
+            """List the brands added from the console, by priority then name.
+
+            Query: ``search`` (slug, name, alias or domain), ``include_inactive``
+            (``true``), ``limit`` (1-200), ``offset``.
+
+            Returns:
+                JSON ``{"items": [...], "total", "limit", "offset"}``; empty until a brand
+                is added (the built-in detection list is not part of the catalogue).
+            """
+            limit = int_arg(request.args, "limit", default=50, minimum=1, maximum=200)
+            offset = _offset_arg()
+            search = str_arg(request.args, "search", max_length=100)
+            include_inactive = request.args.get("include_inactive", "").lower() == "true"
+            try:
+                records, total = BrandRepository(self.db_manager.engine).list(
+                    search=search, include_inactive=include_inactive, limit=limit, offset=offset
+                )
+            except Exception as e:
+                return internal_error("list_brands", e)
+            return (
+                jsonify(
+                    {
+                        "items": [brand_json(r) for r in records],
+                        "total": total,
+                        "limit": limit,
+                        "offset": offset,
+                    }
+                ),
+                200,
+            )
+
+        @self.app.route("/api/v1/brands", methods=["POST"])
+        @self.limiter.limit("30 per minute")
+        @require_api_key(scope="write")
+        def create_brand():
+            """Add a brand to protect.
+
+            Body: ``{"slug", "name", "category"?, "country"?, "priority"? (1-5),
+            "aliases"?: [str], "domains"?: [str | {"domain", "kind", "login_url"?}],
+            "lure_keywords"?: {"es": [str], "en": [str]}, "takedown_preferences"?: {}}``.
+
+            Returns:
+                201 with the brand; 400 on an invalid field; 409 when the slug or a
+                domain is taken.
+            """
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                return jsonify({"error": "Request body must be a JSON object"}), 400
+            try:
+                record = BrandRepository(self.db_manager.engine).create(data)
+            except (BrandValidationError, BrandConflictError) as e:
+                return _brand_error(e)
+            except Exception as e:
+                return internal_error("create_brand", e)
+            invalidate_brand_catalog()
+            logger.info(f"🏷️ Brand {record.slug} added to the catalogue")
+            return jsonify(brand_json(record)), 201
+
+        @self.app.route("/api/v1/brands/<slug>", methods=["GET"])
+        @self.limiter.limit("60 per minute")
+        @require_api_key(scope="read")
+        def get_brand(slug: str):
+            """One brand with its domains and reference images.
+
+            Args:
+                slug: Brand slug.
+
+            Returns:
+                The brand, or 404.
+            """
+            try:
+                return jsonify(brand_json(BrandRepository(self.db_manager.engine).get(slug))), 200
+            except BrandNotFoundError as e:
+                return _brand_error(e)
+            except Exception as e:
+                return internal_error("get_brand", e, extra={"slug": slug})
+
+        @self.app.route("/api/v1/brands/<slug>", methods=["PATCH"])
+        @self.limiter.limit("30 per minute")
+        @require_api_key(scope="write")
+        def update_brand(slug: str):
+            """Change some fields of a brand (``domains`` replaces the list; ``active``
+            re-enables or disables it).
+
+            Args:
+                slug: Brand slug.
+
+            Returns:
+                The brand; 400, 404 or 409 on errors.
+            """
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                return jsonify({"error": "Request body must be a JSON object"}), 400
+            try:
+                record = BrandRepository(self.db_manager.engine).update(slug, data)
+            except (BrandValidationError, BrandNotFoundError, BrandConflictError) as e:
+                return _brand_error(e)
+            except Exception as e:
+                return internal_error("update_brand", e, extra={"slug": slug})
+            invalidate_brand_catalog()
+            return jsonify(brand_json(record)), 200
+
+        @self.app.route("/api/v1/brands/<slug>", methods=["DELETE"])
+        @self.limiter.limit("30 per minute")
+        @require_api_key(scope="write")
+        def deactivate_brand(slug: str):
+            """Stop using a brand for detection (kept, ``active: false``).
+
+            Args:
+                slug: Brand slug.
+
+            Returns:
+                The deactivated brand, or 404.
+            """
+            try:
+                record = BrandRepository(self.db_manager.engine).deactivate(slug)
+            except BrandNotFoundError as e:
+                return _brand_error(e)
+            except Exception as e:
+                return internal_error("deactivate_brand", e, extra={"slug": slug})
+            invalidate_brand_catalog()
+            return jsonify(brand_json(record)), 200
+
+        @self.app.route("/api/v1/brands/<slug>/assets", methods=["POST"])
+        @self.limiter.limit("30 per minute")
+        @require_api_key(scope="write")
+        def add_brand_asset(slug: str):
+            """Add a reference favicon or logo (multipart: ``file``, ``kind``,
+            ``source_url``?). Only its hashes are stored.
+
+            Args:
+                slug: Brand slug.
+
+            Returns:
+                201 with the asset; 400 for a missing, oversized or undecodable image; 404;
+                409 when the image is already a reference of the brand.
+            """
+            upload = request.files.get("file")
+            if upload is None:
+                return jsonify({"error": "file is required", "parameter": "file"}), 400
+            data = upload.stream.read(MAX_ASSET_BYTES + 1)
+            try:
+                asset = BrandRepository(self.db_manager.engine).add_asset(
+                    slug,
+                    request.form.get("kind", ""),
+                    data,
+                    source_url=request.form.get("source_url") or None,
+                )
+            except (BrandValidationError, BrandNotFoundError, BrandConflictError) as e:
+                return _brand_error(e)
+            except Exception as e:
+                return internal_error("add_brand_asset", e, extra={"slug": slug})
+            invalidate_brand_catalog()
+            return jsonify(brand_asset_json(asset)), 201
+
+        @self.app.route("/api/v1/brands/<slug>/assets/<int:asset_id>", methods=["DELETE"])
+        @self.limiter.limit("30 per minute")
+        @require_api_key(scope="write")
+        def delete_brand_asset(slug: str, asset_id: int):
+            """Remove a reference image of a brand.
+
+            Args:
+                slug: Brand slug.
+                asset_id: Asset id.
+
+            Returns:
+                204, or 404.
+            """
+            try:
+                BrandRepository(self.db_manager.engine).delete_asset(slug, asset_id)
+            except BrandNotFoundError as e:
+                return _brand_error(e)
+            except Exception as e:
+                return internal_error("delete_brand_asset", e, extra={"slug": slug})
+            invalidate_brand_catalog()
+            return "", 204
 
         # ── GET /api/v1/reports ────────────────────────────────────────────────
         @self.app.route("/api/v1/reports", methods=["GET"])

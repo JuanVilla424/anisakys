@@ -54,13 +54,32 @@ def defang(url: str) -> str:
     return url.replace("http", "hxxp", 1).replace("://", "[://]").replace(".", "[.]")
 
 
+def _verdict_of(prediction: Prediction, kind: str) -> Tuple[str, float, int]:
+    """Level, score and confidence of one verdict kind of a prediction.
+
+    Args:
+        prediction: The prediction.
+        kind: ``deployed``, ``heuristic`` or ``judge``.
+
+    Returns:
+        ``(level, score, confidence)``; the heuristic verdict keeps the deployed
+        confidence (it has no confidence of its own).
+    """
+    if kind == "heuristic":
+        return prediction.heuristic_level, prediction.heuristic_score, prediction.confidence
+    if kind == "judge":
+        return prediction.judge_level, prediction.judge_score, prediction.judge_confidence
+    return prediction.level, prediction.score, prediction.confidence
+
+
 def verdict_block(
     samples: Sequence[Sample],
     predictions: Sequence[Prediction],
     heuristic: bool = False,
     auto_report_min_confidence: int = DEFAULT_AUTO_REPORT_MIN_CONFIDENCE,
+    kind: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """All quality metrics of one verdict (deployed or heuristic).
+    """All quality metrics of one verdict (deployed, heuristic or the LLM judge).
 
     Args:
         samples: Scored samples.
@@ -68,15 +87,19 @@ def verdict_block(
         heuristic: Use the heuristic level/score instead of the deployed one.
         auto_report_min_confidence: Confidence the ``auto_report`` operating point
             requires on top of level high.
+        kind: ``deployed``, ``heuristic`` or ``judge`` (overrides ``heuristic``).
 
     Returns:
         Coverage, level distribution, operating points (with per-brand and
         per-category confusion), PR-AUC and curve, TPR at fixed FPRs,
         precision@k, calibration and the misclassified samples.
     """
+    selected = kind or ("heuristic" if heuristic else "deployed")
+    verdicts = [_verdict_of(p, selected) for p in predictions]
     y_true = [1 if s.is_positive else 0 for s in samples]
-    levels = [p.heuristic_level if heuristic else p.level for p in predictions]
-    scores = [p.heuristic_score if heuristic else p.score for p in predictions]
+    levels = [level for level, _, _ in verdicts]
+    scores = [score for _, score, _ in verdicts]
+    confidences = [confidence for _, _, confidence in verdicts]
     brands = [s.brand for s in samples]
     categories = [s.category for s in samples]
 
@@ -92,10 +115,10 @@ def verdict_block(
     decisions[AUTO_REPORT_POINT] = [
         (
             1
-            if level_at_least(level, "high") and (p.confidence or 0) >= auto_report_min_confidence
+            if level_at_least(level, "high") and (confidence or 0) >= auto_report_min_confidence
             else 0
         )
-        for level, p in zip(levels, predictions)
+        for level, confidence in zip(levels, confidences)
     ]
     operating_points: Dict[str, Any] = {}
     misclassified: Dict[str, List[Dict[str, Any]]] = {}
@@ -162,6 +185,62 @@ def _misclassified(
     return {"false_negatives": false_negatives, "false_positives": false_positives}
 
 
+def signal_block(samples: Sequence[Sample], predictions: Sequence[Prediction]) -> Dict[str, Any]:
+    """How each detection signal alone separates phishing from benign samples.
+
+    Descriptive only: no verdict uses a signal alone.
+
+    Args:
+        samples: Scored samples.
+        predictions: Their predictions, in the same order.
+
+    Returns:
+        ``{signal: {"phishing", "benign", "precision", "recall", "fpr"}}``: how many
+        samples of each label show the signal, and the rates if it were a detector.
+    """
+    positives = sum(1 for s in samples if s.is_positive)
+    negatives = len(samples) - positives
+    names = sorted({name for p in predictions for name in p.signals})
+    table: Dict[str, Any] = {}
+    for name in names:
+        tp = sum(1 for s, p in zip(samples, predictions) if s.is_positive and p.signals.get(name))
+        fp = sum(
+            1 for s, p in zip(samples, predictions) if not s.is_positive and p.signals.get(name)
+        )
+        table[name] = {
+            "phishing": tp,
+            "benign": fp,
+            "precision": round(tp / (tp + fp), 4) if tp + fp else None,
+            "recall": round(tp / positives, 4) if positives else None,
+            "fpr": round(fp / negatives, 4) if negatives else None,
+        }
+    return table
+
+
+def judge_block(predictions: Sequence[Prediction]) -> Dict[str, Any]:
+    """What the LLM judge answered across the run, and what it cost.
+
+    Args:
+        predictions: Predictions of a run where the judge was asked.
+
+    Returns:
+        ``{"asked", "status", "decided", "cost_usd", "cost_per_decision_usd"}``: how
+        many captures it was asked about, its outcomes (``ok``, ``refused``,
+        ``invalid``, ``error``, ``budget``, ``no_capture``), how many got a yes/no
+        verdict, and the measured spend.
+    """
+    asked = [p for p in predictions if p.judge_status is not None]
+    decided = sum(1 for p in asked if p.judge_level != "unknown")
+    cost = round(sum(p.stage_costs_usd.get("llm_judge", 0.0) for p in asked), 6)
+    return {
+        "asked": len(asked),
+        "status": dict(Counter(p.judge_status for p in asked)),
+        "decided": decided,
+        "cost_usd": cost,
+        "cost_per_decision_usd": round(cost / decided, 6) if decided else None,
+    }
+
+
 def stage_block(
     predictions: Sequence[Prediction], costs: Optional[Dict[str, float]] = None
 ) -> Dict[str, Any]:
@@ -187,16 +266,24 @@ def stage_block(
         for stage, status in prediction.stage_status.items():
             statuses.setdefault(stage, Counter())[status] += 1
     price = costs or {}
+    measured: Dict[str, float] = {}
+    for prediction in predictions:
+        for stage, usd in prediction.stage_costs_usd.items():
+            measured[stage] = measured.get(stage, 0.0) + float(usd)
     result: Dict[str, Any] = {}
     total_cost = 0.0
     total_ms: List[float] = []
     for prediction in predictions:
-        if prediction.stage_timings_ms:
+        if prediction.total_ms is not None:
+            total_ms.append(prediction.total_ms)  # overlapping stages: the wall clock
+        elif prediction.stage_timings_ms:
             total_ms.append(sum(prediction.stage_timings_ms.values()))
     for stage in sorted(set(timings) | set(statuses)):
         counter = statuses.get(stage, Counter())
         calls = sum(count for status, count in counter.items() if status in CALLED)
-        cost = round(calls * float(price.get(stage, 0.0)), 4)
+        cost = round(
+            measured[stage] if stage in measured else calls * float(price.get(stage, 0.0)), 4
+        )
         total_cost += cost
         result[stage] = {
             "latency_ms": latency_summary(timings.get(stage, [])),
@@ -286,6 +373,16 @@ def build_report(
             heuristic=True,
             auto_report_min_confidence=auto_report_min_confidence,
         )
+        if any(p.judge_status is not None for p in scored_predictions):
+            report["verdicts"]["judge"] = verdict_block(
+                scored,
+                scored_predictions,
+                kind="judge",
+                auto_report_min_confidence=auto_report_min_confidence,
+            )
+            report["judge"] = judge_block(scored_predictions)
+        if any(p.signals for p in scored_predictions):
+            report["signals"] = signal_block(scored, scored_predictions)
         report["stages"] = stage_block(scored_predictions, costs)
     if targets:
         point = targets.get("operating_point", AUTO_REPORT_POINT)
@@ -315,9 +412,9 @@ def _configured_auto_report_confidence() -> int:
 
 _CSS = """
 :root{--bg:#ffffff;--fg:#1d2433;--muted:#5b6475;--line:#d8dde6;--card:#f6f8fb;
---a:#2563eb;--b:#d97706;--ok:#15803d;--bad:#b91c1c}
+--a:#2563eb;--b:#d97706;--c:#7c3aed;--ok:#15803d;--bad:#b91c1c}
 @media (prefers-color-scheme:dark){:root{--bg:#0f141c;--fg:#e6e9ef;--muted:#9aa3b2;
---line:#2a3342;--card:#161d28;--a:#60a5fa;--b:#fbbf24;--ok:#4ade80;--bad:#f87171}}
+--line:#2a3342;--card:#161d28;--a:#60a5fa;--b:#fbbf24;--c:#c4b5fd;--ok:#4ade80;--bad:#f87171}}
 body{margin:0;background:var(--bg);color:var(--fg);
 font:15px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
 main{max-width:1100px;margin:0 auto;padding:24px 16px 64px}
@@ -334,6 +431,7 @@ th{color:var(--muted);font-weight:600}td.n{text-align:right}
 svg{background:var(--card);border:1px solid var(--line);border-radius:8px;width:100%;height:auto}
 svg text{fill:var(--muted);font-size:11px}.axis{stroke:var(--line)}
 .sa{stroke:var(--a);fill:none;stroke-width:2}.sb{stroke:var(--b);fill:none;stroke-width:2}
+.sc{stroke:var(--c);fill:none;stroke-width:2}
 .diag{stroke:var(--muted);stroke-dasharray:4 4}.dot{fill:var(--a)}
 code,.url{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;word-break:break-all}
 ul.notes{color:var(--muted);padding-left:18px}
@@ -595,6 +693,7 @@ def render_html(report: Dict[str, Any]) -> str:
     """
     deployed = report["verdicts"]["deployed"]
     heuristic = report["verdicts"].get("heuristic")
+    judge = report["verdicts"].get("judge")
     primary = deployed["operating_points"][PRIMARY_OPERATING_POINT]
     counts = report["counts"]
     dataset = report["dataset"]
@@ -608,6 +707,9 @@ def render_html(report: Dict[str, Any]) -> str:
     ]
     if heuristic:
         cards.append(("PR-AUC (heuristic)", _fmt(heuristic["pr_auc"])))
+    if judge:
+        cards.append(("PR-AUC (LLM judge)", _fmt(judge["pr_auc"])))
+        cards.append(("Judge cost (USD)", _fmt(report["judge"]["cost_usd"])))
     card_html = "".join(
         f"<div class='card'><b>{_fmt(v)}</b><span>{k}</span></div>" for k, v in cards
     )
@@ -615,6 +717,8 @@ def render_html(report: Dict[str, Any]) -> str:
     series = [("deployed", "sa", _pr_points(deployed["pr_curve"]))]
     if heuristic:
         series.append(("heuristic", "sb", _pr_points(heuristic["pr_curve"])))
+    if judge:
+        series.append(("LLM judge", "sc", _pr_points(judge["pr_curve"])))
     charts = _curve_svg(series, "Precision (y) vs recall (x)") + _reliability_svg(
         deployed["calibration"]["bins"]
     )
@@ -653,6 +757,16 @@ def render_html(report: Dict[str, Any]) -> str:
     ]
     if heuristic:
         sections += ["<h2>Operating points — heuristics only</h2>", _ops_table(heuristic)]
+    if judge:
+        asked = report["judge"]
+        statuses = ", ".join(f"{k} {v}" for k, v in sorted(asked["status"].items()))
+        sections += [
+            "<h2>Operating points — LLM judge alone</h2>",
+            f"<p class='meta'>Asked about {asked['asked']} capture(s): {html.escape(statuses)}; "
+            f"{asked['decided']} with a yes/no verdict; spend {_fmt(asked['cost_usd'])} USD. "
+            "Evidence only: the deployed verdict above does not use it.</p>",
+            _ops_table(judge),
+        ]
     sections += [
         f"<h2>Curves</h2><div class='charts'>{charts}</div>",
         "<h3>TPR at fixed false-positive rates (deployed score)</h3>",
@@ -666,6 +780,20 @@ def render_html(report: Dict[str, Any]) -> str:
         "<h2>Per category — deployed, level ≥ high</h2>",
         _group_table(primary["per_category"], "Category"),
     ]
+    signals = report.get("signals")
+    if signals:
+        signal_rows = "".join(
+            f"<tr><td>{html.escape(name)}</td><td class='n'>{row['phishing']}</td>"
+            f"<td class='n'>{row['benign']}</td><td class='n'>{_fmt(row['precision'])}</td>"
+            f"<td class='n'>{_fmt(row['recall'])}</td><td class='n'>{_fmt(row['fpr'])}</td></tr>"
+            for name, row in signals.items()
+        )
+        sections += [
+            "<h2>Signals, each alone (descriptive; no verdict uses one alone)</h2>",
+            "<table><thead><tr><th>Signal</th><th>Phishing</th><th>Benign</th>"
+            "<th>Precision</th><th>Recall</th><th>FPR</th></tr></thead>"
+            f"<tbody>{signal_rows}</tbody></table>",
+        ]
     stages = report.get("stages")
     if stages:
         stage_rows = "".join(

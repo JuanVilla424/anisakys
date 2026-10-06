@@ -7,8 +7,10 @@ Aggregates results from multiple threat intelligence APIs
 
 import datetime
 import logging
+import threading
 import time
-from typing import Any, Dict, List, Mapping, Optional
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable, Dict, List, Mapping, Optional
 from urllib.parse import urlparse
 
 from src.config import settings
@@ -21,7 +23,12 @@ from src.observability.metrics import (
     METRIC_SCAN_DURATION_SECONDS,
     METRIC_DETECTIONS_TOTAL,
 )
-from src.dns.network_utils import safe_get_with_redirects
+from src.capture.service import PageCapture, capture_hashes, fetch_page
+from src.detection.features import page_features, page_text
+from src.detection.llm_judge import LLMJudge, configured_judge
+from src.detection.normalize import normalize_host
+from src.detection.visual_brand import identify_brands
+from src.intelligence.provider_runtime import cached_call
 
 # Import integrations
 from src.intelligence.virustotal import VirusTotalIntegration, VIRUSTOTAL_API_KEY
@@ -165,6 +172,127 @@ def extract_domain(url: str) -> str:
     return (host or "").rstrip(".")
 
 
+# Seconds the page capture may take (one request plus the favicon).
+CAPTURE_TIMEOUT_SECONDS = 15
+# A domain registered this long ago is "established" (see kit_brand_hint).
+ESTABLISHED_DOMAIN_DAYS = 365
+# Longest wait for the WHOIS budget: the domain age is the strongest heuristic signal,
+# so a scan under load waits for it as long as for the page capture.
+WHOIS_WAIT_SECONDS = 15.0
+
+
+class _CapturedResponse:
+    """The captured page seen through the two attributes the kit fingerprint reads."""
+
+    def __init__(self, capture: PageCapture) -> None:
+        self.headers = dict(capture.headers or {})
+        self.text = capture.html or ""
+
+
+def kit_brand_hint(url_analysis: Dict[str, Any], domain_age_days: Optional[int]) -> Optional[str]:
+    """The brand the kit fingerprint should look for, if the domain impersonates one.
+
+    The fingerprint's strongest check (the brand's real domain inside the page) proves a
+    reverse proxy only on a domain that is not the brand's own. A domain registered for
+    over :data:`ESTABLISHED_DOMAIN_DAYS` with the brand in its name is far more often the
+    brand's own property (country sites, sister sites such as ``thinkwithgoogle.com``)
+    than a reverse proxy, whose domains are fresh. So: a lookalike (typosquatting) always
+    counts; the brand plus other words counts unless the domain is established; the
+    brand's exact name under another suffix counts only when the domain is known to be
+    young.
+
+    Args:
+        url_analysis: Lexical analysis of the URL.
+        domain_age_days: Registration age from WHOIS (None when unknown).
+
+    Returns:
+        The brand slug, or None.
+    """
+    typo = url_analysis.get("typosquatting") or {}
+    if typo.get("detected"):
+        return typo.get("target_brand")
+    known = domain_age_days is not None
+    established = known and domain_age_days >= ESTABLISHED_DOMAIN_DAYS
+    combo = url_analysis.get("combo_squatting") or {}
+    if combo.get("detected") and not established:
+        return combo.get("target_brand")
+    swap = url_analysis.get("tld_swap") or {}
+    if swap.get("detected") and known and not established:
+        return swap.get("target_brand")
+    return None
+
+
+def capture_summary(capture: PageCapture) -> Dict[str, Any]:
+    """JSON-safe summary of a page capture (no HTML, no image bytes).
+
+    Args:
+        capture: The capture.
+
+    Returns:
+        Status, final URL, HTTP status, TLS validity, server IP, redirect chain, favicon URL
+        and elapsed milliseconds.
+    """
+    return {
+        "status": capture.status,
+        "error": capture.error,
+        "final_url": capture.final_url,
+        "http_status": capture.http_status,
+        "tls_valid": capture.tls_valid,
+        "server_ip": capture.server_ip,
+        "redirect_chain": capture.redirect_chain,
+        "favicon_url": capture.favicon_url,
+        "elapsed_ms": capture.elapsed_ms,
+    }
+
+
+def _run_parallel(tasks: Dict[str, Callable[[], Any]], timings: Dict[str, float]) -> Dict[str, Any]:
+    """Run the scan's network steps concurrently.
+
+    Args:
+        tasks: ``{stage: callable}``.
+        timings: Filled with each stage's own wall-clock milliseconds.
+
+    Returns:
+        ``{stage: result}``; a step that raises returns an ``error`` result (the
+        capture an ``error`` capture) instead of failing the scan.
+    """
+
+    def timed(stage: str, task: Callable[[], Any]) -> Any:
+        started = time.perf_counter()
+        try:
+            return task()
+        except Exception as e:  # each provider client already maps its own failures
+            logger.warning(f"Scan step {stage} failed: {e}")
+            if stage == "capture":
+                return PageCapture(url="", status="error", error=type(e).__name__)
+            if stage == "whois":
+                return {}
+            return {"status": ERROR, "error": type(e).__name__}
+        finally:
+            timings[stage] = round((time.perf_counter() - started) * 1000, 1)
+
+    with ThreadPoolExecutor(max_workers=len(tasks), thread_name_prefix="scan") as pool:
+        futures = {stage: pool.submit(timed, stage, task) for stage, task in tasks.items()}
+        return {stage: future.result() for stage, future in futures.items()}
+
+
+_shared_validator: Optional["MultiAPIValidator"] = None
+_shared_lock = threading.Lock()
+
+
+def get_shared_validator() -> "MultiAPIValidator":
+    """The process-wide validator (one set of provider clients and circuit breakers).
+
+    Returns:
+        The shared :class:`MultiAPIValidator`.
+    """
+    global _shared_validator
+    with _shared_lock:
+        if _shared_validator is None:
+            _shared_validator = MultiAPIValidator()
+        return _shared_validator
+
+
 class MultiAPIValidator:
     """
     Multi-API validation pipeline for comprehensive phishing detection.
@@ -173,13 +301,19 @@ class MultiAPIValidator:
     threat detection with configurable validation thresholds.
     """
 
-    def __init__(self):
-        """Initialize multi-API validator with all integrated services."""
+    def __init__(self, judge: Optional[LLMJudge] = None):
+        """Initialize multi-API validator with all integrated services.
+
+        Args:
+            judge: LLM judge to consult on captured pages (default: the configured one,
+                none unless ``LLM_JUDGE_ENABLED`` and an API key is set).
+        """
         self.virustotal = VirusTotalIntegration()
         self.urlvoid = URLVoidIntegration()
         self.phishtank = PhishTankIntegration()
         self.google_safe_browsing = GoogleSafeBrowsingIntegration()
         self.url_analyzer = URLAnalyzer()
+        self.judge = judge if judge is not None else configured_judge()
 
     def comprehensive_scan(self, url: str) -> Dict[str, Any]:
         """
@@ -233,48 +367,260 @@ class MultiAPIValidator:
             for factor in url_analysis.get("risk_factors", []):
                 logger.warning(f"   - {factor}")
 
-        # Step 1: VirusTotal URL scan
-        logger.info(f"📊 Step 1: VirusTotal URL analysis for {url}")
-        vt_result = self.virustotal.scan_url(url)
-        results["virustotal"] = vt_result
-        lap("virustotal_url")
+        # Steps 1-5: threat-intel providers, WHOIS and the page capture run in parallel,
+        # through the process-wide cache and rate limits (src/intelligence/provider_runtime.py).
+        logger.info(f"📊 Steps 1-5: providers, WHOIS and page capture for {url}")
+        url_key = url.strip()
+        domain_key = domain.lower()
 
-        # Step 1.5: VirusTotal domain report for registrar info
-        vt_domain: Dict[str, Any] = (
-            self.virustotal.get_domain_report(domain)
-            if domain
-            else {"status": NO_DATA, "error": "No host name in URL"}
+        def no_host() -> Dict[str, Any]:
+            return {"status": NO_DATA, "error": "No host name in URL"}
+
+        def lookup(stage: str, key: str, configured: bool, fn: Callable[..., Any], arg: str):
+            # A client without key (or disabled) answers "no data" at once: nothing to
+            # cache and no request budget to wait for.
+            return cached_call(stage, key, fn, arg)[0] if configured else fn(arg)
+
+        vt_configured = bool(getattr(self.virustotal, "api_key", None))
+        urlvoid_configured = bool(
+            getattr(self.urlvoid, "enabled", False) and getattr(self.urlvoid, "api_key", None)
         )
-        lap("virustotal_domain")
+        gsb_configured = bool(getattr(self.google_safe_browsing, "enabled", False))
+        tasks: Dict[str, Callable[[], Any]] = {
+            "virustotal_url": lambda: lookup(
+                "virustotal_url", url_key, vt_configured, self.virustotal.scan_url, url
+            ),
+            "virustotal_domain": (
+                (
+                    lambda: lookup(
+                        "virustotal_domain",
+                        domain_key,
+                        vt_configured,
+                        self.virustotal.get_domain_report,
+                        domain,
+                    )
+                )
+                if domain
+                else no_host
+            ),
+            "urlvoid": (
+                (
+                    lambda: lookup(
+                        "urlvoid",
+                        domain_key,
+                        urlvoid_configured,
+                        self.urlvoid.analyze_domain,
+                        domain,
+                    )
+                )
+                if domain
+                else no_host
+            ),
+            # PhishTank answers lookups without an app key too (with a stricter limit).
+            "phishtank": lambda: lookup(
+                "phishtank", url_key, True, self.phishtank.check_phishing_status, url
+            ),
+            "whois": (
+                (
+                    lambda: cached_call(
+                        "whois",
+                        domain_key,
+                        self._whois_lookup,
+                        domain,
+                        wait_seconds=WHOIS_WAIT_SECONDS,
+                    )[0]
+                )
+                if domain
+                else dict
+            ),
+            "google_safe_browsing": lambda: lookup(
+                "google_safe_browsing",
+                url_key,
+                gsb_configured,
+                self.google_safe_browsing.check_url,
+                url,
+            ),
+            "capture": lambda: fetch_page(url, timeout=CAPTURE_TIMEOUT_SECONDS),
+        }
+        outputs = _run_parallel(tasks, stage_timings)
+
+        # Cached answers are shared between scans: copy before annotating them.
+        vt_result: Dict[str, Any] = dict(outputs["virustotal_url"] or {})
+        vt_domain: Dict[str, Any] = dict(outputs["virustotal_domain"] or {})
+        uv_result: Dict[str, Any] = dict(outputs["urlvoid"] or {})
+        pt_result: Dict[str, Any] = dict(outputs["phishtank"] or {})
+        gsb_result: Dict[str, Any] = dict(outputs["google_safe_browsing"] or {})
+        # A lookup refused by the rate limit (or failed) is no WHOIS data, not an answer.
+        whois_raw: Dict[str, Any] = dict(outputs["whois"] or {})
+        whois_info: Dict[str, Any] = (
+            {} if whois_raw.get("rate_limited") or whois_raw.get("error") else whois_raw
+        )
+        capture: PageCapture = outputs["capture"]
         if not vt_domain.get("error"):
-            results["virustotal"]["registrar"] = vt_domain.get("registrar")
-            results["virustotal"]["creation_date"] = vt_domain.get("creation_date")
-
-        # Step 2: URLVoid domain analysis
-        logger.info(f"📊 Step 2: URLVoid domain analysis for {domain}")
-        uv_result: Dict[str, Any] = (
-            self.urlvoid.analyze_domain(domain)
-            if domain
-            else {"status": NO_DATA, "error": "No host name in URL"}
-        )
-        results["urlvoid"] = uv_result
-        lap("urlvoid")
-
-        # Merge registrar info from VT into urlvoid for consistent storage
+            vt_result["registrar"] = vt_domain.get("registrar")
+            vt_result["creation_date"] = vt_domain.get("creation_date")
         if not uv_result.get("error"):
             uv_result["registrar_name"] = (
                 vt_domain.get("registrar") if not vt_domain.get("error") else None
             )
-
-        # Step 3: PhishTank community check
-        logger.info(f"📊 Step 3: PhishTank community database check for {url}")
-        pt_result = self.phishtank.check_phishing_status(url)
+        results["virustotal"] = vt_result
+        results["urlvoid"] = uv_result
         results["phishtank"] = pt_result
-        lap("phishtank")
+        results["whois"] = whois_info
+        results["google_safe_browsing"] = gsb_result
+        domain_age = whois_info.get("domain_age_days")
+        if gsb_status(gsb_result) == LISTED:
+            logger.warning(
+                f"🚨 Google Safe Browsing threats found: {gsb_result.get('threat_count', 0)}"
+            )
 
-        # Step 4: WHOIS lookup for domain registration info
-        logger.info(f"📊 Step 4: WHOIS lookup for {domain}")
-        whois_info = {}
+        # Step 5.5: AiTM/Evilginx kit fingerprint on the captured page (no second fetch).
+        kit_started = time.perf_counter()
+        kit_result: Dict[str, Any] = {}
+        brand_hint = kit_brand_hint(url_analysis, domain_age)
+        if capture.ok:
+            try:
+                kit_result = score_kit_indicators(
+                    url, _CapturedResponse(capture), brand_hint=brand_hint
+                )
+            except Exception as e:  # attacker-controlled content: never fail the scan
+                logger.debug(f"Kit fingerprinting failed for {url}: {e}")
+        if kit_result.get("kit_type"):
+            logger.warning(
+                f"🚨 Kit fingerprint: {kit_result['kit_type']} "
+                f"(confidence={kit_result['confidence']}) for {url}"
+            )
+        results["kit_fingerprint"] = kit_result
+        results["detected_kit_type"] = kit_result.get("kit_type")
+        results["kit_confidence"] = kit_result.get("confidence")
+        results["kit_indicators"] = kit_result.get("indicators")
+        stage_timings["kit_fingerprint"] = round((time.perf_counter() - kit_started) * 1000, 1)
+
+        # Step 5.6: content features and reference-based brand identification.
+        content_started = time.perf_counter()
+        catalog = self.url_analyzer.catalog()
+        hashes = capture_hashes(capture) if capture.ok else {}
+        features = page_features(capture, catalog)
+        visual = identify_brands(
+            hashes, features, normalize_host(capture.final_url or url), catalog
+        )
+        results["capture"] = capture_summary(capture)
+        results["capture_hashes"] = hashes
+        results["page_features"] = features
+        results["visual_brand"] = visual
+        stage_timings["content_features"] = round((time.perf_counter() - content_started) * 1000, 1)
+
+        # Step 5.7: optional LLM judge on the captured page. Evidence only: the verdict
+        # below does not use it (combining it is the calibrated fusion's job).
+        judge_status: Optional[str] = None
+        if self.judge is not None:
+            judge_started = time.perf_counter()
+            if capture.ok:
+                title, visible = page_text(capture.html)
+                judgement = self.judge.judge(
+                    url, capture.final_url, title, visible, capture.screenshot
+                ).to_dict()
+                decision = (judgement.get("verdict") or {}).get("is_phishing")
+                judge_status = (
+                    (LISTED if decision else NOT_LISTED)
+                    if judgement["status"] == "ok" and decision is not None
+                    else (ERROR if judgement["status"] == "error" else NO_DATA)
+                )
+            else:
+                judgement = {"status": "no_capture", "verdict": {}, "cost_usd": 0.0}
+                judge_status = NO_DATA
+            results["llm_judge"] = judgement
+            stage_timings["llm_judge"] = round((time.perf_counter() - judge_started) * 1000, 1)
+
+        results["stage_timings_ms"] = stage_timings
+        # Whether each external source answered (listed / not_listed) or not
+        # (error / no_data): the evaluation harness counts provider calls and
+        # coverage from this.
+        results["stage_status"] = {
+            "virustotal_url": provider_status(vt_result),
+            "virustotal_domain": provider_status(vt_domain),
+            "urlvoid": provider_status(uv_result),
+            "phishtank": provider_status(pt_result),
+            "google_safe_browsing": gsb_status(gsb_result),
+            "whois": NOT_LISTED if whois_info else NO_DATA,
+            "capture": (
+                NOT_LISTED if capture.ok else (NO_DATA if capture.status == "blocked" else ERROR)
+            ),
+            "kit_fingerprint": (
+                LISTED if kit_result.get("kit_type") else (NOT_LISTED if capture.ok else NO_DATA)
+            ),
+        }
+        if judge_status is not None:
+            results["stage_status"]["llm_judge"] = judge_status
+
+        # Step 6: Aggregate results and calculate threat level
+        results["aggregated_threat_level"] = self._aggregate_threat_level(
+            vt_result, uv_result, pt_result, domain_age, url_analysis, gsb_result, kit_result
+        )
+        results["confidence_score"] = self._calculate_confidence_score(
+            vt_result, uv_result, pt_result, domain_age, url_analysis, gsb_result, kit_result
+        )
+
+        # If no external source produced evidence (every threat-intel lookup
+        # errored or had no data, GSB was not checked and no kit was found),
+        # heuristics alone (domain age, lexical score) must not claim a
+        # verdict: report unknown, zero trust.
+        if not self._has_external_evidence(vt_result, uv_result, pt_result, gsb_result, kit_result):
+            results["aggregated_threat_level"] = "unknown"
+            results["confidence_score"] = 0
+
+        results["recommendations"] = self._generate_recommendations(
+            vt_result, uv_result, pt_result, domain_age, url_analysis, gsb_result, kit_result
+        )
+
+        # Add registration info to top-level results for frontend (from WHOIS)
+        results["registration_date"] = whois_info.get("creation_date")
+        results["registrar_name"] = whois_info.get("registrar")
+        results["domain_age_days"] = whois_info.get("domain_age_days")
+        results["registrant_org"] = whois_info.get("registrant_org")
+
+        # Lookup registrar abuse form URL (for providers that require web forms)
+        from src.data.registrar_form_db import lookup_registrar_form
+
+        form_info = lookup_registrar_form(results.get("registrar_name"))
+        results["registrar_abuse_form_url"] = form_info["form_url"] if form_info else None
+        results["registrar_abuse_method"] = form_info["method"] if form_info else "email"
+
+        log_with_context(
+            logger,
+            logging.INFO,
+            "Multi-API scan completed",
+            url=url,
+            domain=domain,
+            threat_level=results["aggregated_threat_level"],
+            confidence_score=results["confidence_score"],
+            virustotal_threat=vt_result.get("threat_level", "unknown"),
+            urlvoid_safety_score=uv_result.get("safety_score"),
+            phishtank_verified=pt_result.get("verified", False),
+            event_type="multi_api_scan_complete",
+        )
+
+        elapsed = time.time() - _scan_start
+        observe_histogram(METRIC_SCAN_DURATION_SECONDS, elapsed)
+        # Wall-clock duration: the network steps overlap, so it is not the sum of the stages.
+        results["scan_ms"] = round(elapsed * 1000, 1)
+        if results["aggregated_threat_level"] in ("critical", "high"):
+            increment_counter(METRIC_DETECTIONS_TOTAL)
+
+        return results
+
+    def _whois_lookup(self, domain: str) -> Dict[str, Any]:
+        """WHOIS registration data of a domain (registrar, creation date, age, registrant).
+
+        Args:
+            domain: Host name.
+
+        Returns:
+            ``{"registrar", "creation_date", "domain_age_days", "registrant_org"}``, or ``{}``
+            when the lookup failed.
+        """
+        logger.info(f"📋 WHOIS lookup for {domain}")
+        whois_info: Dict[str, Any] = {}
         try:
             # Lazy import to avoid circular dependency
             from src.reporting.email_detector import EnhancedAbuseEmailDetector
@@ -359,117 +705,7 @@ class MultiAPIValidator:
                 logger.info(f"📋 WHOIS for {domain}: registrar={registrar}, age={domain_age_days}d")
         except Exception as e:
             logger.warning(f"⚠️ WHOIS lookup failed for {domain}: {e}")
-
-        results["whois"] = whois_info
-        domain_age = whois_info.get("domain_age_days")
-        lap("whois")
-
-        # Step 5: Google Safe Browsing check
-        logger.info(f"📊 Step 5: Google Safe Browsing check for {url}")
-        gsb_result = self.google_safe_browsing.check_url(url)
-        results["google_safe_browsing"] = gsb_result
-        lap("google_safe_browsing")
-        if gsb_status(gsb_result) == LISTED:
-            logger.warning(
-                f"🚨 Google Safe Browsing threats found: {gsb_result.get('threat_count', 0)}"
-            )
-
-        # Step 5.5: AiTM/Evilginx reverse-proxy kit fingerprinting -- fetches
-        # the candidate page itself (headers + HTML), the only step here
-        # that does, so failures must degrade to "no kit data" rather than
-        # ever failing the whole scan.
-        logger.info(f"📊 Step 5.5: Kit fingerprinting for {url}")
-        kit_result: Dict[str, Any] = {}
-        try:
-            brand_hint = url_analysis.get("typosquatting", {}).get(
-                "target_brand"
-            ) or url_analysis.get("combo_squatting", {}).get("target_brand")
-            response = safe_get_with_redirects(url, timeout=10)
-            kit_result = score_kit_indicators(url, response, brand_hint=brand_hint)
-            if kit_result.get("kit_type"):
-                logger.warning(
-                    f"🚨 Kit fingerprint: {kit_result['kit_type']} "
-                    f"(confidence={kit_result['confidence']}) for {url}"
-                )
-        except Exception as e:
-            # Broad by design, matching every other step in this method
-            # (VirusTotal/URLVoid/PhishTank/WHOIS all degrade the same way):
-            # this step reaches into arbitrary, attacker-controlled content
-            # over the network, so nothing it does may ever fail the scan.
-            logger.debug(f"Kit fingerprinting fetch failed for {url}: {e}")
-        results["kit_fingerprint"] = kit_result
-        results["detected_kit_type"] = kit_result.get("kit_type")
-        results["kit_confidence"] = kit_result.get("confidence")
-        results["kit_indicators"] = kit_result.get("indicators")
-        lap("kit_fingerprint")
-        results["stage_timings_ms"] = stage_timings
-        # Whether each external source answered (listed / not_listed) or not
-        # (error / no_data): the evaluation harness counts provider calls and
-        # coverage from this.
-        results["stage_status"] = {
-            "virustotal_url": provider_status(vt_result),
-            "virustotal_domain": provider_status(vt_domain),
-            "urlvoid": provider_status(uv_result),
-            "phishtank": provider_status(pt_result),
-            "google_safe_browsing": gsb_status(gsb_result),
-            "whois": NOT_LISTED if whois_info else NO_DATA,
-            "kit_fingerprint": (
-                LISTED if kit_result.get("kit_type") else (NOT_LISTED if kit_result else NO_DATA)
-            ),
-        }
-
-        # Step 6: Aggregate results and calculate threat level
-        results["aggregated_threat_level"] = self._aggregate_threat_level(
-            vt_result, uv_result, pt_result, domain_age, url_analysis, gsb_result, kit_result
-        )
-        results["confidence_score"] = self._calculate_confidence_score(
-            vt_result, uv_result, pt_result, domain_age, url_analysis, gsb_result, kit_result
-        )
-
-        # If no external source produced evidence (every threat-intel lookup
-        # errored or had no data, GSB was not checked and no kit was found),
-        # heuristics alone (domain age, lexical score) must not claim a
-        # verdict: report unknown, zero trust.
-        if not self._has_external_evidence(vt_result, uv_result, pt_result, gsb_result, kit_result):
-            results["aggregated_threat_level"] = "unknown"
-            results["confidence_score"] = 0
-
-        results["recommendations"] = self._generate_recommendations(
-            vt_result, uv_result, pt_result, domain_age, url_analysis, gsb_result, kit_result
-        )
-
-        # Add registration info to top-level results for frontend (from WHOIS)
-        results["registration_date"] = whois_info.get("creation_date")
-        results["registrar_name"] = whois_info.get("registrar")
-        results["domain_age_days"] = whois_info.get("domain_age_days")
-        results["registrant_org"] = whois_info.get("registrant_org")
-
-        # Lookup registrar abuse form URL (for providers that require web forms)
-        from src.data.registrar_form_db import lookup_registrar_form
-
-        form_info = lookup_registrar_form(results.get("registrar_name"))
-        results["registrar_abuse_form_url"] = form_info["form_url"] if form_info else None
-        results["registrar_abuse_method"] = form_info["method"] if form_info else "email"
-
-        log_with_context(
-            logger,
-            logging.INFO,
-            "Multi-API scan completed",
-            url=url,
-            domain=domain,
-            threat_level=results["aggregated_threat_level"],
-            confidence_score=results["confidence_score"],
-            virustotal_threat=vt_result.get("threat_level", "unknown"),
-            urlvoid_safety_score=uv_result.get("safety_score"),
-            phishtank_verified=pt_result.get("verified", False),
-            event_type="multi_api_scan_complete",
-        )
-
-        observe_histogram(METRIC_SCAN_DURATION_SECONDS, time.time() - _scan_start)
-        if results["aggregated_threat_level"] in ("critical", "high"):
-            increment_counter(METRIC_DETECTIONS_TOTAL)
-
-        return results
+        return whois_info
 
     @staticmethod
     def _has_external_evidence(
@@ -565,8 +801,17 @@ class MultiAPIValidator:
             # Typosquatting is a direct impersonation attempt - HIGH minimum
             if url_analysis.get("typosquatting", {}).get("detected"):
                 return "high"
-            # Combo-squatting (brand + keywords) is also highly suspicious
-            if url_analysis.get("combo_squatting", {}).get("detected"):
+            # The brand plus other words, or its exact name under another suffix, is highly
+            # suspicious on a young domain; on an established one it is usually the brand's
+            # own country or sister site (see kit_brand_hint).
+            established = domain_age_days is not None and domain_age_days >= ESTABLISHED_DOMAIN_DAYS
+            if url_analysis.get("combo_squatting", {}).get("detected") and not established:
+                threat_scores.append(5)
+            if (
+                (url_analysis.get("tld_swap") or {}).get("detected")
+                and domain_age_days is not None
+                and not established
+            ):
                 threat_scores.append(5)
             # Suspicious TLD forces minimum "medium"
             if url_analysis.get("suspicious_tld", {}).get("detected"):
@@ -809,6 +1054,14 @@ class MultiAPIValidator:
                 combo = url_analysis["combo_squatting"]
                 recommendations.append(
                     f"⚠️ COMBO-SQUATTING: Domain contains '{combo['target_brand']}' with extra text"
+                )
+
+            # The brand's exact name under another suffix
+            if (url_analysis.get("tld_swap") or {}).get("detected"):
+                swap = url_analysis["tld_swap"]
+                recommendations.append(
+                    f"⚠️ TLD SWAP: '{swap['target_brand']}' under .{swap['suffix']}, a suffix "
+                    "the brand catalogue does not list as its own"
                 )
 
             # Suspicious keywords

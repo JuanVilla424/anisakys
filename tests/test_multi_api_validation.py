@@ -5,11 +5,21 @@ Tests for multi-API validation functionality
 import pytest
 from unittest.mock import patch
 from src import main
+from src.capture.service import PageCapture
 
 # Import needed classes
 Engine = main.Engine
 MultiAPIValidator = main.MultiAPIValidator
 VirusTotalIntegration = main.VirusTotalIntegration
+
+# A page the scan captured (the kit fingerprint reads its headers and HTML).
+_OK_CAPTURE = PageCapture(
+    url="https://nequi-verificacion.example.com/",
+    status="ok",
+    final_url="https://nequi-verificacion.example.com/",
+    http_status=200,
+    html="<html><title>Nequi</title></html>",
+)
 
 
 class TestMultiAPIValidation:
@@ -175,7 +185,10 @@ class TestKitFingerprintStep:
                             "excessive_subdomains": {},
                         },
                     ):
-                        with patch("src.intelligence.multi_api_validator.safe_get_with_redirects"):
+                        with patch(
+                            "src.intelligence.multi_api_validator.fetch_page",
+                            return_value=_OK_CAPTURE,
+                        ):
                             with patch(
                                 "src.intelligence.multi_api_validator.score_kit_indicators",
                                 return_value={"kit_type": None, "confidence": 0, "indicators": []},
@@ -204,7 +217,7 @@ class TestKitFingerprintStep:
                     return_value={"is_phishing": False},
                 ):
                     with patch(
-                        "src.intelligence.multi_api_validator.safe_get_with_redirects",
+                        "src.intelligence.multi_api_validator.fetch_page",
                         side_effect=Exception("network down"),
                     ):
                         result = api_scanner.comprehensive_scan("https://test-site.com")
@@ -228,7 +241,9 @@ class TestKitFingerprintStep:
                     "check_phishing_status",
                     return_value={"is_phishing": False},
                 ):
-                    with patch("src.intelligence.multi_api_validator.safe_get_with_redirects"):
+                    with patch(
+                        "src.intelligence.multi_api_validator.fetch_page", return_value=_OK_CAPTURE
+                    ):
                         with patch(
                             "src.intelligence.multi_api_validator.score_kit_indicators",
                             return_value={
@@ -262,7 +277,9 @@ class TestKitFingerprintStep:
                     "check_phishing_status",
                     return_value={"is_phishing": False},
                 ):
-                    with patch("src.intelligence.multi_api_validator.safe_get_with_redirects"):
+                    with patch(
+                        "src.intelligence.multi_api_validator.fetch_page", return_value=_OK_CAPTURE
+                    ):
                         with patch(
                             "src.intelligence.multi_api_validator.score_kit_indicators",
                             return_value={"kit_type": None, "confidence": 0, "indicators": []},

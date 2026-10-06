@@ -1,0 +1,69 @@
+{
+  "_comment": "Platforms that host third-party content under their own domains (src/detection/normalize.py: saas_platform). A phishing page here is the platform's customer, not the platform: report it to the platform's abuse desk and never flag the platform domain itself. Factual list of public platform domains, grouped by kind; extend as new platforms appear.",
+  "platforms": {
+    "hosting": [
+      "000webhostapp.com",
+      "azurestaticapps.net",
+      "azurewebsites.net",
+      "blogspot.com",
+      "codesandbox.io",
+      "csb.app",
+      "deno.dev",
+      "firebaseapp.com",
+      "fly.dev",
+      "framer.app",
+      "framer.website",
+      "github.io",
+      "gitlab.io",
+      "glitch.me",
+      "herokuapp.com",
+      "netlify.app",
+      "notion.site",
+      "onrender.com",
+      "pages.dev",
+      "railway.app",
+      "repl.co",
+      "replit.app",
+      "replit.dev",
+      "square.site",
+      "surge.sh",
+      "vercel.app",
+      "web.app",
+      "webflow.io",
+      "weebly.com",
+      "wixsite.com",
+      "wordpress.com",
+      "workers.dev"
+    ],
+    "forms": [
+      "docs.google.com",
+      "forms.gle",
+      "forms.office.com",
+      "jotform.com",
+      "sites.google.com",
+      "typeform.com"
+    ],
+    "storage": [
+      "blob.core.windows.net",
+      "dropboxusercontent.com",
+      "r2.dev",
+      "s3.amazonaws.com",
+      "storage.googleapis.com"
+    ],
+    "ipfs": [
+      "cloudflare-ipfs.com",
+      "dweb.link",
+      "ipfs.io",
+      "nftstorage.link",
+      "w3s.link"
+    ],
+    "shortener": [
+      "bit.ly",
+      "cutt.ly",
+      "is.gd",
+      "rb.gy",
+      "t.co",
+      "tinyurl.com"
+    ]
+  }
+}

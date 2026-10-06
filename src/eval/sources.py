@@ -20,7 +20,6 @@ import csv
 import io
 import json
 import logging
-import re
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -35,7 +34,6 @@ logger = logging.getLogger(__name__)
 TRANCO_LATEST_URL = "https://tranco-list.eu/api/lists/date/latest"
 TRANCO_DOWNLOAD_URL = "https://tranco-list.eu/download/{list_id}/{top}"
 HTTP_TIMEOUT = 30
-_TOKEN_SPLIT = re.compile(r"[.\-_]+")
 
 
 @dataclass
@@ -126,14 +124,46 @@ def load_brand_catalog(seeds_dir: Path) -> List[Brand]:
     return brands
 
 
+def _matcher(catalog: Sequence[Brand]) -> Any:
+    """The detector's brand matcher (src/detection/normalize.py) over the eval catalogue.
+
+    Args:
+        catalog: Brand catalogue.
+
+    Returns:
+        A :class:`src.detection.normalize.BrandCatalog`.
+    """
+    from src.detection.normalize import Brand as MatchBrand
+    from src.detection.normalize import BrandCatalog
+
+    key = tuple((b.name, b.aliases, b.urls) for b in catalog)
+    cached = _MATCHERS.get(key)
+    if cached is None:
+        cached = BrandCatalog(
+            [
+                MatchBrand(
+                    slug=b.name,
+                    name=b.name,
+                    aliases=b.aliases,
+                    official_domains=tuple(u.split("://", 1)[-1].split("/", 1)[0] for u in b.urls),
+                )
+                for b in catalog
+            ]
+        )
+        _MATCHERS.clear()
+        _MATCHERS[key] = cached
+    return cached
+
+
+_MATCHERS: Dict[Tuple[Any, ...], Any] = {}
+
+
 def infer_brand(url: str, catalog: Sequence[Brand]) -> Optional[str]:
     """Guess which brand a URL is about from its host.
 
-    A brand matches when one of its aliases equals a token of the host
-    (labels split on ``.``, ``-`` and ``_``), or a host token starts or ends
-    with an alias of at least five characters (``paypal`` in
-    ``paypal-secure``, ``secure-paypal``, ``mypaypal``). The lexical analyser's
-    typosquatting target is the fallback.
+    Uses the detector's own matcher (token boundaries, UTS-39 look-alikes, typos;
+    short aliases only as whole tokens) so the dataset and the detector agree. A
+    brand's official pages are attributed to that brand.
 
     Args:
         url: Sanitised URL.
@@ -142,25 +172,15 @@ def infer_brand(url: str, catalog: Sequence[Brand]) -> Optional[str]:
     Returns:
         The brand name, or ``None``.
     """
-    host = url.split("://", 1)[-1].split("/", 1)[0].lower()
-    tokens = [t for t in _TOKEN_SPLIT.split(host) if t]
-    for brand in catalog:
-        for alias in brand.aliases:
-            for token in tokens:
-                if token == alias:
-                    return brand.name
-                if len(alias) >= 5 and (token.startswith(alias) or token.endswith(alias)):
-                    return brand.name
-    try:
-        from src.detection.url_analyzer import URLAnalyzer
+    from src.detection.normalize import normalize_host
 
-        analysis = URLAnalyzer().analyze(url)
-    except Exception:
-        return None
-    target = (analysis.get("typosquatting") or {}).get("target_brand") or (
-        analysis.get("combo_squatting") or {}
-    ).get("target_brand")
-    return str(target) if target else None
+    matcher = _matcher(catalog)
+    host = normalize_host(url)
+    official = matcher.official_brand(host)
+    if official:
+        return official
+    matches = matcher.match(host)
+    return matches[0].brand if matches else None
 
 
 def _read_url_list(path: Path) -> List[str]:

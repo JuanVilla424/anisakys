@@ -105,6 +105,18 @@ class Prediction:
     stage_timings_ms: Dict[str, float] = field(default_factory=dict)
     stage_status: Dict[str, str] = field(default_factory=dict)
     error: Optional[str] = None
+    # The LLM judge's verdict on the same capture (None when the judge did not run).
+    judge_status: Optional[str] = None
+    judge_level: str = "unknown"
+    judge_confidence: int = 0
+    judge_score: float = 0.0
+    # Measured cost of stages billed per request (the judge), instead of a flat price.
+    stage_costs_usd: Dict[str, float] = field(default_factory=dict)
+    # Detection signals of the scan (lexical, capture, content, brand), each a yes/no.
+    signals: Dict[str, bool] = field(default_factory=dict)
+    # Wall-clock milliseconds of the scan (None for scans whose stages ran one after
+    # another, where the sum of the stages is the duration).
+    total_ms: Optional[float] = None
 
     @property
     def covered(self) -> bool:
@@ -143,7 +155,54 @@ class Prediction:
             stage_timings_ms=dict(data.get("stage_timings_ms") or {}),
             stage_status=dict(data.get("stage_status") or {}),
             error=data.get("error"),
+            judge_status=data.get("judge_status"),
+            judge_level=normalize_level(data.get("judge_level")),
+            judge_confidence=int(data.get("judge_confidence") or 0),
+            judge_score=float(data.get("judge_score") or 0.0),
+            stage_costs_usd={k: float(v) for k, v in (data.get("stage_costs_usd") or {}).items()},
+            signals={k: bool(v) for k, v in (data.get("signals") or {}).items()},
+            total_ms=float(data["total_ms"]) if data.get("total_ms") is not None else None,
         )
+
+
+def scan_signals(scan: Dict[str, Any]) -> Dict[str, bool]:
+    """The yes/no detection signals of a scan, for the report's signal table.
+
+    Args:
+        scan: A ``comprehensive_scan`` result.
+
+    Returns:
+        Lexical, capture, content and brand signals; empty for scans made before the
+        page capture existed (no capture, features or brand identification).
+    """
+    analysis = scan.get("url_analysis") or {}
+    features = scan.get("page_features") or {}
+    brand = scan.get("visual_brand") or {}
+    capture = scan.get("capture") or {}
+    if not (features or brand or capture):
+        return {}
+
+    def detected(key: str) -> bool:
+        return bool((analysis.get(key) or {}).get("detected"))
+
+    return {
+        "capture_ok": capture.get("status") == "ok",
+        "credential_form": bool(features.get("credential_form")),
+        "external_form_action": bool(features.get("external_form_actions")),
+        "kit_trait": bool(features.get("kit_traits")),
+        "tracker_ids": bool(features.get("trackers")),
+        "qr_code": bool(features.get("qr_urls")),
+        "cross_domain_redirect": bool(features.get("cross_domain_redirect")),
+        "brand_identified": bool(brand.get("top_brand")),
+        "official_domain": bool(brand.get("official_brand")),
+        "brand_domain_mismatch": bool(brand.get("brand_domain_mismatch")),
+        "credential_form_for_other_brand": bool(brand.get("credential_form_for_other_brand")),
+        "typosquatting": detected("typosquatting"),
+        "combo_squatting": detected("combo_squatting"),
+        "tld_swap": detected("tld_swap"),
+        "homoglyphs": detected("homoglyphs"),
+        "suspicious_tld": detected("suspicious_tld"),
+    }
 
 
 def prediction_from_scan(sample_id: str, scan: Dict[str, Any]) -> Prediction:
@@ -172,7 +231,7 @@ def prediction_from_scan(sample_id: str, scan: Dict[str, Any]) -> Prediction:
     )
     heuristic_level = normalize_level(MultiAPIValidator._aggregate_threat_level(*signals))
     heuristic_confidence = MultiAPIValidator._calculate_confidence_score(*signals)
-    return Prediction(
+    prediction = Prediction(
         sample_id=sample_id,
         level=level,
         confidence=confidence,
@@ -181,7 +240,21 @@ def prediction_from_scan(sample_id: str, scan: Dict[str, Any]) -> Prediction:
         heuristic_score=ordinal_score(heuristic_level, heuristic_confidence),
         stage_timings_ms={k: float(v) for k, v in (scan.get("stage_timings_ms") or {}).items()},
         stage_status={k: str(v) for k, v in (scan.get("stage_status") or {}).items()},
+        signals=scan_signals(scan),
+        total_ms=float(scan["scan_ms"]) if scan.get("scan_ms") is not None else None,
     )
+    judgement = scan.get("llm_judge")
+    if isinstance(judgement, dict):
+        from src.detection.llm_judge import verdict_level
+
+        verdict = judgement.get("verdict") if judgement.get("status") == "ok" else None
+        judge_level, judge_confidence = verdict_level(verdict or {})
+        prediction.judge_status = str(judgement.get("status") or "unknown")
+        prediction.judge_level = judge_level
+        prediction.judge_confidence = judge_confidence
+        prediction.judge_score = ordinal_score(judge_level, judge_confidence)
+        prediction.stage_costs_usd["llm_judge"] = float(judgement.get("cost_usd") or 0.0)
+    return prediction
 
 
 class _OfflineProvider:
@@ -226,6 +299,43 @@ def live_validator() -> Any:
     from src.intelligence.multi_api_validator import MultiAPIValidator
 
     return MultiAPIValidator()
+
+
+def judge_from_settings() -> Any:
+    """The LLM judge for a measurement run, whether or not production has it enabled.
+
+    Returns:
+        An ``LLMJudge`` built from the ``LLM_JUDGE_*`` settings.
+
+    Raises:
+        ValueError: Without ``LLM_JUDGE_API_KEY``.
+    """
+    from src.config import settings
+    from src.detection.llm_judge import JudgeConfig, LLMJudge
+
+    config = JudgeConfig.from_settings(settings)
+    if config is None:
+        raise ValueError("measuring the judge needs LLM_JUDGE_API_KEY in the environment")
+    return LLMJudge(config)
+
+
+def with_judge(factory: Callable[[], Any], judge: Any) -> Callable[[], Any]:
+    """Wrap a validator factory so every validator consults ``judge``.
+
+    Args:
+        factory: Builds a validator.
+        judge: The judge shared by every worker (its state is thread-safe).
+
+    Returns:
+        The wrapped factory.
+    """
+
+    def build() -> Any:
+        validator = factory()
+        validator.judge = judge
+        return validator
+
+    return build
 
 
 class ScanPredictor:

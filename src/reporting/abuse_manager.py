@@ -638,6 +638,9 @@ class AbuseReportManager:
                     "url": url,
                 },
             )
+            from src.capture.service import record_scan_capture
+
+            record_scan_capture(conn, url, results)
 
     # ------------------------------------------------------------------
     # Report creation (enqueue)

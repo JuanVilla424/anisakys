@@ -112,6 +112,7 @@ def safe_get_with_redirects(
     session: Optional[requests.Session] = None,
     verify: bool = True,
     stream: bool = False,
+    hops: Optional[list] = None,
 ) -> requests.Response:
     """GET `url`, following up to `max_hops` redirects manually, validating the
     initial URL and every redirect target with assess_url_target BEFORE issuing
@@ -121,7 +122,8 @@ def safe_get_with_redirects(
     Raises SSRFRedirectError on the first blocked/invalid hop (nothing is ever
     fetched at that hop); raises requests.TooManyRedirects past max_hops;
     propagates ordinary requests exceptions otherwise. Returns the final
-    non-redirect Response.
+    non-redirect Response. When `hops` is a list, every request made is
+    appended to it as ``{"url": ..., "status": ...}`` (the redirect chain).
     """
     getter = (session or requests).get
     current = url
@@ -137,6 +139,8 @@ def safe_get_with_redirects(
             verify=verify,
             stream=stream,
         )
+        if hops is not None:
+            hops.append({"url": current, "status": resp.status_code})
         if resp.status_code not in REDIRECT_STATUS_CODES:
             return resp
         loc = resp.headers.get("Location")

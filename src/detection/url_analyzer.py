@@ -1,12 +1,18 @@
 """
-URL Analyzer for Phishing Detection
-Implements typosquatting, homograph, and keyword detection
+URL lexical analysis for phishing detection.
+
+Brand impersonation (typosquatting, combo-squatting, look-alike characters, a brand in a
+subdomain) comes from the brand catalogue, matched on token boundaries with official
+domains first (src/detection/normalize.py, src/brands/catalog.py): a brand's own domains
+never impersonate it, a short brand name only matches a whole token, and look-alike
+characters are compared through UTS-39 skeletons. Keywords and TLDs are simple lists.
 """
 
 import logging
-from typing import Dict, List, Tuple
-from urllib.parse import urlparse
 import unicodedata
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from src.detection.normalize import BrandCatalog, BrandMatch, Host, normalize_host, skeleton
 
 logger = logging.getLogger(__name__)
 
@@ -58,35 +64,6 @@ KNOWN_BRANDS = {
     "binance": ["binance.com"],
     "coinbase": ["coinbase.com"],
     "blockchain": ["blockchain.com"],
-}
-
-# Homoglyph mappings (characters that look similar)
-HOMOGLYPHS = {
-    "a": ["а", "ɑ", "α", "а", "@", "4"],  # Cyrillic а, Latin alpha
-    "b": ["Ь", "ь", "β", "6", "8"],
-    "c": ["с", "ϲ", "ς", "("],  # Cyrillic с
-    "d": ["ԁ", "ɗ"],
-    "e": ["е", "ё", "є", "ε", "3"],  # Cyrillic е
-    "g": ["ɡ", "ց", "9", "q"],
-    "h": ["һ", "հ"],  # Cyrillic һ
-    "i": ["і", "і", "ι", "1", "l", "!", "|"],  # Cyrillic і
-    "j": ["ј", "ʝ"],  # Cyrillic ј
-    "k": ["κ", "к"],  # Cyrillic к
-    "l": ["1", "i", "|", "ӏ", "I"],
-    "m": ["м", "rn"],  # Cyrillic м, rn combo
-    "n": ["п", "ո"],
-    "o": ["о", "ο", "σ", "0", "ө"],  # Cyrillic о, Greek omicron
-    "p": ["р", "ρ"],  # Cyrillic р
-    "q": ["զ", "գ"],
-    "r": ["г", "ř"],
-    "s": ["ѕ", "$", "5"],  # Cyrillic ѕ
-    "t": ["т", "+", "7"],
-    "u": ["υ", "ս", "μ"],
-    "v": ["ν", "ѵ"],  # Greek nu
-    "w": ["ω", "ѡ", "vv"],
-    "x": ["х", "χ", "×"],  # Cyrillic х
-    "y": ["у", "γ", "ү"],  # Cyrillic у
-    "z": ["ζ", "2"],
 }
 
 # Suspicious keywords in URLs
@@ -268,17 +245,29 @@ SUSPICIOUS_TLDS = [
 class URLAnalyzer:
     """Analyzes URLs for phishing indicators"""
 
-    def __init__(self):
+    def __init__(self, catalog: Optional[BrandCatalog] = None):
+        """Create an analyzer.
+
+        Args:
+            catalog: Brand catalogue (default: the current detection catalogue, built-in
+                brands plus the ones added from the console).
+        """
         self.brands = KNOWN_BRANDS
-        self.homoglyphs = HOMOGLYPHS
         self.suspicious_keywords = SUSPICIOUS_KEYWORDS
         self.suspicious_tlds = SUSPICIOUS_TLDS
+        self._catalog = catalog
 
-        # Build reverse mapping for faster lookups
-        self._brand_domains = {}
-        for brand, domains in self.brands.items():
-            for domain in domains:
-                self._brand_domains[domain.lower()] = brand
+    def catalog(self) -> BrandCatalog:
+        """The brand catalogue used for matching.
+
+        Returns:
+            The fixed catalogue given at construction, else the current one.
+        """
+        if self._catalog is not None:
+            return self._catalog
+        from src.brands.catalog import current_catalog
+
+        return current_catalog()
 
     def analyze(self, url: str) -> Dict:
         """
@@ -288,22 +277,22 @@ class URLAnalyzer:
             Dict with analysis results and risk indicators
         """
         try:
-            parsed = urlparse(url.lower())
-            domain = parsed.netloc or parsed.path.split("/")[0]
-
-            # Remove port if present
-            if ":" in domain:
-                domain = domain.split(":")[0]
+            host = normalize_host(url)
+            domain = host.ascii if host else ""
+            catalog = self.catalog()
+            matches = catalog.match(host)
 
             results = {
                 "url": url,
                 "domain": domain,
-                "typosquatting": self._detect_typosquatting(domain),
-                "homoglyphs": self._detect_homoglyphs(domain),
+                "official_brand": catalog.official_brand(host),
+                "typosquatting": self._typosquatting(matches, catalog),
+                "homoglyphs": self._homoglyphs(host, matches),
                 "suspicious_keywords": self._detect_keywords(url),
                 "suspicious_tld": self._check_tld(domain),
-                "combo_squatting": self._detect_combo_squatting(domain),
-                "excessive_subdomains": self._check_subdomains(domain),
+                "combo_squatting": self._combo_squatting(host, matches),
+                "tld_swap": self._tld_swap(host, matches),
+                "excessive_subdomains": self._subdomains(host, matches),
                 "risk_score": 0,
                 "risk_factors": [],
             }
@@ -322,270 +311,100 @@ class URLAnalyzer:
                 "risk_factors": [],
             }
 
-    def _detect_typosquatting(self, domain: str) -> Dict:
-        """Detect typosquatting attempts against known brands"""
-        result = {
-            "detected": False,
-            "target_brand": None,
-            "similarity": 0.0,
-            "techniques": [],
-        }
+    @staticmethod
+    def _typosquatting(matches: Sequence[BrandMatch], catalog: BrandCatalog) -> Dict[str, Any]:
+        """A brand spelled with edits or ASCII look-alikes (``paypall``, ``rnicrosoft``)."""
+        for match in matches:
+            ascii_look_alike = match.kind == "homoglyph" and match.token.isascii()
+            if match.kind == "typo" or ascii_look_alike:
+                return {
+                    "detected": True,
+                    "target_brand": match.brand,
+                    "similarity": match.score,
+                    "techniques": [
+                        "look_alike_characters" if ascii_look_alike else "edit_distance"
+                    ],
+                    "legitimate_domains": catalog.official_domains(match.brand),
+                }
+        return {"detected": False, "target_brand": None, "similarity": 0.0, "techniques": []}
 
-        # Extract base domain (without TLD)
-        parts = domain.split(".")
-        if len(parts) < 2:
-            return result
-
-        # Check main domain and subdomains
-        domains_to_check = [parts[-2]]  # Main domain
-        if len(parts) > 2:
-            domains_to_check.extend(parts[:-2])  # Subdomains
-
-        for check_domain in domains_to_check:
-            # Normalize l33t speak substitutions
-            normalized = self._normalize_leet(check_domain)
-
-            for brand, legitimate_domains in self.brands.items():
-                # Skip if it's the legitimate domain
-                if domain in legitimate_domains:
-                    return result
-
-                # Check both original and normalized versions
-                for variant in [check_domain, normalized]:
-                    similarity = self._calculate_similarity(variant, brand)
-
-                    # Direct match after normalization
-                    if normalized == brand and check_domain != brand:
-                        result["detected"] = True
-                        result["target_brand"] = brand
-                        result["similarity"] = 1.0
-                        result["techniques"] = ["leet_speak_substitution"]
-                        result["legitimate_domains"] = legitimate_domains
-                        return result
-
-                    if similarity >= 0.65 and similarity < 1.0:
-                        techniques = self._identify_typo_techniques(variant, brand)
-                        if techniques or similarity >= 0.8:
-                            result["detected"] = True
-                            result["target_brand"] = brand
-                            result["similarity"] = similarity
-                            result["techniques"] = (
-                                techniques if techniques else ["similar_spelling"]
-                            )
-                            result["legitimate_domains"] = legitimate_domains
-                            return result
-
-        return result
-
-    def _normalize_leet(self, text: str) -> str:
-        """Normalize l33t speak substitutions to standard letters"""
-        leet_map = {
-            "0": "o",
-            "1": "i",
-            "3": "e",
-            "4": "a",
-            "5": "s",
-            "6": "g",
-            "7": "t",
-            "8": "b",
-            "9": "g",
-            "@": "a",
-            "$": "s",
-            "!": "i",
-            "|": "l",
-        }
-        result = ""
-        for char in text.lower():
-            result += leet_map.get(char, char)
-        return result
-
-    def _calculate_similarity(self, s1: str, s2: str) -> float:
-        """Calculate Levenshtein-based similarity ratio"""
-        if not s1 or not s2:
-            return 0.0
-
-        # Levenshtein distance
-        len1, len2 = len(s1), len(s2)
-        if len1 == 0:
-            return 0.0 if len2 > 0 else 1.0
-        if len2 == 0:
-            return 0.0
-
-        # Create distance matrix
-        distances = [[0 for _ in range(len2 + 1)] for _ in range(len1 + 1)]
-
-        for i in range(len1 + 1):
-            distances[i][0] = i
-        for j in range(len2 + 1):
-            distances[0][j] = j
-
-        for i in range(1, len1 + 1):
-            for j in range(1, len2 + 1):
-                cost = 0 if s1[i - 1] == s2[j - 1] else 1
-                distances[i][j] = min(
-                    distances[i - 1][j] + 1,  # deletion
-                    distances[i][j - 1] + 1,  # insertion
-                    distances[i - 1][j - 1] + cost,  # substitution
-                )
-
-        distance = distances[len1][len2]
-        max_len = max(len1, len2)
-        return 1.0 - (distance / max_len)
-
-    def _identify_typo_techniques(self, typo: str, brand: str) -> List[str]:
-        """Identify specific typosquatting techniques used"""
-        techniques = []
-
-        # Character substitution (e.g., 0 for o)
-        if self._has_char_substitution(typo, brand):
-            techniques.append("character_substitution")
-
-        # Character omission (e.g., gogle instead of google)
-        if len(typo) == len(brand) - 1:
-            for i in range(len(brand)):
-                if brand[:i] + brand[i + 1 :] == typo:
-                    techniques.append("character_omission")
-                    break
-
-        # Character addition (e.g., googgle)
-        if len(typo) == len(brand) + 1:
-            for i in range(len(typo)):
-                if typo[:i] + typo[i + 1 :] == brand:
-                    techniques.append("character_addition")
-                    break
-
-        # Character transposition (e.g., googel)
-        if len(typo) == len(brand):
-            for i in range(len(brand) - 1):
-                swapped = brand[:i] + brand[i + 1] + brand[i] + brand[i + 2 :]
-                if swapped == typo:
-                    techniques.append("character_transposition")
-                    break
-
-        # Adjacent key substitution (keyboard proximity)
-        if self._has_adjacent_key_typo(typo, brand):
-            techniques.append("adjacent_key")
-
-        return techniques
-
-    def _has_char_substitution(self, typo: str, brand: str) -> bool:
-        """Check for common character substitutions"""
-        substitutions = {
-            "o": "0",
-            "0": "o",
-            "l": "1",
-            "i": "1",
-            "1": "i",
-            "e": "3",
-            "3": "e",
-            "a": "4",
-            "4": "a",
-            "s": "5",
-            "5": "s",
-            "g": "9",
-            "9": "g",
-        }
-
-        if len(typo) != len(brand):
-            return False
-
-        for i, (t, b) in enumerate(zip(typo, brand)):
-            if t != b and substitutions.get(b) == t:
-                return True
-        return False
-
-    def _has_adjacent_key_typo(self, typo: str, brand: str) -> bool:
-        """Check for adjacent keyboard key typos"""
-        keyboard_adjacency = {
-            "q": "wa",
-            "w": "qeas",
-            "e": "wrds",
-            "r": "etfd",
-            "t": "rygf",
-            "y": "tuhg",
-            "u": "yijh",
-            "i": "uokj",
-            "o": "iplk",
-            "p": "ol",
-            "a": "qwsz",
-            "s": "awedxz",
-            "d": "serfcx",
-            "f": "drtgvc",
-            "g": "ftyhbv",
-            "h": "gyujnb",
-            "j": "huikmn",
-            "k": "jiolm",
-            "l": "kop",
-            "z": "asx",
-            "x": "zsdc",
-            "c": "xdfv",
-            "v": "cfgb",
-            "b": "vghn",
-            "n": "bhjm",
-            "m": "njk",
-        }
-
-        if len(typo) != len(brand):
-            return False
-
-        for t, b in zip(typo, brand):
-            if t != b and t in keyboard_adjacency.get(b, ""):
-                return True
-        return False
-
-    def _detect_homoglyphs(self, domain: str) -> Dict:
-        """Detect homoglyph/IDN attacks"""
-        result = {
+    @staticmethod
+    def _homoglyphs(host: Optional[Host], matches: Sequence[BrandMatch]) -> Dict[str, Any]:
+        """Non-ASCII characters that look like Latin letters (IDN homograph attacks)."""
+        result: Dict[str, Any] = {
             "detected": False,
             "homoglyphs_found": [],
-            "normalized_domain": domain,
+            "normalized_domain": host.ascii if host else "",
             "target_brand": None,
         }
-
-        # Check for non-ASCII characters
-        try:
-            domain.encode("ascii")
-            # Pure ASCII, no homoglyphs
+        if host is None or not host.is_idn:
             return result
-        except UnicodeEncodeError:
-            pass
-
-        # Found non-ASCII characters
-        homoglyphs_found = []
-        normalized = ""
-
-        for char in domain:
-            char_lower = char.lower()
-            found_replacement = False
-
-            for latin, lookalikes in self.homoglyphs.items():
-                if char_lower in lookalikes:
-                    homoglyphs_found.append(
-                        {
-                            "original": char,
-                            "looks_like": latin,
-                            "unicode_name": unicodedata.name(char, "UNKNOWN"),
-                        }
-                    )
-                    normalized += latin
-                    found_replacement = True
-                    break
-
-            if not found_replacement:
-                normalized += char
-
-        if homoglyphs_found:
+        found: List[Dict[str, str]] = []
+        for char in host.unicode:
+            if ord(char) < 128:
+                continue
+            prototype = skeleton(char)
+            if prototype.isascii() and prototype.strip():
+                found.append(
+                    {
+                        "original": char,
+                        "looks_like": prototype,
+                        "unicode_name": unicodedata.name(char, "UNKNOWN"),
+                    }
+                )
+        if found:
             result["detected"] = True
-            result["homoglyphs_found"] = homoglyphs_found
-            result["normalized_domain"] = normalized
+            result["homoglyphs_found"] = found
+            result["normalized_domain"] = skeleton(host.unicode)
+            for match in matches:
+                if match.kind == "homoglyph" and not match.token.isascii():
+                    result["target_brand"] = match.brand
+                    break
+        return result
 
-            # Check if normalized domain matches a known brand
-            for brand, domains in self.brands.items():
-                for legit_domain in domains:
-                    if normalized in legit_domain or legit_domain.split(".")[0] in normalized:
-                        result["target_brand"] = brand
-                        break
+    @staticmethod
+    def _combo_squatting(host: Optional[Host], matches: Sequence[BrandMatch]) -> Dict[str, Any]:
+        """A brand plus other words in a domain that is not the brand's."""
+        for match in matches:
+            if match.kind != "combo" or host is None:
+                continue
+            if match.alias and match.alias in host.label:
+                pattern = host.label.replace(match.alias, "[BRAND]", 1)
+            else:
+                pattern = match.token.replace(match.alias, "[BRAND]", 1)
+            return {"detected": True, "target_brand": match.brand, "combo_pattern": pattern}
+        return {"detected": False, "target_brand": None, "combo_pattern": None}
 
+    @staticmethod
+    def _tld_swap(host: Optional[Host], matches: Sequence[BrandMatch]) -> Dict[str, Any]:
+        """The brand's exact name under a suffix the catalogue does not list as its own.
+
+        Ambiguous on its own: global brands hold their name under many country and
+        generic suffixes (``google.com.pe``, ``amazon.fr``), and attackers register it
+        under others (``bancolombia.co``). The scan weighs it with the domain's age.
+        """
+        for match in matches:
+            if match.kind == "brand_label" and host is not None:
+                return {"detected": True, "target_brand": match.brand, "suffix": host.suffix}
+        return {"detected": False, "target_brand": None, "suffix": None}
+
+    @staticmethod
+    def _subdomains(host: Optional[Host], matches: Sequence[BrandMatch]) -> Dict[str, Any]:
+        """Excessive subdomains, and brands hidden in a subdomain."""
+        result: Dict[str, Any] = {"detected": False, "subdomain_count": 0, "subdomains": []}
+        if host is None or host.is_ip or not host.subdomain:
+            return result
+        subdomains = [s for s in host.subdomain.split(".") if s]
+        result["subdomain_count"] = len(subdomains)
+        result["subdomains"] = subdomains
+        if len(subdomains) > 2:
+            result["detected"] = True
+        sub_segments = {p for s in subdomains for p in s.replace("_", "-").split("-") if p}
+        for match in matches:
+            if match.token in sub_segments:
+                result["detected"] = True
+                result["brand_in_subdomain"] = match.brand
+                break
         return result
 
     def _detect_keywords(self, url: str) -> Dict:
@@ -626,91 +445,6 @@ class URLAnalyzer:
 
         return result
 
-    def _detect_combo_squatting(self, domain: str) -> Dict:
-        """Detect combo-squatting (brand + extra words)"""
-        result = {
-            "detected": False,
-            "target_brand": None,
-            "combo_pattern": None,
-        }
-
-        # Common combo patterns
-        combo_patterns = [
-            "-login",
-            "-secure",
-            "-verify",
-            "-update",
-            "-account",
-            "-support",
-            "-help",
-            "-service",
-            "-online",
-            "-web",
-            "login-",
-            "secure-",
-            "verify-",
-            "update-",
-            "account-",
-            "my-",
-            "my",
-            "-my",
-            "online-",
-            "web-",
-            "e-",
-            "i-",
-        ]
-
-        domain_parts = domain.split(".")
-        main_domain = domain_parts[-2] if len(domain_parts) >= 2 else domain_parts[0]
-
-        for brand in self.brands.keys():
-            if brand in main_domain and brand != main_domain:
-                # Brand is part of domain but not the whole domain
-                for pattern in combo_patterns:
-                    if pattern in main_domain:
-                        result["detected"] = True
-                        result["target_brand"] = brand
-                        result["combo_pattern"] = pattern
-                        return result
-
-                # Generic combo (brand + something else)
-                if len(main_domain) > len(brand) + 2:
-                    result["detected"] = True
-                    result["target_brand"] = brand
-                    result["combo_pattern"] = main_domain.replace(brand, "[BRAND]")
-
-        return result
-
-    def _check_subdomains(self, domain: str) -> Dict:
-        """Check for excessive subdomains (often used in phishing)"""
-        result = {
-            "detected": False,
-            "subdomain_count": 0,
-            "subdomains": [],
-        }
-
-        parts = domain.split(".")
-
-        # Exclude TLD and main domain
-        if len(parts) > 2:
-            subdomains = parts[:-2]
-            result["subdomain_count"] = len(subdomains)
-            result["subdomains"] = subdomains
-
-            # More than 2 subdomains is suspicious
-            if len(subdomains) > 2:
-                result["detected"] = True
-
-            # Check for brand names in subdomains
-            for subdomain in subdomains:
-                for brand in self.brands.keys():
-                    if brand in subdomain:
-                        result["detected"] = True
-                        result["brand_in_subdomain"] = brand
-                        break
-
-        return result
-
     def _calculate_risk(self, analysis: Dict) -> Tuple[int, List[str]]:
         """Calculate overall risk score and list factors"""
         score = 0
@@ -746,6 +480,14 @@ class URLAnalyzer:
             score += 30
             brand = analysis["combo_squatting"]["target_brand"]
             factors.append(f"Combo-squatting detected targeting '{brand}'")
+
+        # The brand's exact name under another suffix (weighed with the domain age later)
+        tld_swap = analysis.get("tld_swap") or {}
+        if tld_swap.get("detected"):
+            score += 20
+            factors.append(
+                f"Brand name '{tld_swap['target_brand']}' under another suffix (.{tld_swap['suffix']})"
+            )
 
         # Excessive subdomains
         if analysis["excessive_subdomains"]["detected"]:

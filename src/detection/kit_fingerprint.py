@@ -34,7 +34,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
-from src.detection.url_analyzer import KNOWN_BRANDS
+from src.detection.normalize import BrandCatalog, normalize_host
 
 # Content read cap for the brand-domain-leak scan -- large enough to catch
 # footer/script-tag references without buffering an entire huge page.
@@ -56,14 +56,21 @@ _LEAKED_HEADER_IOCS = {"x-evilginx"}
 
 
 def score_kit_indicators(
-    url: str, response: requests.Response, brand_hint: Optional[str] = None
+    url: str,
+    response: requests.Response,
+    brand_hint: Optional[str] = None,
+    catalog: Optional[BrandCatalog] = None,
 ) -> Dict[str, Any]:
     """Score a fetched response for AiTM/Evilginx reverse-proxy indicators.
 
-    brand_hint: a KNOWN_BRANDS key (e.g. "nequi"), or None. The HSTS/CSP and
-    brand-domain-leak checks only run when a hint is given -- without a
+    brand_hint: a brand slug of the catalogue (e.g. "nequi"), or None. The HSTS/CSP
+    and brand-domain-leak checks only run when a hint is given -- without a
     specific brand being targeted, "missing security headers" is true of a
     huge fraction of the legitimate web and isn't a meaningful signal here.
+    They never run on the brand's own official domains: a brand's sister site
+    referencing its main domain is not a reverse-proxy leftover.
+
+    catalog: brand catalogue (default: the current detection catalogue).
     """
     indicators: List[str] = []
     score = 0
@@ -74,25 +81,32 @@ def score_kit_indicators(
         score += _HEADER_IOC_WEIGHT
 
     if brand_hint:
-        if "strict-transport-security" not in header_names:
-            indicators.append("missing_hsts")
-            score += _MISSING_HSTS_WEIGHT
-        if "content-security-policy" not in header_names:
-            indicators.append("missing_csp")
-            score += _MISSING_CSP_WEIGHT
+        if catalog is None:
+            from src.brands.catalog import current_catalog
 
-        real_domains = KNOWN_BRANDS.get(brand_hint, [])
-        candidate_domain = _domain_of(url)
-        if real_domains:
-            try:
-                content = response.text[:_CONTENT_SCAN_CAP]
-            except Exception:
-                content = ""
-            for real_domain in real_domains:
-                if real_domain in content and real_domain != candidate_domain:
-                    indicators.append(f"brand_domain_leak:{real_domain}")
-                    score += _BRAND_DOMAIN_LEAK_WEIGHT
-                    break
+            catalog = current_catalog()
+        candidate = normalize_host(url)
+        official_owner = catalog.official_brand(candidate)
+        if official_owner is None:
+            if "strict-transport-security" not in header_names:
+                indicators.append("missing_hsts")
+                score += _MISSING_HSTS_WEIGHT
+            if "content-security-policy" not in header_names:
+                indicators.append("missing_csp")
+                score += _MISSING_CSP_WEIGHT
+
+            real_domains = catalog.official_domains(brand_hint)
+            candidate_registrable = candidate.registrable if candidate else ""
+            if real_domains:
+                try:
+                    content = response.text[:_CONTENT_SCAN_CAP]
+                except Exception:
+                    content = ""
+                for real_domain in real_domains:
+                    if real_domain in content and real_domain != candidate_registrable:
+                        indicators.append(f"brand_domain_leak:{real_domain}")
+                        score += _BRAND_DOMAIN_LEAK_WEIGHT
+                        break
 
     score = min(score, 100)
     if "x_evilginx_header" in indicators:
@@ -103,9 +117,3 @@ def score_kit_indicators(
         kit_type = None
 
     return {"kit_type": kit_type, "confidence": score, "indicators": indicators}
-
-
-def _domain_of(url: str) -> str:
-    from urllib.parse import urlparse
-
-    return urlparse(url).netloc.lower().split(":")[0]

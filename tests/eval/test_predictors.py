@@ -15,6 +15,7 @@ from src.eval.predictors import (
     offline_validator,
     ordinal_score,
     prediction_from_scan,
+    scan_signals,
 )
 
 
@@ -175,6 +176,74 @@ def test_prediction_round_trip():
         heuristic_score=0.75,
         stage_timings_ms={"whois": 10.0},
         stage_status={"whois": "not_listed"},
+        judge_status="ok",
+        judge_level="high",
+        judge_confidence=80,
+        judge_score=0.78,
+        stage_costs_usd={"llm_judge": 0.0012},
     )
 
     assert Prediction.from_dict(prediction.to_dict()) == prediction
+
+
+def test_cache_records_written_before_the_judge_still_load():
+    record = {"sample_id": "x", "level": "high", "confidence": 70, "score": 0.77}
+
+    prediction = Prediction.from_dict(record)
+
+    assert prediction.judge_status is None and prediction.judge_level == "unknown"
+    assert prediction.stage_costs_usd == {}
+
+
+def test_scan_signals():
+    scan = {
+        "url_analysis": {"typosquatting": {"detected": True}, "homoglyphs": {}},
+        "capture": {"status": "ok"},
+        "page_features": {"credential_form": True, "kit_traits": {"telegram_bot_api": "strong"}},
+        "visual_brand": {"top_brand": "nequi", "brand_domain_mismatch": True},
+    }
+
+    signals = scan_signals(scan)
+
+    assert signals["capture_ok"] and signals["credential_form"] and signals["kit_trait"]
+    assert signals["brand_identified"] and signals["brand_domain_mismatch"]
+    assert signals["typosquatting"] and not signals["homoglyphs"]
+    assert not signals["credential_form_for_other_brand"] and not signals["qr_code"]
+    assert scan_signals({"url_analysis": {"typosquatting": {"detected": True}}}) == {}
+    assert prediction_from_scan("s", scan).signals == signals
+    assert prediction_from_scan("s", {**scan, "scan_ms": 812.5}).total_ms == 812.5
+    assert prediction_from_scan("s", scan).total_ms is None
+
+
+class TestJudgeInScans:
+    def _scan(self, judgement):
+        scan = {"aggregated_threat_level": "unknown", "confidence_score": 0}
+        if judgement is not None:
+            scan["llm_judge"] = judgement
+        return prediction_from_scan("s", scan)
+
+    def test_a_verdict_is_kept_on_the_detector_scale(self):
+        prediction = self._scan(
+            {
+                "status": "ok",
+                "verdict": {"is_phishing": True, "confidence": 0.92},
+                "cost_usd": 0.002,
+            }
+        )
+
+        assert (prediction.judge_status, prediction.judge_level) == ("ok", "critical")
+        assert prediction.judge_confidence == 92
+        assert prediction.judge_score == ordinal_score("critical", 92)
+        assert prediction.stage_costs_usd == {"llm_judge": 0.002}
+        assert prediction.level == "unknown"  # the deployed verdict does not use it
+
+    def test_a_judge_without_a_verdict_abstains(self):
+        prediction = self._scan({"status": "budget", "verdict": {}, "cost_usd": 0.0})
+
+        assert (prediction.judge_status, prediction.judge_level) == ("budget", "unknown")
+        assert prediction.judge_score == 0.0
+
+    def test_no_judge_no_judge_fields(self):
+        prediction = self._scan(None)
+
+        assert prediction.judge_status is None and prediction.stage_costs_usd == {}

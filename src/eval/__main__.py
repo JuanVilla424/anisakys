@@ -27,6 +27,7 @@ DEFAULT_CACHE = ROOT / "eval" / "cache"
 DEFAULT_RUNS = ROOT / "eval" / "runs"
 DEFAULT_COSTS = ROOT / "eval" / "costs.json"
 DEFAULT_TARGETS = ROOT / "eval" / "targets.json"
+DEFAULT_TLD_ABUSE = ROOT / "src" / "data" / "tld_abuse.json"
 
 
 def _targets(path: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -82,6 +83,12 @@ def _engine() -> Any:
     from src.database import DatabaseManager
 
     return DatabaseManager().engine
+
+
+def _judge_prompt_version() -> str:
+    from src.detection.llm_judge import PROMPT_VERSION
+
+    return PROMPT_VERSION
 
 
 def _progress(done: int, total: int) -> None:
@@ -218,19 +225,25 @@ def cmd_run(args: argparse.Namespace) -> int:
     from src.eval.predictors import (
         ScanPredictor,
         StoredPredictor,
+        judge_from_settings,
         live_validator,
         offline_validator,
+        with_judge,
     )
     from src.eval.report import build_report, write_report
 
+    if args.judge and args.predictor == "stored":
+        print("--judge needs a scanning predictor (live or heuristic)", file=sys.stderr)
+        return 2
     manifest, samples = load_dataset(Path(args.dataset))
     selected = sorted(select_split(samples, args.split), key=lambda s: s.id)
     if args.limit:
         selected = selected[: args.limit]
     commit = code_commit()
+    run_name = f"{args.predictor}+judge" if args.judge else args.predictor
     cache = (
         Path(args.cache)
-        / f"{args.predictor}-{manifest['name']}-{manifest['version']}-{commit or 'nogit'}.jsonl"
+        / f"{run_name}-{manifest['name']}-{manifest['version']}-{commit or 'nogit'}.jsonl"
     )
     max_scans = args.max_scans
     notes: List[str] = []
@@ -243,8 +256,20 @@ def cmd_run(args: argparse.Namespace) -> int:
         predictor = StoredPredictor(_engine())
     else:
         factory = live_validator if args.predictor == "live" else offline_validator
+        if args.judge and max_scans != 0:
+            try:
+                judge = judge_from_settings()
+            except ValueError as e:
+                print(str(e), file=sys.stderr)
+                return 2
+            factory = with_judge(factory, judge)
+            notes.append(
+                f"LLM judge measured: {judge.config.provider} {judge.config.model} "
+                f"(prompt {_judge_prompt_version()}, daily budget "
+                f"{judge.config.daily_budget_usd} USD)"
+            )
         predictor = ScanPredictor(
-            args.predictor,
+            run_name,
             factory,
             cache_path=cache,
             workers=args.workers,
@@ -258,7 +283,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             + (" (all disabled: heuristic predictor)" if args.predictor == "heuristic" else "")
         )
     print(
-        f"Scoring {len(selected)} sample(s) with the {args.predictor} predictor...",
+        f"Scoring {len(selected)} sample(s) with the {run_name} predictor...",
         file=sys.stderr,
         flush=True,
     )
@@ -271,7 +296,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     report = build_report(
         manifest,
         args.split,
-        args.predictor,
+        run_name,
         selected,
         predictions,
         costs=costs.get("usd_per_call", costs),
@@ -282,8 +307,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     )
     stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     out = (
-        Path(args.out)
-        / f"{manifest['name']}-{manifest['version']}-{args.split}-{args.predictor}-{stamp}"
+        Path(args.out) / f"{manifest['name']}-{manifest['version']}-{args.split}-{run_name}-{stamp}"
     )
     json_path, html_path = write_report(out, report)
     deployed = report["verdicts"]["deployed"]
@@ -300,6 +324,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 },
                 "pr_auc": deployed["pr_auc"],
                 "heuristic_pr_auc": report["verdicts"].get("heuristic", {}).get("pr_auc"),
+                "judge_pr_auc": report["verdicts"].get("judge", {}).get("pr_auc"),
                 "targets": (
                     {
                         "operating_point": report["targets"]["operating_point"],
@@ -340,6 +365,38 @@ def cmd_ops(args: argparse.Namespace) -> int:
         Path(args.out).parent.mkdir(parents=True, exist_ok=True)
         Path(args.out).write_text(text + "\n", encoding="utf-8")
     print(text)
+    return 0
+
+
+def cmd_tld_stats(args: argparse.Namespace) -> int:
+    """Write the per-TLD phishing log-odds table (``src/data/tld_abuse.json``).
+
+    Args:
+        args: Parsed arguments.
+
+    Returns:
+        Exit code.
+    """
+    from src.eval.dataset import load_dataset, select_split
+    from src.eval.tld_stats import tld_table
+
+    manifest, samples = load_dataset(Path(args.dataset))
+    selected = select_split(samples, args.split)
+    table = tld_table(manifest, args.split, selected, min_samples=args.min_samples)
+    out = Path(args.out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(table, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    ranked = sorted(table["tlds"].items(), key=lambda item: -item[1]["log_odds"])
+    print(
+        json.dumps(
+            {
+                "out": str(out),
+                "counts": table["counts"],
+                "most_abused": {tld: row["log_odds"] for tld, row in ranked[:10]},
+            },
+            indent=2,
+        )
+    )
     return 0
 
 
@@ -394,6 +451,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="FILE",
         help="score with the cached scans of an earlier run (no new scans)",
     )
+    run.add_argument(
+        "--judge",
+        action="store_true",
+        help="also ask the LLM judge on each capture and report its verdict "
+        "(needs LLM_JUDGE_API_KEY; billed within LLM_JUDGE_DAILY_BUDGET_USD)",
+    )
     run.add_argument("--costs", default=str(DEFAULT_COSTS))
     run.add_argument("--targets", default=str(DEFAULT_TARGETS), help='"" disables the check')
     run.add_argument(
@@ -405,6 +468,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--out", default=str(DEFAULT_RUNS))
     run.set_defaults(handler=cmd_run)
+
+    tld = commands.add_parser(
+        "tld-stats", help="write the per-TLD phishing log-odds table from a dataset split"
+    )
+    tld.add_argument("dataset")
+    tld.add_argument("--split", choices=("train", "test", "all"), default="train")
+    tld.add_argument("--min-samples", type=int, default=5)
+    tld.add_argument("--out", default=str(DEFAULT_TLD_ABUSE))
+    tld.set_defaults(handler=cmd_tld_stats)
 
     ops = commands.add_parser("ops", help="operational metrics of the configured database")
     ops.add_argument("--days", type=int, default=30)

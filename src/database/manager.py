@@ -557,6 +557,9 @@ class DatabaseManager:
                         "url": url,
                     },
                 )
+                from src.capture.service import record_scan_capture
+
+                record_scan_capture(conn, url, multi_api_results)
 
                 logger.info(
                     f"✅ Analysis completed for {url}: Threat={multi_api_results.get('aggregated_threat_level')}, Confidence={multi_api_results.get('confidence_score')}%"

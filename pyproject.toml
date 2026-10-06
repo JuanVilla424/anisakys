@@ -24,8 +24,12 @@ dependencies = [
     "google-api-python-client>=2.197,<3",
     "google-auth>=2.23,<3",
     "gunicorn>=23.0",
+    "idna>=3.10,<4",
     "ipwhois>=1.2,<2",
     "jinja2>=3.1.6,<4",
+    "mmh3>=5.3,<6",
+    "numpy>=2.3,<3",
+    "pillow>=12.0,<13",
     "playwright>=1.40,<2",
     "prometheus-client>=0.21.1,<0.22",
     "psutil>=6.1.1",
@@ -35,6 +39,7 @@ dependencies = [
     "pymisp>=2.4,<3",
     "python-dotenv>=1.0,<2",
     "python-whois>=0.9.4",
+    "rapidfuzz>=3.14,<4",
     "redis>=5.0",
     "requests>=2.33,<2.35",
     "selenium>=4.15,<5",
@@ -46,6 +51,7 @@ dependencies = [
     "validators>=0.35,<0.36",
     "websocket-client>=1.8,<2",
     "werkzeug>=3.1,<4",
+    "zxing-cpp>=3.1,<4",
 ]
 
 [dependency-groups]

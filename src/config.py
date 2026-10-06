@@ -156,6 +156,11 @@ class Settings(BaseSettings):
     # VirusTotal request budget shared by every client in the process (the
     # public API allows 4 requests/minute; raise it for premium keys).
     VIRUSTOTAL_REQUESTS_PER_MINUTE: int = Field(default=4, ge=1)
+    # Per-process budgets of the other lookups (src/intelligence/provider_runtime.py).
+    URLVOID_REQUESTS_PER_MINUTE: int = Field(default=30, ge=1)
+    PHISHTANK_REQUESTS_PER_MINUTE: int = Field(default=30, ge=1)
+    GSB_REQUESTS_PER_MINUTE: int = Field(default=300, ge=1)
+    WHOIS_REQUESTS_PER_MINUTE: int = Field(default=120, ge=1)
     # The URLVoid client's endpoint and response schema could not be matched
     # to the vendor's documented API, so it stays off unless explicitly enabled.
     URLVOID_ENABLED: bool = False
@@ -190,6 +195,22 @@ class Settings(BaseSettings):
     DB_MAX_OVERFLOW: int = Field(default=5, ge=0)
     DB_POOL_TIMEOUT_SECONDS: int = Field(default=30, gt=0)
     DB_POOL_RECYCLE_SECONDS: int = Field(default=1800, ge=-1)
+
+    # --- v2 phase 2: detection core --------------------------------------------
+    # Optional LLM judge (src/detection/llm_judge.py). Off by default; enabled only
+    # when the evaluation shows it improves the detector. Prices are USD per million
+    # tokens (defaults: deepseek-flash at peak hours, the higher rate).
+    LLM_JUDGE_ENABLED: bool = False
+    LLM_JUDGE_PROVIDER: str = Field(
+        default="openai_compatible", pattern="^(openai_compatible|anthropic)$"
+    )
+    LLM_JUDGE_MODEL: str = "deepseek-flash"
+    LLM_JUDGE_BASE_URL: str = "https://api.deepseek.com"
+    LLM_JUDGE_API_KEY: Optional[SecretStr] = None
+    LLM_JUDGE_DAILY_BUDGET_USD: float = Field(default=1.0, ge=0)
+    LLM_JUDGE_TIMEOUT_SECONDS: int = Field(default=30, gt=0)
+    LLM_JUDGE_INPUT_USD_PER_MTOK: float = Field(default=0.30, ge=0)
+    LLM_JUDGE_OUTPUT_USD_PER_MTOK: float = Field(default=1.20, ge=0)
 
     model_config = {
         "env_file": env_file,

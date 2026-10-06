@@ -3,6 +3,7 @@
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict, List
 from unittest.mock import patch
 
@@ -89,6 +90,14 @@ class TestReport:
     def test_stage_block_without_predictions(self):
         assert stage_block([])["total"]["latency_ms"]["count"] == 0
 
+    def test_overlapping_stages_report_the_wall_clock(self):
+        sequential = _prediction("a", "high", "high", 100.0)  # stages 100 + 200 ms
+        parallel = _prediction("b", "high", "high", 100.0)
+        parallel.total_ms = 210.0  # the same stages, overlapping
+
+        assert stage_block([sequential])["total"]["latency_ms"]["p50"] == 300.0
+        assert stage_block([parallel])["total"]["latency_ms"]["p50"] == 210.0
+
     def test_html_is_self_contained_and_defangs_urls(self, tmp_path):
         report = _report()
 
@@ -104,6 +113,110 @@ class TestReport:
     def test_defang(self):
         assert defang("https://evil.example/x") == "hxxps[://]evil[.]example/x"
 
+    def test_a_run_without_the_judge_has_no_judge_verdict(self):
+        report = _report()
+
+        assert "judge" not in report["verdicts"] and "judge" not in report
+        assert "signals" not in report  # scans without captures carry no signals
+
+    def test_signal_table(self):
+        samples = _samples()
+        predictions = [
+            _prediction(s.id, "unknown", "unknown", 1.0) for s in samples
+        ]  # TP-able, phishing, official, homonym
+        predictions[0].signals = {"brand_domain_mismatch": True, "credential_form": True}
+        predictions[1].signals = {"brand_domain_mismatch": False, "credential_form": True}
+        predictions[2].signals = {"brand_domain_mismatch": False, "credential_form": True}
+        predictions[3].signals = {"brand_domain_mismatch": False, "credential_form": False}
+        manifest = {"name": "unit", "version": "v1", "samples_sha256": "0" * 64}
+
+        report = build_report(manifest, "test", "live", samples, predictions)
+
+        assert report["signals"] == {
+            "brand_domain_mismatch": {
+                "phishing": 1,
+                "benign": 0,
+                "precision": 1.0,
+                "recall": 0.5,
+                "fpr": 0.0,
+            },
+            "credential_form": {
+                "phishing": 2,
+                "benign": 1,
+                "precision": 0.6667,
+                "recall": 1.0,
+                "fpr": 0.5,
+            },
+        }
+        assert "Signals, each alone" in render_html(report)
+
+
+def _judged_report() -> Dict[str, Any]:
+    samples = _samples()
+    predictions = [
+        _prediction(samples[0].id, "high", "high", 100.0),
+        _prediction(samples[1].id, "unknown", "medium", 200.0),
+        _prediction(samples[2].id, "clean", "low", 300.0),
+        _prediction(samples[3].id, "high", "high", 400.0),
+    ]
+    judged = [
+        ("critical", 95, "ok", 0.002, "listed"),  # phishing, sure: auto-reported
+        ("high", 80, "ok", 0.002, "listed"),  # phishing, below the auto-report confidence
+        ("clean", 90, "ok", 0.002, "not_listed"),  # official brand page
+        ("unknown", 0, "budget", 0.0, "no_data"),  # the budget was spent
+    ]
+    for prediction, (level, confidence, status, cost, stage) in zip(predictions, judged):
+        prediction.judge_level, prediction.judge_confidence = level, confidence
+        prediction.judge_status, prediction.judge_score = status, ordinal_score(level, confidence)
+        prediction.stage_costs_usd = {"llm_judge": cost}
+        prediction.stage_status["llm_judge"] = stage
+        prediction.stage_timings_ms["llm_judge"] = 900.0
+    manifest = {"name": "unit", "version": "v1", "samples_sha256": "0" * 64}
+    return build_report(
+        manifest,
+        "test",
+        "live+judge",
+        samples,
+        predictions,
+        costs={"virustotal_url": 0.01, "llm_judge": 5.0},
+        auto_report_min_confidence=85,
+    )
+
+
+class TestJudgeVerdict:
+    def test_the_judge_is_scored_on_its_own(self):
+        report = _judged_report()
+
+        judge = report["verdicts"]["judge"]
+        auto = judge["operating_points"]["auto_report"]
+        assert (auto["tp"], auto["fp"], auto["fn"], auto["tn"]) == (1, 0, 1, 2)
+        high = judge["operating_points"]["level>=high"]
+        assert (high["precision"], high["recall"]) == (1.0, 1.0)
+        assert judge["coverage"] == {"covered": 3, "total": 4, "rate": 0.75}
+        # The deployed verdict is untouched by the judge.
+        deployed = report["verdicts"]["deployed"]["operating_points"]["level>=high"]
+        assert (deployed["tp"], deployed["fp"]) == (1, 1)
+
+    def test_its_cost_is_the_measured_spend(self):
+        report = _judged_report()
+
+        assert report["judge"] == {
+            "asked": 4,
+            "status": {"ok": 3, "budget": 1},
+            "decided": 3,
+            "cost_usd": 0.006,
+            "cost_per_decision_usd": 0.002,
+        }
+        assert report["stages"]["llm_judge"]["cost_usd"] == 0.006  # not 5.0 per call
+        assert report["stages"]["total"]["cost_usd"] == round(0.03 + 0.006, 4)
+
+    def test_html_shows_the_judge(self):
+        page = render_html(_judged_report())
+
+        assert "PR-AUC (LLM judge)" in page
+        assert "Operating points — LLM judge alone" in page
+        assert "budget 1" in page and "Evidence only" in page
+
 
 class _CannedValidator:
     def comprehensive_scan(self, url: str) -> Dict[str, Any]:
@@ -114,6 +227,22 @@ class _CannedValidator:
             "stage_timings_ms": {"url_analysis": 1.0},
             "stage_status": {"url_analysis": "not_listed"},
         }
+
+
+class _JudgedValidator(_CannedValidator):
+    """A canned scan that also carries the judge's verdict (what --judge adds)."""
+
+    judge: Any = None
+
+    def comprehensive_scan(self, url: str) -> Dict[str, Any]:
+        scan = super().comprehensive_scan(url)
+        phishing = "pagos" in url or "login" in url
+        scan["llm_judge"] = {
+            "status": "ok",
+            "verdict": {"is_phishing": phishing, "confidence": 0.9},
+            "cost_usd": 0.001,
+        }
+        return scan
 
 
 def _seeds(directory: Path) -> Path:
@@ -212,6 +341,61 @@ class TestCommandLine:
         assert report["auto_report_rule"]["min_confidence"] == 70
         # The canned validator answers "high" with confidence 75: flagged at 70.
         assert report["verdicts"]["deployed"]["operating_points"]["auto_report"]["tp"] >= 1
+
+    def test_run_with_the_judge(self, tmp_path, capsys):
+        seeds = _seeds(tmp_path / "seeds")
+        out = tmp_path / "datasets"
+        with patch(
+            "src.intelligence.openphish.OpenPhishIntegration.fetch_feed",
+            return_value={"https://nequi-pagos.example/", "https://bank-login.example/"},
+        ):
+            main(
+                [
+                    "build",
+                    "--name",
+                    "judged",
+                    "--version",
+                    "v1",
+                    "--out",
+                    str(out),
+                    "--seeds",
+                    str(seeds),
+                    "--tranco-top",
+                    "0",
+                    "--no-db",
+                    "--skip-liveness",
+                ]
+            )
+        dataset = str(out / "judged" / "v1")
+        base = ["run", dataset, "--split", "all", "--out", str(tmp_path / "runs")]
+        base += ["--cache", str(tmp_path / "cache"), "--workers", "1", "--targets", ""]
+
+        assert main([*base, "--predictor", "stored", "--judge"]) == 2
+        with patch(
+            "src.eval.predictors.judge_from_settings",
+            side_effect=ValueError("measuring the judge needs LLM_JUDGE_API_KEY"),
+        ):
+            assert main([*base, "--predictor", "heuristic", "--judge"]) == 2
+        assert "LLM_JUDGE_API_KEY" in capsys.readouterr().err
+
+        judge = SimpleNamespace(
+            config=SimpleNamespace(
+                provider="openai_compatible", model="deepseek-flash", daily_budget_usd=1.0
+            )
+        )
+        with (
+            patch("src.eval.predictors.offline_validator", side_effect=_JudgedValidator),
+            patch("src.eval.predictors.judge_from_settings", return_value=judge),
+        ):
+            code = main([*base, "--predictor", "heuristic", "--judge"])
+        assert code == 0
+        summary = json.loads(_last_json(capsys))
+        assert summary["judge_pr_auc"] is not None
+        report = json.loads(Path(summary["report_json"]).read_text())
+        assert report["predictor"] == "heuristic+judge"
+        assert any(n.startswith("LLM judge measured: openai_compatible") for n in report["notes"])
+        assert report["judge"]["asked"] == report["counts"]["samples"]
+        assert list((tmp_path / "cache").glob("heuristic+judge-judged-v1-*.jsonl"))
 
     def test_verify_fails_on_a_tampered_dataset(self, tmp_path):
         seeds = _seeds(tmp_path / "seeds")

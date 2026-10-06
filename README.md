@@ -475,6 +475,14 @@ threads, limited to `EMAIL_MONITOR_ALLOWED_MAILBOXES`), `metrics` and `admin`.
 - `GET /api/v1/session` - The calling key: `key_type`, `key_name`, `key_prefix` (8 chars),
   usable `scopes` and `rate_limit_storage` (`shared`/`per-process`); never the secret
 - `GET /api/v1/sites/sources` - `[{"source": str|null, "count": int}]`
+- `GET /api/v1/sites/<id>/capture` - Newest page capture of a site: transport, content signals and
+  the brand identified (`{"capture": null}` until a scan captures the page)
+- `GET /api/v1/brands` / `GET /api/v1/brands/<slug>` - Brand catalogue (starts empty; `search`,
+  `include_inactive`)
+- `POST /api/v1/brands`, `PATCH /api/v1/brands/<slug>`, `DELETE /api/v1/brands/<slug>` - Add, edit
+  or deactivate a brand (scope `write`)
+- `POST /api/v1/brands/<slug>/assets`, `DELETE /api/v1/brands/<slug>/assets/<id>` - Reference favicon
+  or logo (image ≤ 1 MB; only its hashes are kept)
 - `GET /api/v1/reports/tasks` - Open analyst tasks (web-form providers, sites without a contact)
 - `POST /api/v1/reports/tasks/<id>/complete` - Close one: `{"outcome": "submitted"|"not_applicable", "note"?}`
 - `POST /api/v2/stix/bundle` - Build a STIX 2.1 indicator bundle (TLP 2.0, AMBER by default)
@@ -618,6 +626,15 @@ Every `run` and `ops` checks the agreed targets in `eval/targets.json` (precisio
 FPR at the auto-report operating point, overall and per brand; pipeline medians) and reports
 each one as met, missed or not resolvable. `run --reuse-cache <file>` re-scores the scans of an
 earlier run without new network calls.
+
+```bash
+# Per-TLD phishing log-odds from a dataset's train split -> src/data/tld_abuse.json
+python -m src.eval tld-stats eval/datasets/phase2/2026-10-05 --split train
+
+# Also measure the optional LLM judge as a separate verdict (needs LLM_JUDGE_API_KEY;
+# billed within LLM_JUDGE_DAILY_BUDGET_USD)
+python -m src.eval run eval/datasets/phase2/2026-10-05 --predictor live --judge
+```
 
 ## 🤝 Contributing
 

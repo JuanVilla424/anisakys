@@ -786,6 +786,9 @@ class GoogleAdsPhishingDetector:
                 ad_links = top_ads_section.find_all("a", href=True)
                 for link in ad_links:
                     href = link.get("href")
+                    # Google's click-tracking links carry the advertiser URL as a parameter.
+                    if href and ("/aclk?" in href or "/url?" in href):
+                        href = self._extract_actual_url(href)
                     if href and href.startswith("http"):
                         ad_data = {
                             "url": href,
