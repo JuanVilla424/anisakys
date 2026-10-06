@@ -34,8 +34,12 @@ import re
 import secrets
 import threading
 import time
+import tomllib
+import uuid
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
+from urllib.parse import urlsplit
 
 import requests
 from PIL import Image
@@ -59,6 +63,23 @@ MAX_BRAND_CHARS = 100
 MAX_REASONS_CHARS = 600
 # An input judged within this window is answered from that verdict.
 CACHE_SECONDS = 7 * 24 * 3600
+# Longest wait for the request budget (LLM_JUDGE_REQUESTS_PER_MINUTE) before giving up.
+RATE_WAIT_SECONDS = 300.0
+# Gateways that route by conversation and reject requests without a stable session ID
+# (OpenCode Go/Zen: https://opencode.ai/docs/go/#where-can-i-use-it).
+SESSION_HEADERS = {"opencode.ai": "x-opencode-session"}
+
+
+def _client_version() -> str:
+    try:
+        with open(Path(__file__).resolve().parents[2] / "pyproject.toml", "rb") as handle:
+            return str(tomllib.load(handle)["project"]["version"])
+    except Exception:  # pylint: disable=broad-except  (an unknown version is still a client)
+        return "unknown"
+
+
+# Gateways ask clients to identify themselves instead of sending an HTTP library's name.
+USER_AGENT = f"anisakys-llm-judge/{_client_version()}"
 _IMAGE_TYPES = {"PNG": "image/png", "JPEG": "image/jpeg", "WEBP": "image/webp", "GIF": "image/gif"}
 _CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _BLANKS = re.compile(r"[ \t]+")
@@ -376,7 +397,7 @@ class LLMJudge:
             use_database: False keeps budget and earlier verdicts in this process only.
         """
         # Deferred: the src.intelligence package imports this module through its validator.
-        from src.intelligence.provider_runtime import TTLCache
+        from src.intelligence.provider_runtime import TTLCache, bucket
 
         self.config = config
         self._engine = engine
@@ -385,6 +406,19 @@ class LLMJudge:
         self._lock = threading.Lock()
         self._spent: Dict[str, float] = {}
         self._verdicts = TTLCache(maxsize=2000)
+        # Process-wide request budget (LLM_JUDGE_REQUESTS_PER_MINUTE), shared by every judge.
+        self._requests = bucket("llm_judge")
+        # One stable session per judge (per process in practice), for gateways that need it.
+        host = (urlsplit(config.base_url).hostname or "").lower()
+        self._session_header = next(
+            (
+                name
+                for domain, name in SESSION_HEADERS.items()
+                if host == domain or host.endswith(f".{domain}")
+            ),
+            None,
+        )
+        self._session_id = uuid.uuid4().hex
         self.breaker = CircuitBreaker(
             "LLMJudge",
             CircuitBreakerConfig(
@@ -510,6 +544,9 @@ class LLMJudge:
         prompt = user_prompt(page, secrets.token_hex(8))
         image = base64.b64encode(page.image).decode("ascii") if page.image else None
         base = self.config.base_url.rstrip("/")
+        client: Dict[str, str] = {"User-Agent": USER_AGENT}
+        if self._session_header:
+            client[self._session_header] = self._session_id
         if self.config.provider == "anthropic":
             content: List[Dict[str, Any]] = []
             if image:
@@ -526,6 +563,7 @@ class LLMJudge:
                     "x-api-key": self.config.api_key,
                     "anthropic-version": ANTHROPIC_VERSION,
                     "content-type": "application/json",
+                    **client,
                 },
                 {
                     "model": self.config.model,
@@ -546,7 +584,11 @@ class LLMJudge:
             ]
         return (
             f"{base}/chat/completions",
-            {"Authorization": f"Bearer {self.config.api_key}", "Content-Type": "application/json"},
+            {
+                "Authorization": f"Bearer {self.config.api_key}",
+                "Content-Type": "application/json",
+                **client,
+            },
             {
                 "model": self.config.model,
                 "messages": [
@@ -646,6 +688,10 @@ class LLMJudge:
             return base
         if self._spent_today() >= self.config.daily_budget_usd:
             base.status, base.error = "budget", "daily budget spent"
+            self._record(url, base)
+            return base
+        if not self._requests.acquire(RATE_WAIT_SECONDS):
+            base.status, base.error = "error", "rate_limited"
             self._record(url, base)
             return base
 

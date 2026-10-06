@@ -39,6 +39,8 @@ DEFAULT_RATE_PER_MINUTE: Dict[str, float] = {
     "phishtank": 30,
     "google_safe_browsing": 300,
     "whois": 120,
+    # The LLM judge (src/detection/llm_judge.py): a coding-agent-like pace for gateways.
+    "llm_judge": 20,
 }
 RATE_SETTINGS = {
     "virustotal_url": "VIRUSTOTAL_REQUESTS_PER_MINUTE",
@@ -47,6 +49,7 @@ RATE_SETTINGS = {
     "phishtank": "PHISHTANK_REQUESTS_PER_MINUTE",
     "google_safe_browsing": "GSB_REQUESTS_PER_MINUTE",
     "whois": "WHOIS_REQUESTS_PER_MINUTE",
+    "llm_judge": "LLM_JUDGE_REQUESTS_PER_MINUTE",
 }
 
 

@@ -25,6 +25,7 @@ from src.observability.metrics import (
 )
 from src.capture.service import PageCapture, capture_hashes, fetch_page
 from src.detection.features import page_features, page_text
+from src.detection.fusion import fuse_scan
 from src.detection.llm_judge import LLMJudge, configured_judge
 from src.detection.normalize import normalize_host
 from src.detection.visual_brand import identify_brands
@@ -373,6 +374,21 @@ class MultiAPIValidator:
         url_key = url.strip()
         domain_key = domain.lower()
 
+        capture_extras: Dict[str, Any] = {}
+
+        def run_page_capture() -> PageCapture:
+            """Capture the page: browser worker when deployed, plain fetch otherwise."""
+            from src.capture.client import get_capture_worker
+
+            worker = get_capture_worker()
+            if worker is None:
+                return fetch_page(url, timeout=CAPTURE_TIMEOUT_SECONDS)
+            from src.capture.client import worker_capture
+
+            page, extras = worker_capture(url, worker)
+            capture_extras.update(extras)
+            return page
+
         def no_host() -> Dict[str, Any]:
             return {"status": NO_DATA, "error": "No host name in URL"}
 
@@ -440,7 +456,9 @@ class MultiAPIValidator:
                 self.google_safe_browsing.check_url,
                 url,
             ),
-            "capture": lambda: fetch_page(url, timeout=CAPTURE_TIMEOUT_SECONDS),
+            # Real-browser capture when the sandboxed worker is deployed
+            # (multi-profile, cloaking); today's plain fetch otherwise.
+            "capture": run_page_capture,
         }
         outputs = _run_parallel(tasks, stage_timings)
 
@@ -508,6 +526,25 @@ class MultiAPIValidator:
         results["capture_hashes"] = hashes
         results["page_features"] = features
         results["visual_brand"] = visual
+        # Browser-capture extras (WS3): per-profile summaries, cloaking
+        # comparison and the CAPTCHA walls, for storage and the next fusion
+        # training round. A plain fetch leaves every key absent.
+        if capture_extras:
+            results["capture_profiles"] = capture_extras.get("profiles") or {}
+            results["cloaking"] = capture_extras.get("cloaking") or {}
+            results["capture_engine"] = capture_extras.get("engine")
+            results["measured_geo"] = bool(capture_extras.get("measured_geo"))
+            if capture_extras.get("asn"):
+                results["capture_asn"] = capture_extras["asn"]
+                results["capture_asn_org"] = capture_extras["asn_org"]
+            primary_summary = capture_extras.get("profiles", {}).get("desktop") or {}
+            if primary_summary.get("captcha"):
+                features["captcha_walls"] = primary_summary["captcha"]
+            cloaking = capture_extras.get("cloaking") or {}
+            if cloaking.get("measured_profiles"):
+                features["cloaking"] = {
+                    k: v for k, v in cloaking.items() if k != "measured_profiles"
+                }
         stage_timings["content_features"] = round((time.perf_counter() - content_started) * 1000, 1)
 
         # Step 5.7: optional LLM judge on the captured page. Evidence only: the verdict
@@ -553,13 +590,16 @@ class MultiAPIValidator:
         if judge_status is not None:
             results["stage_status"]["llm_judge"] = judge_status
 
-        # Step 6: Aggregate results and calculate threat level
-        results["aggregated_threat_level"] = self._aggregate_threat_level(
+        # Step 6: Aggregate results and calculate threat level (the rules
+        # verdict -- the calibrated fusion below may supersede it).
+        rules_level = self._aggregate_threat_level(
             vt_result, uv_result, pt_result, domain_age, url_analysis, gsb_result, kit_result
         )
-        results["confidence_score"] = self._calculate_confidence_score(
+        rules_confidence = self._calculate_confidence_score(
             vt_result, uv_result, pt_result, domain_age, url_analysis, gsb_result, kit_result
         )
+        results["aggregated_threat_level"] = rules_level
+        results["confidence_score"] = rules_confidence
 
         # If no external source produced evidence (every threat-intel lookup
         # errored or had no data, GSB was not checked and no kit was found),
@@ -568,6 +608,25 @@ class MultiAPIValidator:
         if not self._has_external_evidence(vt_result, uv_result, pt_result, gsb_result, kit_result):
             results["aggregated_threat_level"] = "unknown"
             results["confidence_score"] = 0
+
+        # Step 6.5: calibrated fusion (phase 2, WS8). The rules verdict stays
+        # available as heuristic_level; the fusion's own activation gate (the
+        # ``gate`` section of its artifact) decides whether it may report the
+        # verdict -- until then it runs in shadow: stored, never reported.
+        fusion_started = time.perf_counter()
+        try:
+            fusion_result = fuse_scan(results)
+        except Exception as e:  # a fusion problem must never fail the scan
+            logger.debug(f"Fusion failed for {url}: {e}")
+            fusion_result = None
+        if fusion_result is not None:
+            results["heuristic_level"] = rules_level
+            results["heuristic_confidence"] = rules_confidence
+            results["fusion"] = fusion_result
+            if fusion_result.get("active"):
+                results["aggregated_threat_level"] = fusion_result["level"]
+                results["confidence_score"] = fusion_result["confidence"]
+            stage_timings["fusion"] = round((time.perf_counter() - fusion_started) * 1000, 1)
 
         results["recommendations"] = self._generate_recommendations(
             vt_result, uv_result, pt_result, domain_age, url_analysis, gsb_result, kit_result

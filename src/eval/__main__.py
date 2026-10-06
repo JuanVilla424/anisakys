@@ -18,7 +18,7 @@ import logging
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DATASETS = ROOT / "eval" / "datasets"
@@ -28,6 +28,11 @@ DEFAULT_RUNS = ROOT / "eval" / "runs"
 DEFAULT_COSTS = ROOT / "eval" / "costs.json"
 DEFAULT_TARGETS = ROOT / "eval" / "targets.json"
 DEFAULT_TLD_ABUSE = ROOT / "src" / "data" / "tld_abuse.json"
+# The phase 1 (pre-v2) run on the phase 2 dataset: the reference the fusion's
+# activation gate has to beat (docs/ROADMAP.md, "Phase 2 results").
+DEFAULT_GATE_BASELINE = (
+    DEFAULT_RUNS / "phase2-2026-10-05-test-live-20261006T022110Z" / "report.json"
+)
 
 
 def _targets(path: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -400,6 +405,246 @@ def cmd_tld_stats(args: argparse.Namespace) -> int:
     return 0
 
 
+def _vector_cache_candidates(manifest: Dict[str, Any], predictor: str = "heuristic") -> List[Path]:
+    """Cache files of ``predictor`` runs on this dataset, newest first."""
+    prefix = f"{predictor}-{manifest['name']}-{manifest['version']}-"
+    return sorted(
+        (p for p in DEFAULT_CACHE.glob(f"{prefix}*.jsonl") if p.is_file()),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def _load_vector_cache(cache: Path) -> Dict[str, Dict[str, float]]:
+    """``fusion_features`` by sample id from a prediction cache.
+
+    Args:
+        cache: JSONL cache written by ``run`` (predictions carry the vector).
+
+    Returns:
+        The vectors of every prediction that has one.
+    """
+    vectors: Dict[str, Dict[str, float]] = {}
+    for line in cache.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        record = json.loads(line)
+        features = record.get("fusion_features") or {}
+        if features:
+            vectors[str(record["sample_id"])] = {str(k): float(v) for k, v in features.items()}
+    return vectors
+
+
+def _resolve_vector_cache(manifest: Dict[str, Any], explicit: Optional[str]) -> Optional[Path]:
+    """The cache to train/gate on: explicit file or the newest with vectors."""
+    if explicit:
+        path = Path(explicit)
+        if not path.exists():
+            raise SystemExit(f"cache not found: {path}")
+        return path
+    for candidate in _vector_cache_candidates(manifest):
+        if _load_vector_cache(candidate):
+            return candidate
+    return None
+
+
+def _fusion_dataset(
+    dataset: str, split: str, cache_arg: Optional[str]
+) -> Tuple[Dict[str, Any], List, Path, Dict[str, Dict[str, float]]]:
+    """Load a split and the fusion vectors of its samples from a cache."""
+    from src.eval.dataset import load_dataset, select_split
+
+    manifest, samples = load_dataset(Path(dataset))
+    selected = sorted(select_split(samples, split), key=lambda s: s.id)
+    cache = _resolve_vector_cache(manifest, cache_arg)
+    if cache is None:
+        raise SystemExit(
+            "no prediction cache with fusion_features for "
+            f"{manifest['name']}-{manifest['version']} -- first score the split with "
+            "`python -m src.eval run <dataset> --predictor heuristic --split "
+            f"{split}` (the new code stores the vector in the cache)"
+        )
+    return manifest, selected, cache, _load_vector_cache(cache)
+
+
+def cmd_train_fusion(args: argparse.Namespace) -> int:
+    """Fit and write the calibrated fusion artifact from cached scan vectors."""
+    from src.detection.fusion import MODELS_DIR, train_model
+
+    manifest, selected, cache, vectors_by_id = _fusion_dataset(args.dataset, args.split, args.cache)
+    vectors: List[Dict[str, float]] = []
+    labels: List[int] = []
+    missing = 0
+    for sample in selected:
+        vector = vectors_by_id.get(sample.id)
+        if not vector:
+            missing += 1
+            continue
+        vectors.append(vector)
+        labels.append(1 if sample.is_positive else 0)
+    if missing:
+        print(
+            f"note: {missing} sample(s) of the split have no vector in the cache "
+            "(scans made before the fusion existed) and are left out",
+            file=sys.stderr,
+        )
+    model, metrics = train_model(
+        vectors,
+        labels,
+        dataset={
+            "name": manifest["name"],
+            "version": manifest["version"],
+            "split": args.split,
+            "cache": cache.name,
+            "samples": len(vectors),
+            "positives": sum(labels),
+            # The runtime refuses to report with a different capture engine:
+            # a calibration fitted on fetch captures does not hold for
+            # real-browser captures.
+            "capture_engine": ("browser" if any(v.get("g_browser") for v in vectors) else "fetch"),
+        },
+        min_precision=args.min_precision,
+    )
+    out = Path(args.artifact) if args.artifact else MODELS_DIR / "fusion-v1.json"
+    # The artifact's name is the model's id (fusion-v1.json -> "fusion-v1"):
+    # detector_version and the demo read it verbatim.
+    model.model_id = out.stem
+    model.save(out)
+    print(
+        json.dumps(
+            {
+                "artifact": str(out),
+                "gate": None,
+                "dataset": model.dataset,
+                "metrics": metrics,
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
+def cmd_gate(args: argparse.Namespace) -> int:
+    """Evaluate the activation gate and write its verdict into the artifact.
+
+    The fusion may report the deployed verdict only when, on the split's
+    ``auto_report`` operating point, its precision is at least the baseline's,
+    its recall is higher and its false-positive rate is not worse. Otherwise the
+    artifact keeps the fusion in shadow (stored, never reported).
+    """
+    from src.detection.fusion import DEFAULT_ARTIFACT, FusionModel
+    from src.eval.predictors import Prediction, ordinal_score
+    from src.eval.report import _configured_auto_report_confidence, verdict_block
+
+    artifact = Path(args.artifact) if args.artifact else DEFAULT_ARTIFACT
+    if not artifact.exists():
+        raise SystemExit(f"no fusion artifact at {artifact} -- run train-fusion first")
+    model = FusionModel.load(artifact)
+
+    manifest, selected, cache, vectors_by_id = _fusion_dataset(args.dataset, args.split, args.cache)
+    predictions: List[Prediction] = []
+    scored: List = []
+    missing = 0
+    for sample in selected:
+        vector = vectors_by_id.get(sample.id)
+        if not vector:
+            missing += 1
+            continue
+        result = model.predict_vector(vector)
+        level = str(result["level"])
+        confidence = int(result["confidence"])
+        predictions.append(
+            Prediction(
+                sample_id=sample.id,
+                level=level,
+                confidence=confidence,
+                score=ordinal_score(level, confidence),
+            )
+        )
+        scored.append(sample)
+    if not predictions:
+        raise SystemExit("no cached vectors for this split -- score it first (see run)")
+
+    baseline_path = Path(args.baseline or DEFAULT_GATE_BASELINE)
+    if not baseline_path.exists():
+        raise SystemExit(f"baseline report not found: {baseline_path}")
+    baseline_report = json.loads(baseline_path.read_text(encoding="utf-8"))
+    baseline_ops = (
+        baseline_report.get("verdicts", {})
+        .get("deployed", {})
+        .get("operating_points", {})
+        .get("auto_report", {})
+    )
+    if not baseline_ops:
+        raise SystemExit(f"baseline report has no auto_report point: {baseline_path}")
+
+    min_confidence = (
+        args.auto_report_confidence
+        if args.auto_report_confidence is not None
+        else _configured_auto_report_confidence()
+    )
+    fusion_block = verdict_block(scored, predictions, auto_report_min_confidence=min_confidence)
+    fusion_ops = fusion_block["operating_points"]["auto_report"]
+
+    def _precision(ops: Dict[str, Any]) -> Optional[float]:
+        return ops.get("precision") if (ops.get("tp", 0) + ops.get("fp", 0)) else None
+
+    base_precision = _precision(baseline_ops)
+    fusion_precision = _precision(fusion_ops)
+    # An operating point that flagged nothing has no measurable precision; the
+    # conservative reading for the gate is "perfect" (nothing wrong flagged).
+    base_for_rule = 1.0 if base_precision is None else base_precision
+    fusion_for_rule = 1.0 if fusion_precision is None else fusion_precision
+    passed = (
+        fusion_for_rule >= base_for_rule
+        and float(fusion_ops.get("recall") or 0) > float(baseline_ops.get("recall") or 0)
+        and float(fusion_ops.get("fpr") or 0) <= float(baseline_ops.get("fpr") or 0) + 1e-12
+    )
+    gate = {
+        "passed": bool(passed),
+        "evaluated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "rule": "auto_report: precision >= baseline, recall > baseline, fpr <= baseline",
+        "auto_report_min_confidence": min_confidence,
+        "baseline": {
+            "report": str(baseline_path),
+            "predictor": baseline_report.get("predictor"),
+            "auto_report": baseline_ops,
+            "pr_auc": baseline_report.get("verdicts", {}).get("deployed", {}).get("pr_auc"),
+        },
+        "fusion": {
+            "model_id": model.model_id,
+            "cache": cache.name,
+            "auto_report": fusion_ops,
+            "pr_auc": fusion_block["pr_auc"],
+            "coverage": fusion_block["coverage"],
+        },
+        "missing_vectors": missing,
+    }
+    model.gate = gate
+    model.save(artifact)
+    print(
+        json.dumps(
+            {
+                "artifact": str(artifact),
+                "gate": {k: gate[k] for k in ("passed", "rule")},
+                "baseline_auto_report": {
+                    k: baseline_ops.get(k)
+                    for k in ("tp", "fp", "fn", "tn", "precision", "recall", "fpr")
+                },
+                "fusion_auto_report": {
+                    k: fusion_ops.get(k)
+                    for k in ("tp", "fp", "fn", "tn", "precision", "recall", "fpr")
+                },
+                "fusion_pr_auc": fusion_block["pr_auc"],
+                "missing_vectors": missing,
+                "mode": "active" if passed else "shadow",
+            },
+            indent=2,
+        )
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Define the command line.
 
@@ -468,6 +713,57 @@ def build_parser() -> argparse.ArgumentParser:
     )
     run.add_argument("--out", default=str(DEFAULT_RUNS))
     run.set_defaults(handler=cmd_run)
+
+    train_fusion = commands.add_parser(
+        "train-fusion",
+        help="fit the calibrated fusion artifact from a split's cached vectors",
+    )
+    train_fusion.add_argument("dataset")
+    train_fusion.add_argument("--split", choices=("train", "test", "all"), default="train")
+    train_fusion.add_argument(
+        "--cache",
+        default=None,
+        metavar="FILE",
+        help="prediction cache with fusion_features (default: newest heuristic cache)",
+    )
+    train_fusion.add_argument(
+        "--artifact", default=None, help="artifact to write (default: models/fusion-v1.json)"
+    )
+    train_fusion.add_argument(
+        "--min-precision",
+        type=float,
+        default=0.90,
+        help="precision the high threshold must keep on out-of-fold predictions",
+    )
+    train_fusion.set_defaults(handler=cmd_train_fusion)
+
+    gate = commands.add_parser(
+        "gate", help="evaluate the fusion's activation gate against a baseline report"
+    )
+    gate.add_argument("dataset")
+    gate.add_argument("--split", choices=("test", "train", "all"), default="test")
+    gate.add_argument(
+        "--cache",
+        default=None,
+        metavar="FILE",
+        help="prediction cache with fusion_features (default: newest heuristic cache)",
+    )
+    gate.add_argument(
+        "--artifact", default=None, help="artifact to gate (default: models/fusion-v1.json)"
+    )
+    gate.add_argument(
+        "--baseline",
+        default=None,
+        metavar="FILE",
+        help="baseline report.json (default: the phase 1 run on the phase2 dataset)",
+    )
+    gate.add_argument(
+        "--auto-report-confidence",
+        type=int,
+        default=None,
+        help="confidence of the auto_report operating point (default: configured)",
+    )
+    gate.set_defaults(handler=cmd_gate)
 
     tld = commands.add_parser(
         "tld-stats", help="write the per-TLD phishing log-odds table from a dataset split"

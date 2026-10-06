@@ -29,9 +29,17 @@ services:
       PGPORT: "5432"
       # Containers log to stdout (docker logs); no per-process log files.
       LOG_DIR: ""
+      # Real-browser capture (shared socket volume, read-only here) and the
+      # calibrated fusion: the artifact's activation gate passed on
+      # 2026-10-06 (eval/runs, src/detection/models/fusion-v1.json).
+      CAPTURE_WORKER_SOCKET: /run/anisakys-capture/capture-worker.sock
+      FUSION_ENABLED: "true"
     volumes:
       - ./queries.txt:/app/queries.txt:ro
       - ./entrypoint-backend.sh:/app/entrypoint-backend.sh:ro
+      - capture-socket:/run/anisakys-capture:ro
+      # Google Workspace service account (GOOGLE_SERVICE_ACCOUNT_FILE in .env).
+      - /etc/anisakys/anisakys-sa.json:/etc/anisakys/anisakys-sa.json:ro
     command: ["sh", "/app/entrypoint-backend.sh"]
     depends_on:
       postgres: { condition: service_healthy }
@@ -61,6 +69,11 @@ services:
       PGPORT: "5432"
       LOG_DIR: ""
       PROCESS_ROLE: scheduler
+      CAPTURE_WORKER_SOCKET: /run/anisakys-capture/capture-worker.sock
+      FUSION_ENABLED: "true"
+    volumes:
+      - capture-socket:/run/anisakys-capture:ro
+      - /etc/anisakys/anisakys-sa.json:/etc/anisakys/anisakys-sa.json:ro
     command: ["python", "anisakys.py", "--role", "scheduler"]
     depends_on:
       backend: { condition: service_healthy }
@@ -74,6 +87,44 @@ services:
       start_period: 90s
     networks: [anisakys-net]
 
+  # Sandboxed multi-profile browser capture (WS3). No env_file on purpose:
+  # this container holds no secrets. Its only ingress is the Unix socket on
+  # the shared volume; it sits on its OWN network (internet egress, no route
+  # to postgres) and the browser is contained by the container itself
+  # (read-only rootfs, tmpfs scratch, cap_drop ALL, no-new-privileges, CPU
+  # and memory limits, Chromium --no-sandbox as the documented trade-off).
+  capture:
+    build:
+      context: .
+      dockerfile: Dockerfile.capture
+    restart: unless-stopped
+    environment:
+      CAPTURE_WORKER_SOCKET: /run/anisakys-capture/capture-worker.sock
+      CAPTURE_PROFILE_TIMEOUT_MS: "20000"
+      CAPTURE_MAX_CONCURRENCY: "2"
+      # Read-only rootfs: no per-process log files, stdout only.
+      LOG_DIR: ""
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 2g
+    volumes:
+      - capture-socket:/run/anisakys-capture
+    healthcheck:
+      test: ["CMD", "python", "-m", "src.capture.worker_healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 25s
+    networks: [anisakys-capture-net]
+
   frontend:
     build:
       context: ../anisakys-frontend
@@ -85,7 +136,12 @@ services:
 
 volumes:
   pgdata:
+  capture-socket:
 
 networks:
   anisakys-net:
+    driver: bridge
+  # Egress-only bridge for the capture worker: outbound NAT to the internet,
+  # nothing in common with the stack's own network (no postgres route).
+  anisakys-capture-net:
     driver: bridge

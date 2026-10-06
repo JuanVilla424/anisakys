@@ -309,6 +309,42 @@ class TestFailuresAndLimits:
         assert len(session.calls) == 1
 
 
+class TestClientIdentity:
+    def test_the_judge_names_itself_and_keeps_one_session_with_opencode(self):
+        session = FakeSession(_openai(json.dumps(VERDICT)), _openai(json.dumps(VERDICT)))
+        judge = _judge(session, base_url="https://opencode.ai/zen/go/v1")
+
+        judge.judge("https://a.example/")
+        judge.judge("https://b.example/")
+
+        first, second = (call["headers"] for call in session.calls)
+        assert session.calls[0]["url"] == "https://opencode.ai/zen/go/v1/chat/completions"
+        assert first["User-Agent"].startswith("anisakys-llm-judge/")
+        assert first["x-opencode-session"] == second["x-opencode-session"]
+        other = _judge(FakeSession(), base_url="https://opencode.ai/zen/go/v1")
+        assert other._session_id != judge._session_id
+
+    def test_no_session_header_for_other_providers(self):
+        session = FakeSession(_openai(json.dumps(VERDICT)))
+
+        _judge(session).judge("https://a.example/")
+
+        headers = session.calls[0]["headers"]
+        assert "x-opencode-session" not in headers
+        assert headers["User-Agent"].startswith("anisakys-llm-judge/")
+
+    def test_over_the_request_budget_nothing_is_sent(self, monkeypatch):
+        monkeypatch.setattr(llm_judge, "RATE_WAIT_SECONDS", 0)
+        session = FakeSession()
+        judge = _judge(session)
+        monkeypatch.setattr(judge._requests, "acquire", lambda wait: False)
+
+        judgement = judge.judge("https://a.example/")
+
+        assert (judgement.status, judgement.error) == ("error", "rate_limited")
+        assert session.calls == []
+
+
 class TestConfiguration:
     def test_invalid_configurations_are_refused(self):
         with pytest.raises(ValueError, match="provider"):

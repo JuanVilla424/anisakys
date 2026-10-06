@@ -114,6 +114,12 @@ class Prediction:
     stage_costs_usd: Dict[str, float] = field(default_factory=dict)
     # Detection signals of the scan (lexical, capture, content, brand), each a yes/no.
     signals: Dict[str, bool] = field(default_factory=dict)
+    # Feature vector the calibrated fusion consumes (src/detection/fusion.py);
+    # empty for scans made before the fusion existed (old caches still load).
+    fusion_features: Dict[str, float] = field(default_factory=dict)
+    # How the page was captured: "browser" (multi-profile worker), "fetch" (plain
+    # HTTP) or "" (pre-WS3 scans). A browser-model must not be trained on a mix.
+    capture_engine: str = ""
     # Wall-clock milliseconds of the scan (None for scans whose stages ran one after
     # another, where the sum of the stages is the duration).
     total_ms: Optional[float] = None
@@ -161,6 +167,8 @@ class Prediction:
             judge_score=float(data.get("judge_score") or 0.0),
             stage_costs_usd={k: float(v) for k, v in (data.get("stage_costs_usd") or {}).items()},
             signals={k: bool(v) for k, v in (data.get("signals") or {}).items()},
+            fusion_features={k: float(v) for k, v in (data.get("fusion_features") or {}).items()},
+            capture_engine=str(data.get("capture_engine") or ""),
             total_ms=float(data["total_ms"]) if data.get("total_ms") is not None else None,
         )
 
@@ -213,9 +221,11 @@ def prediction_from_scan(sample_id: str, scan: Dict[str, Any]) -> Prediction:
         scan: The scan result.
 
     Returns:
-        The prediction, with the heuristic level recomputed from the same
-        signals without the external-evidence rule.
+    The prediction, with the heuristic level recomputed from the same
+    signals without the external-evidence rule, and the fusion feature
+    vector of the scan (empty when the scan predates the fusion).
     """
+    from src.detection.fusion import feature_vector
     from src.intelligence.multi_api_validator import MultiAPIValidator
 
     level = normalize_level(scan.get("aggregated_threat_level"))
@@ -241,6 +251,8 @@ def prediction_from_scan(sample_id: str, scan: Dict[str, Any]) -> Prediction:
         stage_timings_ms={k: float(v) for k, v in (scan.get("stage_timings_ms") or {}).items()},
         stage_status={k: str(v) for k, v in (scan.get("stage_status") or {}).items()},
         signals=scan_signals(scan),
+        fusion_features=feature_vector(scan),
+        capture_engine=str(scan.get("capture_engine") or ""),
         total_ms=float(scan["scan_ms"]) if scan.get("scan_ms") is not None else None,
     )
     judgement = scan.get("llm_judge")

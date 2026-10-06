@@ -18,6 +18,7 @@
     "src/detection/__init__.py",
     "src/detection/ct_scorer.py",
     "src/detection/features.py",
+    "src/detection/fusion.py",
     "src/detection/imagehash.py",
     "src/detection/kit_fingerprint.py",
     "src/detection/llm_judge.py",

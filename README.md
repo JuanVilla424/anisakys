@@ -223,6 +223,31 @@ The system automatically calculates:
 - 📈 **Comprehensive Logging**: Detailed audit trails and monitoring
 - ⚙️ **Flexible Configuration**: Environment-based settings management
 
+### Detection Core v2 (Phase 2)
+
+- 🧮 **Calibrated fusion** (`src/detection/fusion.py`): every scan signal group
+  (lexical, WHOIS, threat intel, capture, content, brand, kit, judge, browser)
+  feeds a logistic model with Platt calibration; strong evidence sets floors
+  (GSB/verified PhishTank ≥ 0.97, kit and homoglyphs ≥ 0.97, brand mismatch
+  with a credential form ≥ 0.90); probability and coverage are reported
+  separately and `clean` requires enough coverage. The model lives in a
+  versioned artifact (`src/detection/models/fusion-v*.json`) whose activation
+  gate (`python -m src.eval gate …`) is the single source of truth: a gate that
+  did not pass leaves the fusion in **shadow** (stored, never reported), and so
+  does a capture-engine mismatch between training and scanning. Train it with
+  `python -m src.eval train-fusion <dataset> --split train`.
+- 🌐 **Multi-profile browser capture** (`src/capture/worker.py`): a sandboxed
+  Playwright worker (desktop/mobile `es-CO` + bot profiles) captures redirects
+  (HTTP, meta-refresh, JS, iframes), HTML, headers, TLS details, server IP
+  (HAR), screenshots, favicon, HAR and CAPTCHA/Turnstile/Cloudflare walls,
+  with the SSRF guard on **every** browser request; cloaking is detected by
+  divergences between profiles; the server IP is enriched with its ASN (RDAP).
+  Deployed as the `capture` compose service (own network, no route to
+  postgres, read-only rootfs, `cap_drop: ALL`, no secrets) and reached over a
+  shared Unix socket (`CAPTURE_WORKER_SOCKET`); without it every scan keeps
+  the plain HTTP fetch. Per-geography serving is measured only when
+  `CAPTURE_PROXIES` is set.
+
 ## 🚀 Getting Started
 
 ### 📋 Prerequisites

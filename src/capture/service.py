@@ -255,14 +255,59 @@ def capture_hashes(capture: PageCapture) -> Dict[str, Any]:
     return hashes
 
 
+def _insert_capture_row(
+    conn: Connection,
+    site_id: Optional[int],
+    url: str,
+    profile: str,
+    summary: Mapping[str, Any],
+    hashes: Mapping[str, Any],
+    features: Mapping[str, Any],
+    asn: Optional[str],
+    asn_org: Optional[str],
+) -> int:
+    """One ``captures`` row (the caller owns the transaction)."""
+    return int(
+        conn.execute(
+            text(
+                "INSERT INTO captures (site_id, url, profile, status, error, final_url, "
+                "http_status, server_ip, asn, asn_org, tls, redirect_chain, features, "
+                "html_sha256, html_tlsh, screenshot_phash, favicon_mmh3, favicon_phash) "
+                "VALUES (:site_id, :url, :profile, :status, :error, :final_url, "
+                ":http_status, :server_ip, :asn, :asn_org, CAST(:tls AS JSONB), "
+                "CAST(:chain AS JSONB), CAST(:features AS JSONB), :html_sha256, :html_tlsh, "
+                ":screenshot_phash, :favicon_mmh3, :favicon_phash) RETURNING id"
+            ),
+            {
+                "site_id": site_id,
+                "url": url,
+                "profile": profile,
+                "status": summary["status"],
+                "error": summary.get("error"),
+                "final_url": summary.get("final_url"),
+                "http_status": summary.get("http_status"),
+                "server_ip": summary.get("server_ip"),
+                "asn": asn,
+                "asn_org": asn_org,
+                "tls": json.dumps({"valid": summary.get("tls_valid")}),
+                "chain": json.dumps(summary.get("redirect_chain") or []),
+                "features": json.dumps(features, default=str),
+                **{name: hashes.get(name) for name in CAPTURE_HASH_COLUMNS},
+            },
+        ).scalar_one()
+    )
+
+
 def store_scan_capture(
     conn: Connection, scan: Mapping[str, Any], site_id: Optional[int] = None
 ) -> Optional[int]:
     """Keep the capture of a comprehensive scan in ``captures`` (and point the site at it).
 
     Only what the scan already extracted is kept: the capture summary, its hashes, the
-    content features and the brand identification, never the page itself. A site keeps
-    its newest :data:`MAX_CAPTURES_PER_SITE` captures.
+    content features and the brand identification, never the page itself. A browser
+    capture (WS3) adds one row per profile -- the primary one carries the features, the
+    others their own summary, hashes and CAPTCHA walls. A site keeps its newest
+    :data:`MAX_CAPTURES_PER_SITE` captures.
 
     Args:
         conn: Open connection, inside the caller's transaction.
@@ -270,7 +315,7 @@ def store_scan_capture(
         site_id: ``phishing_sites.id`` the scan belongs to.
 
     Returns:
-        The capture id, or None when the scan carries no capture.
+        The primary capture id, or None when the scan carries no capture.
     """
     summary = scan.get("capture")
     url = scan.get("url")
@@ -279,36 +324,64 @@ def store_scan_capture(
     hashes = scan.get("capture_hashes") or {}
     features = dict(scan.get("page_features") or {})
     features["visual_brand"] = scan.get("visual_brand") or {}
-    capture_id = int(
+    profiles = scan.get("capture_profiles") or {}
+    # The primary row is the profile the pipeline consumed: "desktop" for a
+    # browser capture, "default" for today's plain fetch.
+    primary_profile = "desktop" if "desktop" in profiles else "default"
+    capture_id = _insert_capture_row(
+        conn,
+        site_id,
+        url,
+        primary_profile,
+        summary,
+        hashes,
+        features,
+        scan.get("capture_asn"),
+        scan.get("capture_asn_org"),
+    )
+    for name, profile_summary in sorted(profiles.items()):
+        if name == "desktop" or not isinstance(profile_summary, Mapping):
+            continue
+        row = dict(profile_summary)
+        row_hashes = row.pop("hashes", None) or {}
+        captcha = row.pop("captcha", None) or {}
+        if row.get("status") not in CAPTURE_STATUSES:
+            continue
+        try:
+            with conn.begin_nested():  # one bad profile row never fails the scan
+                _insert_capture_row(
+                    conn,
+                    site_id,
+                    url,
+                    name,
+                    row,
+                    row_hashes,
+                    {"captcha": captcha, "visual_brand": {}},
+                    None,
+                    None,
+                )
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning(f"Profile capture {name} of {url} not stored: {e}")
+    if site_id is not None:
+        # The fusion columns ride the same update: every path that persists a
+        # scan goes through here, so the calibrated verdict (or its shadow)
+        # reaches the site row exactly once per scan.
+        fusion = scan.get("fusion")
+        if not isinstance(fusion, Mapping):
+            fusion = None
         conn.execute(
             text(
-                "INSERT INTO captures (site_id, url, profile, status, error, final_url, "
-                "http_status, server_ip, tls, redirect_chain, features, "
-                "html_sha256, html_tlsh, screenshot_phash, favicon_mmh3, favicon_phash) "
-                "VALUES (:site_id, :url, 'default', :status, :error, :final_url, :http_status, "
-                ":server_ip, CAST(:tls AS JSONB), CAST(:chain AS JSONB), "
-                "CAST(:features AS JSONB), :html_sha256, :html_tlsh, :screenshot_phash, "
-                ":favicon_mmh3, :favicon_phash) RETURNING id"
+                "UPDATE phishing_sites SET last_capture_id = :c, "
+                "fusion_probability = :fp, fusion_coverage = :fc, "
+                "detector_version = :dv WHERE id = :s"
             ),
             {
-                "site_id": site_id,
-                "url": url,
-                "status": summary["status"],
-                "error": summary.get("error"),
-                "final_url": summary.get("final_url"),
-                "http_status": summary.get("http_status"),
-                "server_ip": summary.get("server_ip"),
-                "tls": json.dumps({"valid": summary.get("tls_valid")}),
-                "chain": json.dumps(summary.get("redirect_chain") or []),
-                "features": json.dumps(features, default=str),
-                **{name: hashes.get(name) for name in CAPTURE_HASH_COLUMNS},
+                "c": capture_id,
+                "fp": (fusion or {}).get("probability"),
+                "fc": (fusion or {}).get("coverage"),
+                "dv": _detector_version(fusion),
+                "s": site_id,
             },
-        ).scalar_one()
-    )
-    if site_id is not None:
-        conn.execute(
-            text("UPDATE phishing_sites SET last_capture_id = :c WHERE id = :s"),
-            {"c": capture_id, "s": site_id},
         )
         conn.execute(
             text(
@@ -319,6 +392,14 @@ def store_scan_capture(
             {"s": site_id, "keep": MAX_CAPTURES_PER_SITE},
         )
     return capture_id
+
+
+def _detector_version(fusion: Optional[Mapping[str, Any]]) -> Optional[str]:
+    """Stable description of what produced the site's fusion columns."""
+    if not fusion:
+        return None
+    state = "active" if fusion.get("active") else "shadow"
+    return f"{fusion.get('model_id') or 'fusion'}:{state}"
 
 
 def record_scan_capture(conn: Connection, url: str, scan: Mapping[str, Any]) -> Optional[int]:

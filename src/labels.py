@@ -65,6 +65,9 @@ VERDICT_BY_ACTION: Dict[LabelAction, LabelVerdict] = {
 SNAPSHOT_COLUMNS: Tuple[str, ...] = (
     "multi_api_threat_level",
     "api_confidence_score",
+    "fusion_probability",
+    "fusion_coverage",
+    "detector_version",
     "auto_report_eligible",
     "requires_manual_review",
     "auto_analysis_status",

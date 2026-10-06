@@ -209,8 +209,28 @@ class Settings(BaseSettings):
     LLM_JUDGE_API_KEY: Optional[SecretStr] = None
     LLM_JUDGE_DAILY_BUDGET_USD: float = Field(default=1.0, ge=0)
     LLM_JUDGE_TIMEOUT_SECONDS: int = Field(default=30, gt=0)
+    # Requests per minute to the judge's provider, per process (calls beyond it wait).
+    LLM_JUDGE_REQUESTS_PER_MINUTE: int = Field(default=20, ge=1)
     LLM_JUDGE_INPUT_USD_PER_MTOK: float = Field(default=0.30, ge=0)
     LLM_JUDGE_OUTPUT_USD_PER_MTOK: float = Field(default=1.20, ge=0)
+
+    # Calibrated fusion (src/detection/fusion.py). Opt-in per deployment: with
+    # FUSION_ENABLED the scan's verdict comes from the model in FUSION_MODEL_PATH
+    # (default: src/detection/models/fusion-v1.json) -- and only after the
+    # artifact's activation gate passed; until then the fusion runs in shadow
+    # (stored, never reported). Without FUSION_ENABLED (tests, plain deploys)
+    # the verdict is exactly the phase 1 rule aggregation.
+    FUSION_ENABLED: bool = False
+    FUSION_MODEL_PATH: Optional[str] = None
+
+    # Multi-profile browser capture (src/capture/worker.py + client.py). With
+    # CAPTURE_WORKER_SOCKET set, scans capture pages in the sandboxed Playwright
+    # worker (desktop/mobile/bot profiles, cloaking, CAPTCHA walls); without it
+    # every scan keeps today's plain HTTP fetch. CAPTURE_PROXIES (JSON
+    # {"profile": "http://host:port"}) measures per-geography serving; without
+    # it the capture reports that geography was not measured.
+    CAPTURE_WORKER_SOCKET: Optional[str] = None
+    CAPTURE_PROXIES: Optional[str] = None
 
     model_config = {
         "env_file": env_file,

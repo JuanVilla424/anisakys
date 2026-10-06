@@ -152,6 +152,61 @@ class TestStorage:
         with db_manager.engine.connect() as conn:
             assert latest_capture(conn, site_id) is not None
 
+    def _fusion_columns(self, db_manager, site_id):
+        with db_manager.engine.connect() as conn:
+            return conn.execute(
+                text(
+                    "SELECT fusion_probability, fusion_coverage, detector_version "
+                    "FROM phishing_sites WHERE id = :s"
+                ),
+                {"s": site_id},
+            ).first()
+
+    def test_a_scan_with_fusion_reaches_the_site_row(self, pg_api):
+        _, db_manager, _ = pg_api
+        site_id, url = _site(db_manager)
+        scan = _scan(url)
+        scan["fusion"] = {
+            "model_id": "fusion-v1",
+            "probability": 0.93,
+            "coverage": 0.7,
+            "level": "high",
+            "confidence": 93,
+            "floors_applied": [],
+            "active": True,
+        }
+
+        with db_manager.engine.begin() as conn:
+            store_scan_capture(conn, scan, site_id)
+        probability, coverage, version = self._fusion_columns(db_manager, site_id)
+        assert probability == pytest.approx(0.93)
+        assert coverage == pytest.approx(0.7)
+        assert version == "fusion-v1:active"
+
+    def test_a_shadow_fusion_is_marked_and_no_fusion_stays_null(self, pg_api):
+        _, db_manager, _ = pg_api
+        site_id, url = _site(db_manager)
+        scan = _scan(url)
+        scan["fusion"] = {
+            "model_id": "fusion-v1",
+            "probability": 0.31,
+            "coverage": 0.7,
+            "level": "low",
+            "confidence": 69,
+            "floors_applied": [],
+            "active": False,
+        }
+        with db_manager.engine.begin() as conn:
+            store_scan_capture(conn, scan, site_id)
+        _, _, version = self._fusion_columns(db_manager, site_id)
+        assert version == "fusion-v1:shadow"
+
+        plain = _scan(url, http_status=301)
+        with db_manager.engine.begin() as conn:
+            store_scan_capture(conn, plain, site_id)
+        probability, coverage, version = self._fusion_columns(db_manager, site_id)
+        assert probability is None and coverage is None and version is None
+
 
 class TestApi:
     def test_unknown_site_and_site_without_capture(self, pg_api):
