@@ -36,8 +36,9 @@ ENTRY_MODULES = (
 @pytest.mark.parametrize("module", ENTRY_MODULES)
 def test_module_imports_first(module: str) -> None:
     env = {**os.environ, "PYTHONPATH": str(ROOT)}
+    # Importing pytest first makes src.config read .env.test, as the suite does (CI has no .env).
     result = subprocess.run(
-        [sys.executable, "-c", f"import {module}"],
+        [sys.executable, "-c", f"import pytest\nimport {module}"],
         cwd=ROOT,
         env=env,
         capture_output=True,
