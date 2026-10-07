@@ -426,6 +426,8 @@ class PhishingScanner:
 
                                     # Store immediate results
                                     with self.db_manager.engine.begin() as conn:
+                                        from src.labels import derived_priority
+
                                         conn.execute(
                                             text("""
                                                 UPDATE phishing_sites
@@ -436,7 +438,7 @@ class PhishingScanner:
                                                     phishtank_result = :pt_result,
                                                     multi_api_threat_level = :threat_level,
                                                     api_confidence_score = :confidence_score,
-                                                    priority = 'high'
+                                                    priority = :priority
                                                 WHERE url = :url
                                             """),
                                             {
@@ -454,6 +456,7 @@ class PhishingScanner:
                                                 ),
                                                 "threat_level": threat_level,
                                                 "confidence_score": confidence,
+                                                "priority": derived_priority(threat_level),
                                                 "url": url,
                                             },
                                         )

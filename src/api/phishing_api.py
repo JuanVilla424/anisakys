@@ -79,6 +79,7 @@ from src.capture.service import latest_capture, record_scan_capture
 from src.labels import (
     MAX_NOTE_LENGTH,
     MAX_TAG_LENGTH,
+    derived_priority,
     Label,
     LabelAction,
     LabelRepository,
@@ -1444,6 +1445,7 @@ class PhishingAPI:
                                         phishtank_result = :pt_result,
                                         multi_api_threat_level = :threat_level,
                                         api_confidence_score = :confidence,
+                                        priority = :priority,
                                         auto_analysis_status = 'completed',
                                         registration_date = COALESCE(:reg_date, registration_date),
                                         registrar_name = COALESCE(:registrar, registrar_name),
@@ -1462,6 +1464,10 @@ class PhishingAPI:
                                     "pt_result": json.dumps(scan_result.get("phishtank", {})),
                                     "threat_level": scan_result.get("aggregated_threat_level"),
                                     "confidence": scan_result.get("confidence_score"),
+                                    "priority": derived_priority(
+                                        scan_result.get("aggregated_threat_level"),
+                                        scan_result.get("label_verdict"),
+                                    ),
                                     "reg_date": scan_result.get("registration_date"),
                                     "registrar": scan_result.get("registrar_name"),
                                     "registrant_org": scan_result.get("registrant_org"),
@@ -1484,13 +1490,13 @@ class PhishingAPI:
                                     INSERT INTO phishing_sites (
                                         url, first_seen, last_seen, source,
                                         virustotal_result, urlvoid_result, phishtank_result,
-                                        multi_api_threat_level, api_confidence_score,
+                                        multi_api_threat_level, api_confidence_score, priority,
                                         auto_analysis_status, registration_date, registrar_name, registrant_org, domain_age_days,
                                         all_abuse_emails, detected_kit_type, kit_confidence, kit_indicators
                                     ) VALUES (
                                         :url, :timestamp, :timestamp, 'api_scan',
                                         :vt_result, :uv_result, :pt_result,
-                                        :threat_level, :confidence,
+                                        :threat_level, :confidence, :priority,
                                         'completed', :reg_date, :registrar, :registrant_org, :domain_age,
                                         :all_abuse_emails, :kit_type, :kit_confidence, :kit_indicators
                                     )
@@ -1503,6 +1509,10 @@ class PhishingAPI:
                                     "pt_result": json.dumps(scan_result.get("phishtank", {})),
                                     "threat_level": scan_result.get("aggregated_threat_level"),
                                     "confidence": scan_result.get("confidence_score"),
+                                    "priority": derived_priority(
+                                        scan_result.get("aggregated_threat_level"),
+                                        scan_result.get("label_verdict"),
+                                    ),
                                     "reg_date": scan_result.get("registration_date"),
                                     "registrar": scan_result.get("registrar_name"),
                                     "registrant_org": scan_result.get("registrant_org"),
@@ -1679,8 +1689,14 @@ class PhishingAPI:
                         "total_reports": conn.execute(
                             text("SELECT COUNT(*) FROM phishing_sites")
                         ).scalar(),
+                        # An analyst-labelled benign site is not a threat, even
+                        # while it stays up (it is monitored, not counted).
                         "active_sites": conn.execute(
-                            text("SELECT COUNT(*) FROM phishing_sites WHERE site_status = 'up'")
+                            text(
+                                "SELECT COUNT(*) FROM phishing_sites "
+                                "WHERE site_status = 'up' "
+                                "AND COALESCE(label_verdict, '') <> 'benign'"
+                            )
                         ).scalar(),
                         "taken_down": conn.execute(
                             text("SELECT COUNT(*) FROM phishing_sites WHERE site_status = 'down'")
@@ -3000,11 +3016,14 @@ class PhishingAPI:
                 with self.db_manager.engine.begin() as conn:
                     row = conn.execute(text("""
                         SELECT
-                            (SELECT COUNT(*) FROM phishing_sites WHERE site_status = 'up') AS threats,
+                            (SELECT COUNT(*) FROM phishing_sites
+                             WHERE site_status = 'up'
+                               AND COALESCE(label_verdict, '') <> 'benign') AS threats,
                             (SELECT COUNT(*) FROM analysis_threads WHERE status = 'running') AS threads,
                             (SELECT COUNT(DISTINCT registrar_name) FROM phishing_sites
                              WHERE registrar_name IS NOT NULL AND site_status = 'up'
-                             AND registrar_name IN (
+                               AND COALESCE(label_verdict, '') <> 'benign'
+                               AND registrar_name IN (
                                  SELECT registrar_name FROM phishing_sites
                                  WHERE registrar_name IS NOT NULL
                                  GROUP BY registrar_name HAVING COUNT(*) >= 2

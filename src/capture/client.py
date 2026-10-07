@@ -25,7 +25,7 @@ import base64
 import json
 import logging
 import time
-from typing import Any, Dict, Mapping, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Protocol, Tuple
 
 from src.capture.asn import asn_of
 from src.capture.profiles import PRIMARY_PROFILE
@@ -37,6 +37,21 @@ logger = logging.getLogger(__name__)
 # Headroom over the worker's worst case (3 profiles, semaphore 2, one engine
 # launch): the worker's own error response must win over a client cutoff.
 CLIENT_TIMEOUT_SECONDS = 90
+
+
+class CaptureWorkerLike(Protocol):
+    """What :func:`worker_capture` needs from a capture worker.
+
+    Structural on purpose: the real client and the tests' fake both satisfy
+    it without inheriting from anything.
+    """
+
+    socket_path: str
+
+    def capture(
+        self, url: str, proxies: Optional[Mapping[str, str]] = None
+    ) -> Optional[Dict[str, Any]]:  # pragma: no cover - protocol body
+        ...
 
 
 class CaptureWorkerClient:
@@ -154,7 +169,7 @@ def page_capture_from_bundle(url: str, bundle: Mapping[str, Any]) -> PageCapture
     )
 
 
-def worker_capture(url: str, worker: CaptureWorkerClient) -> Tuple[PageCapture, Dict[str, Any]]:
+def worker_capture(url: str, worker: CaptureWorkerLike) -> Tuple[PageCapture, Dict[str, Any]]:
     """Capture ``url`` with the worker: primary PageCapture plus the extras.
 
     Args:

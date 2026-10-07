@@ -26,6 +26,7 @@ def _noise_png(seed: int, size: int = 96) -> bytes:
 
     image = Image.new("RGB", (size, size))
     pixels = image.load()
+    assert pixels is not None  # Image.load() is typed Optional in Pillow stubs
     state = seed * 6364136223846793005 + 1442695040888963407
     for y in range(size):
         for x in range(size):

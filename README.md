@@ -216,7 +216,7 @@ The system automatically calculates:
 
 ### Advanced Features
 
-- 🎯 **Priority-Based Processing**: High/Medium/Low priority threat handling
+- 🎯 **Priority-Based Processing**: High/Medium/Low priority threat handling, re-derived from every scan's verdict (an analyst's label always wins) so the report queue always works on what the detector knows now
 - 🔍 **Real-Time Analysis**: Immediate processing for critical keywords
 - 📊 **Confidence Scoring**: ML-based threat assessment (0-100%)
 - 🤖 **Intelligent Auto-Reporting**: Configurable confidence thresholds

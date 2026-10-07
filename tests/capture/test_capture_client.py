@@ -155,7 +155,8 @@ class TestFactory:
         with patch.object(settings, "CAPTURE_WORKER_SOCKET", "/tmp/cap.sock"):
             first = get_capture_worker()
             second = get_capture_worker()
-        assert first is second and first.socket_path == "/tmp/cap.sock"
+        assert first is not None and first is second
+        assert first.socket_path == "/tmp/cap.sock"
 
     def test_proxies_parse_and_tolerate_garbage(self):
         with patch.object(settings, "CAPTURE_PROXIES", json.dumps({"desktop": "http://p:1"})):

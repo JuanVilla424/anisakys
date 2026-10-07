@@ -54,6 +54,12 @@ _TTD_SQL = f"""
     WHERE {_FIRST_SEEN_UTC} >= :since
       AND ps.registration_date IS NOT NULL
       AND ps.registration_date <= ps.first_seen
+      -- Only real detections count: an analyst-labelled benign site is not a
+      -- threat, and a clean/unknown verdict is an abstention, not a detection
+      -- (their often decade-old registrations would dwarf the median). The
+      -- other quality metrics exclude benign labels the same way.
+      AND COALESCE(ps.label_verdict, '') <> 'benign'
+      AND COALESCE(ps.multi_api_threat_level, '') NOT IN ('clean', 'unknown')
 """
 
 _FIRST_REPORT_CTE = """

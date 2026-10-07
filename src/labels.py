@@ -40,6 +40,33 @@ MAX_TAG_LENGTH = 100
 CANCELLED_BY_DISMISSAL = "Cancelled: an analyst labelled the site benign"
 
 
+def derived_priority(threat_level: Optional[str], label_verdict: Optional[str] = None) -> str:
+    """The operational priority a site's current verdict implies.
+
+    The abuse-report queue claims sites by this column
+    (src/reporting/site_queue.py), so it must follow the *current* verdict
+    instead of the insertion default. An analyst's label always wins: a
+    dismissed (benign) site is never urgent, a confirmed one is.
+
+    Args:
+        threat_level: ``multi_api_threat_level`` (clean..critical or unknown).
+        label_verdict: ``label_verdict`` (``phishing``/``benign``), if any.
+
+    Returns:
+        ``high`` | ``medium`` | ``low``.
+    """
+    if label_verdict == "phishing":
+        return "high"
+    if label_verdict == "benign":
+        return "low"
+    level = (threat_level or "unknown").lower()
+    if level in ("critical", "high"):
+        return "high"
+    if level == "medium":
+        return "medium"
+    return "low"
+
+
 class LabelAction(str, Enum):
     """What the analyst decided."""
 

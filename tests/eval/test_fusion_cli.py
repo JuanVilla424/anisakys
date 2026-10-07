@@ -191,6 +191,7 @@ class TestTrainFusion:
         empty.write_text('{"sample_id": "x", "level": "unknown"}\n', encoding="utf-8")
         empty.touch()  # newest by mtime, but no vectors -> skipped
         resolved = cli._resolve_vector_cache(manifest, None)
+        assert resolved is not None
         assert resolved.name == workspace["test_cache"].name
 
 
