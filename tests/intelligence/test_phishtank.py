@@ -77,10 +77,24 @@ class TestLookup:
         pt.session.post.return_value = _resp(200, body)
         assert pt.check_phishing_status(URL)["is_phishing"] is False
 
-    def test_unverified_report_is_listed_medium(self, pt):
+    def test_unverified_invalid_submission_is_not_evidence(self, pt):
+        # example.com repro: in_database with verified=False, valid=False (a
+        # dead or rejected submission) must not count as phishing evidence.
         pt.session.post.return_value = _resp(200, _results(verified=False, valid=False))
         result = pt.check_phishing_status(URL)
+        assert result["status"] == "not_listed"
+        assert result["is_phishing"] is False
+        assert result["verified"] is False
+        assert result["stale_submission"] is True
+        assert result["threat_level"] == "unknown"
+
+    def test_unverified_live_report_is_listed_medium(self, pt):
+        # Reported and still valid: the community vote is pending, and the
+        # entry counts as medium evidence.
+        pt.session.post.return_value = _resp(200, _results(verified=False, valid=True))
+        result = pt.check_phishing_status(URL)
         assert result["status"] == "listed"
+        assert result["is_phishing"] is True
         assert result["verified"] is False
         assert result["threat_level"] == "medium"
 

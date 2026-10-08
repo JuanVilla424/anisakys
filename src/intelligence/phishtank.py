@@ -6,7 +6,11 @@ Looks URLs up in the PhishTank community database (``checkurl`` API).
 PhishTank only lists reported URLs, so "not in the database" is reported as
 ``status="not_listed"`` with ``threat_level="unknown"``: it is the absence of
 a listing, never a clean verdict. An entry verified by the community as *not*
-being a phish (``verified=true, valid=false``) is not treated as phishing.
+being a phish (``verified=true, valid=false``) is not treated as phishing, and
+neither is a submission that is neither verified nor valid (``verified=false,
+valid=false``): a dead or rejected submission is no evidence at all, not even
+medium. Only an unverified entry that is still valid (reported and online,
+community vote pending) counts, as ``medium``.
 """
 
 import logging
@@ -118,8 +122,18 @@ class PhishTankIntegration:
             }
         if verified:
             return {**base, "status": LISTED, "is_phishing": True, "threat_level": "high"}
-        # Reported, community vote still pending.
-        return {**base, "status": LISTED, "is_phishing": True, "threat_level": "medium"}
+        if valid:
+            # Reported and still online; the community vote is pending.
+            return {**base, "status": LISTED, "is_phishing": True, "threat_level": "medium"}
+        # Neither verified nor valid: a dead or rejected submission is no
+        # evidence (e.g. example.com with a stale phish_id attached).
+        return {
+            **base,
+            "status": NOT_LISTED,
+            "is_phishing": False,
+            "stale_submission": True,
+            "threat_level": "unknown",
+        }
 
     def check_phishing_status(self, url: str) -> Dict[str, Any]:
         """
@@ -130,8 +144,10 @@ class PhishTankIntegration:
 
         Returns:
             Dict[str, Any]: Result with ``status`` (listed/not_listed/no_data/
-            error), ``is_phishing`` (only for an unrefuted listing),
-            ``verified``, ``valid``, ``details_url`` and ``threat_level``.
+            error), ``is_phishing`` (only for an unrefuted, still-valid
+            listing), ``verified``, ``valid``, ``details_url`` and
+            ``threat_level``. ``stale_submission`` marks an in-database entry
+            that is neither verified nor valid (no evidence).
         """
         data = {"url": url, "format": "json"}
         if self.api_key:
