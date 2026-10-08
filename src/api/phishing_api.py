@@ -2104,7 +2104,8 @@ class PhishingAPI:
                                    api_confidence_score, registrar_name, domain_age_days,
                                    abuse_report_sent, manual_flag, gsb_safe,
                                    resolved_ip, is_cloudflare, description, assigned_to,
-                                   takedown_date, gsb_last_check, label_verdict, labeled_at
+                                   takedown_date, gsb_last_check, label_verdict, labeled_at,
+                                   fusion_probability, fusion_coverage, detector_version
                             FROM phishing_sites {where_sql}
                             ORDER BY last_seen DESC NULLS LAST, id DESC
                             LIMIT :limit OFFSET :offset
@@ -2135,6 +2136,9 @@ class PhishingAPI:
                         "assigned_to": r[17],
                         "label_verdict": r[20],
                         "labeled_at": iso_utc(r[21]),
+                        "fusion_probability": r[22],
+                        "fusion_coverage": r[23],
+                        "detector_version": r[24],
                     }
                     for r in rows
                 ]

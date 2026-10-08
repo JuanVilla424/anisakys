@@ -216,7 +216,7 @@ class Settings(BaseSettings):
 
     # Calibrated fusion (src/detection/fusion.py). Opt-in per deployment: with
     # FUSION_ENABLED the scan's verdict comes from the model in FUSION_MODEL_PATH
-    # (default: src/detection/models/fusion-v1.json) -- and only after the
+    # (default: src/detection/models/fusion-v2.json) -- and only after the
     # artifact's activation gate passed; until then the fusion runs in shadow
     # (stored, never reported). Without FUSION_ENABLED (tests, plain deploys)
     # the verdict is exactly the phase 1 rule aggregation.

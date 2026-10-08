@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 # Where the versioned artifacts live and which one the runtime picks by default.
 MODELS_DIR = Path(__file__).resolve().parent / "models"
-DEFAULT_ARTIFACT = MODELS_DIR / "fusion-v1.json"
+DEFAULT_ARTIFACT = MODELS_DIR / "fusion-v2.json"
 
 ARTIFACT_VERSION = 1
 MODEL_ID = "fusion-v1"

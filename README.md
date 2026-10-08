@@ -234,7 +234,9 @@ The system automatically calculates:
   versioned artifact (`src/detection/models/fusion-v*.json`) whose activation
   gate (`python -m src.eval gate …`) is the single source of truth: a gate that
   did not pass leaves the fusion in **shadow** (stored, never reported), and so
-  does a capture-engine mismatch between training and scanning. Train it with
+  does a capture-engine mismatch between training and scanning. The deployed
+  artifact is `fusion-v2` (browser-trained; gate on the phase 2 test split:
+  5 TP / 0 FP at `auto_report`). Train it with
   `python -m src.eval train-fusion <dataset> --split train`.
 - 🌐 **Multi-profile browser capture** (`src/capture/worker.py`): a sandboxed
   Playwright worker (desktop/mobile `es-CO` + bot profiles) captures redirects
