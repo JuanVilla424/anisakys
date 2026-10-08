@@ -97,6 +97,12 @@ exclude = '''
   | node_modules
 )/
 '''
+# Same paths ruff excludes (see [tool.ruff] extend-exclude below): tooling and
+# generated migration history are not product code. Without this, local
+# full-repo runs (`black --check .`) flag alembic/versions while CI
+# (`black --check -l 100 src tests`) and the pre-commit hook (changed files
+# only) never see them.
+extend-exclude = '/(scripts|smtp-relay|alembic/versions)/'
 
 [tool.ruff]
 line-length = 100
