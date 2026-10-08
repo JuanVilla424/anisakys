@@ -13,8 +13,9 @@ dist/
 .claude
 screenshots
 
-# Poetry
-poetry.lock
+# BMAD directories
+.ai/
+protocols/
 
 # Environment variables
 .env
@@ -144,3 +145,21 @@ positive_report.txt
 *queries*
 
 identifier.sqlite
+
+# Manual test files
+manual_test_*.py
+test_main_logging.py
+
+# BMAD specific files
+.bmadrc.yaml
+.mcp.json
+docs/
+CONTEXT.md
+.test-screenshots/
+
+# Evaluation harness (python -m src.eval): runs, caches and dataset samples built
+# from third-party feeds stay local; seeds and dataset manifests (with the
+# samples' SHA-256) are versioned.
+eval/runs/
+eval/cache/
+eval/datasets/*/*/samples.jsonl

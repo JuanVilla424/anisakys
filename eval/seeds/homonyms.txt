@@ -1,0 +1,25 @@
+# Hard negatives: legitimate sites whose names look like brands, banks or login
+# pages, plus legitimate brand domains that lexical rules tend to distrust.
+# One URL per line; dead URLs are dropped at build time by the liveness probe.
+https://www.phase.com/
+https://zoom.us/
+https://banco.info/
+https://www.login.gov/
+https://www.okta.com/
+https://auth0.com/
+https://duo.com/
+https://bitwarden.com/
+https://1password.com/
+https://www.lastpass.com/
+https://accounts.zoho.com/
+https://www.paypal-community.com/
+https://appleinsider.com/
+https://netflixtechblog.com/
+https://www.bancodeoccidente.com.co/
+https://www.bancocajasocial.com/
+https://www.bancoagrario.gov.co/
+https://www.itau.co/
+https://www.pse.com.co/
+https://www.delta.com/
+https://www.secureworks.com/
+https://www.verisign.com/

@@ -1,7 +1,63 @@
-node_modules
-build
+# Build context for the Anisakys image: only what the runtime needs.
+# Secrets and runtime data must never be baked into an image layer.
+
+# Secrets / local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials*.json
+service-account*.json
+
+# Runtime data (mounted as volumes or created at runtime)
+logs/
+screenshots/
+.test-screenshots/
+attachments/
+data/
+queries*.txt
+offset*.txt
+*.db
+*.sqlite3
+
+# VCS, CI and editor metadata
 .git
 .gitignore
+.gitattributes
+.gitmodules
+.github/
+.bmad
+.idea/
+.vscode/
+
+# Python build and test artefacts
+**/__pycache__/
+**/*.py[cod]
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Not needed at runtime
+tests/
+docs/
+scripts/
+smtp-relay/
+monitoring/
+bin/
+node_modules/
+eval/runs/
+eval/cache/
+eval/datasets/
 Dockerfile
-docker-compose.yml
-README.md
+docker-compose*.yml
+.dockerignore
+.pre-commit-config.yaml

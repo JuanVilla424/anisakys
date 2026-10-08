@@ -1,0 +1,18 @@
+[Unit]
+Description=Anisakys - Scheduler (abuse reporting, follow-ups, takedown monitoring, periodic jobs)
+# The only unit that runs background jobs. Run exactly one per database: a second
+# scheduler waits on a PostgreSQL advisory lock as a hot standby.
+After=network.target
+
+[Service]
+Type=simple
+User=anisakys
+Group=anisakys
+WorkingDirectory=/opt/anisakys
+EnvironmentFile=/opt/anisakys/.env
+ExecStart=/opt/anisakys/venv/bin/python anisakys.py --role scheduler
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

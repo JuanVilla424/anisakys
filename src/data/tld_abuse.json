@@ -1,0 +1,259 @@
+{
+  "alpha": 1.0,
+  "counts": {
+    "benign": 2988,
+    "phishing": 51,
+    "tlds_kept": 48
+  },
+  "generated_at": "2026-10-06T01:55:58+00:00",
+  "method": "log((p + a) / (P + a*K)) - log((b + a) / (B + a*K)) per TLD: p/b phishing and benign samples of the TLD, P/B of every TLD, K TLDs seen, a Laplace smoothing; TLDs with fewer than min_samples samples are left out",
+  "min_samples": 5,
+  "source": {
+    "dataset": "phase2",
+    "samples_sha256": "1711edc381ca3305c4f323a4debca00eb59f1bcae822fc7c4928e216fd6d1cf0",
+    "split": "train",
+    "version": "2026-10-05"
+  },
+  "tlds": {
+    "ai": {
+      "benign": 11,
+      "log_odds": 0.1538,
+      "phishing": 0
+    },
+    "app": {
+      "benign": 12,
+      "log_odds": 1.8656,
+      "phishing": 5
+    },
+    "ar": {
+      "benign": 7,
+      "log_odds": 0.5593,
+      "phishing": 0
+    },
+    "at": {
+      "benign": 5,
+      "log_odds": 0.847,
+      "phishing": 0
+    },
+    "au": {
+      "benign": 15,
+      "log_odds": -0.1338,
+      "phishing": 0
+    },
+    "be": {
+      "benign": 7,
+      "log_odds": 0.5593,
+      "phishing": 0
+    },
+    "br": {
+      "benign": 28,
+      "log_odds": 0.3701,
+      "phishing": 2
+    },
+    "ca": {
+      "benign": 13,
+      "log_odds": -0.0003,
+      "phishing": 0
+    },
+    "cc": {
+      "benign": 3,
+      "log_odds": 2.8619,
+      "phishing": 4
+    },
+    "ch": {
+      "benign": 11,
+      "log_odds": 0.1538,
+      "phishing": 0
+    },
+    "cn": {
+      "benign": 22,
+      "log_odds": -0.4968,
+      "phishing": 0
+    },
+    "co": {
+      "benign": 32,
+      "log_odds": -0.8578,
+      "phishing": 0
+    },
+    "com": {
+      "benign": 1591,
+      "log_odds": -1.8436,
+      "phishing": 17
+    },
+    "cz": {
+      "benign": 10,
+      "log_odds": 0.2408,
+      "phishing": 0
+    },
+    "de": {
+      "benign": 63,
+      "log_odds": -0.827,
+      "phishing": 1
+    },
+    "dev": {
+      "benign": 8,
+      "log_odds": 1.8278,
+      "phishing": 3
+    },
+    "edu": {
+      "benign": 71,
+      "log_odds": -1.6379,
+      "phishing": 0
+    },
+    "es": {
+      "benign": 10,
+      "log_odds": 0.2408,
+      "phishing": 0
+    },
+    "eu": {
+      "benign": 8,
+      "log_odds": 0.4415,
+      "phishing": 0
+    },
+    "fi": {
+      "benign": 5,
+      "log_odds": 0.847,
+      "phishing": 0
+    },
+    "fm": {
+      "benign": 6,
+      "log_odds": 0.6928,
+      "phishing": 0
+    },
+    "fr": {
+      "benign": 35,
+      "log_odds": -0.9448,
+      "phishing": 0
+    },
+    "gg": {
+      "benign": 5,
+      "log_odds": 0.847,
+      "phishing": 0
+    },
+    "google": {
+      "benign": 6,
+      "log_odds": 0.6928,
+      "phishing": 0
+    },
+    "gov": {
+      "benign": 63,
+      "log_odds": -1.5201,
+      "phishing": 0
+    },
+    "in": {
+      "benign": 16,
+      "log_odds": -0.1945,
+      "phishing": 0
+    },
+    "info": {
+      "benign": 7,
+      "log_odds": 0.5593,
+      "phishing": 0
+    },
+    "io": {
+      "benign": 69,
+      "log_odds": 0.182,
+      "phishing": 5
+    },
+    "it": {
+      "benign": 26,
+      "log_odds": -0.6571,
+      "phishing": 0
+    },
+    "jp": {
+      "benign": 40,
+      "log_odds": -1.0748,
+      "phishing": 0
+    },
+    "kr": {
+      "benign": 5,
+      "log_odds": 0.847,
+      "phishing": 0
+    },
+    "me": {
+      "benign": 14,
+      "log_odds": -0.0693,
+      "phishing": 0
+    },
+    "mx": {
+      "benign": 7,
+      "log_odds": 0.5593,
+      "phishing": 0
+    },
+    "net": {
+      "benign": 126,
+      "log_odds": -2.2054,
+      "phishing": 0
+    },
+    "nl": {
+      "benign": 13,
+      "log_odds": -0.0003,
+      "phishing": 0
+    },
+    "no": {
+      "benign": 6,
+      "log_odds": 0.6928,
+      "phishing": 0
+    },
+    "org": {
+      "benign": 192,
+      "log_odds": -1.9308,
+      "phishing": 1
+    },
+    "ph": {
+      "benign": 5,
+      "log_odds": 0.847,
+      "phishing": 0
+    },
+    "pl": {
+      "benign": 13,
+      "log_odds": 0.6928,
+      "phishing": 1
+    },
+    "pt": {
+      "benign": 5,
+      "log_odds": 0.847,
+      "phishing": 0
+    },
+    "ru": {
+      "benign": 100,
+      "log_odds": -1.9764,
+      "phishing": 0
+    },
+    "se": {
+      "benign": 6,
+      "log_odds": 0.6928,
+      "phishing": 0
+    },
+    "to": {
+      "benign": 10,
+      "log_odds": 0.934,
+      "phishing": 1
+    },
+    "tr": {
+      "benign": 8,
+      "log_odds": 0.4415,
+      "phishing": 0
+    },
+    "tv": {
+      "benign": 18,
+      "log_odds": -0.3057,
+      "phishing": 0
+    },
+    "uk": {
+      "benign": 34,
+      "log_odds": -0.9166,
+      "phishing": 0
+    },
+    "us": {
+      "benign": 8,
+      "log_odds": 0.4415,
+      "phishing": 0
+    },
+    "vn": {
+      "benign": 10,
+      "log_odds": 0.2408,
+      "phishing": 0
+    }
+  }
+}

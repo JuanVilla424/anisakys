@@ -1,0 +1,93 @@
+{
+  "code_commit": "983e5ca-dirty",
+  "counts": {
+    "by_category": {
+      "benign_saas": 6,
+      "feed_live_verified": 73,
+      "homonym": 20,
+      "official_brand": 62,
+      "tranco_top": 4176
+    },
+    "by_label": {
+      "benign": 4264,
+      "phishing": 73
+    },
+    "by_split": {
+      "test": 1298,
+      "train": 3039
+    },
+    "by_split_label": {
+      "test/benign": 1276,
+      "test/phishing": 22,
+      "train/benign": 2988,
+      "train/phishing": 51
+    },
+    "total": 4337,
+    "with_brand": 72,
+    "with_kit": 1
+  },
+  "created_at": "2026-10-06T01:42:14+00:00",
+  "name": "phase2",
+  "parameters": {
+    "analyst_labels": false,
+    "feed_limit": null,
+    "feeds": true,
+    "liveness_verified": true,
+    "max_per_kit": 20,
+    "probe_timeout_seconds": 10,
+    "test_fraction": 0.3,
+    "tranco_list_id": null,
+    "tranco_top": 6000
+  },
+  "privacy": "URLs keep scheme, host and path only; query, fragment, credentials and port are dropped and e-mail/token path segments are redacted. No page content is stored.",
+  "samples_file": "samples.jsonl",
+  "samples_sha256": "1711edc381ca3305c4f323a4debca00eb59f1bcae822fc7c4928e216fd6d1cf0",
+  "schema_version": 1,
+  "sources": [
+    {
+      "description": "Official brand homepages and login pages",
+      "fetched": 97,
+      "kept": 97,
+      "name": "seeds/official_brands.json"
+    },
+    {
+      "description": "Legitimate sites whose names look like brands or logins",
+      "fetched": 22,
+      "kept": 22,
+      "name": "seeds/homonyms.txt"
+    },
+    {
+      "description": "Legitimate pages on free hosting platforms",
+      "fetched": 10,
+      "kept": 10,
+      "name": "seeds/benign_saas.txt"
+    },
+    {
+      "description": "Tranco top 6000 (list 56WKN, tranco-list.eu), popular legitimate domains",
+      "details": {
+        "list_id": "56WKN"
+      },
+      "fetched": 6000,
+      "kept": 6000,
+      "name": "tranco"
+    },
+    {
+      "description": "OpenPhish community feed (github.com/openphish/public_feed), free for non-commercial use; kept only when live",
+      "fetched": 300,
+      "kept": 300,
+      "name": "openphish"
+    },
+    {
+      "connection_error": 312,
+      "description": "probe class per candidate",
+      "http_error": 403,
+      "name": "liveness",
+      "nxdomain": 1127,
+      "parked": 5,
+      "ssrf_blocked": 24,
+      "up": 3891,
+      "waf_challenge": 667
+    }
+  ],
+  "version": "2026-10-05"
+}

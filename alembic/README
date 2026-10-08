@@ -1,0 +1,30 @@
+Anisakys — Alembic Migrations
+==============================
+
+Alembic is the ONLY place where the database schema is defined. The
+application never creates or alters tables at runtime: on startup it checks
+that the database is at the latest revision and refuses to start otherwise
+(src/database/schema.py: ensure_schema_is_current).
+
+Apply all pending migrations:
+    alembic upgrade head
+
+Print the SQL instead of running it (for review by a DBA):
+    alembic upgrade head --sql
+
+Rollback one migration:
+    alembic downgrade -1
+
+Show current revision / history:
+    alembic current
+    alembic history
+
+Create a new migration (hand-written SQL, there are no ORM models):
+    alembic revision -m "describe the change"
+Revision ids are short sequential strings ("001", "002", "003", ...): set
+`revision` and `down_revision` accordingly and use IF NOT EXISTS / guarded
+DO blocks so the migration is idempotent.
+
+Database URL resolution (see alembic/env.py): DATABASE_URL environment
+variable, else DATABASE_URL in the env file named by ANISAKYS_ENV_FILE, else
+.env.test under pytest, else .env.

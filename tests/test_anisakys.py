@@ -1,12 +1,7 @@
 import argparse
 import ipaddress
-import time
-from itertools import permutations, islice
-from typing import List, Optional
-import sys
 import pytest
 from sqlalchemy import text
-from pathlib import Path
 
 # Import main module
 from src import main
@@ -68,13 +63,12 @@ def test_engine_mode():
 
 
 # --- Test generate_queries_file ---
-def test_generate_queries_file(tmp_path, monkeypatch):
+def test_generate_queries_file(tmp_path):
     log("Starting test_generate_queries_file")
     keywords = ["phish", "attack"]
     domains = [".com", ".net"]
     test_queries_file = tmp_path / "test_queries_file.txt"
-    monkeypatch.setattr(main, "QUERIES_FILE", str(test_queries_file))
-    generate_queries_file(keywords, domains)
+    generate_queries_file(keywords, domains, str(test_queries_file))
     assert test_queries_file.exists(), "Test queries file was not created."
     lines = test_queries_file.read_text().splitlines()
     log(f"Generated {len(lines)} query lines")
@@ -102,10 +96,11 @@ def test_store_scan_result(monkeypatch):
     log("Starting test_store_scan_result")
     # Use the test Postgres database defined in DATABASE_URL.
     db_manager = DatabaseManager(db_url=main.DATABASE_URL)
-    # Drop table if it exists to ensure a clean slate.
-    with db_manager.engine.connect() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS scan_results"))
-    db_manager.init_db()  # Re-create the table.
+    # The schema comes from `alembic upgrade head` (conftest); start from a clean row.
+    with db_manager.engine.begin() as conn:
+        conn.execute(
+            text("DELETE FROM scan_results WHERE url = :url"), {"url": "https://example.com"}
+        )
     # Insert a dummy scan result.
     PhishingUtils.store_scan_result(
         "https://example.com", 200, ["phish"], db_file=main.DATABASE_URL
@@ -180,10 +175,11 @@ def test_filter_allowed_targets():
 def test_mark_site_as_phishing():
     log("Starting test_mark_site_as_phishing")
     db_manager = DatabaseManager(db_url=main.DATABASE_URL)
-    # Drop and re-create the phishing_sites table for a clean test.
-    with db_manager.engine.connect() as conn:
-        conn.execute(text("DROP TABLE IF EXISTS phishing_sites"))
-    db_manager.init_phishing_db()
+    # The schema comes from `alembic upgrade head` (conftest); start from a clean row.
+    with db_manager.engine.begin() as conn:
+        conn.execute(
+            text("DELETE FROM phishing_sites WHERE url = :url"), {"url": "https://malicious.com"}
+        )
     dummy_args = argparse.Namespace(
         report=None,
         process_reports=False,

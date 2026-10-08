@@ -3,11 +3,31 @@
 
 version: 2
 updates:
+  # pyproject.toml + poetry.lock. After merging an update, regenerate the
+  # requirements files with tools/sync-requirements.sh (CI fails until then).
   - package-ecosystem: "pip"
-    directory: "."
+    directory: "/"
     schedule:
       interval: "weekly"
     commit-message:
       prefix: "🐛 fix(deps)"
     open-pull-requests-limit: 5
+    target-branch: "dev"
+  # The pinned python base image of the Dockerfile.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "🐳 build(docker)"
+    open-pull-requests-limit: 2
+    target-branch: "dev"
+  # Action versions used by .github/workflows.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    commit-message:
+      prefix: "👷 ci"
+    open-pull-requests-limit: 3
     target-branch: "dev"

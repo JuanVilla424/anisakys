@@ -165,6 +165,7 @@ Anisakys integrates multiple threat intelligence services to provide comprehensi
 - **🦠 VirusTotal** - Queries 70+ antivirus engines for malware detection and URL reputation
 - **🔍 URLVoid** - Verifies against 30+ reputation sources and blacklist services
 - **🎣 PhishTank** - Community database of verified phishing sites
+- **🛡️ Google Safe Browsing** - Real-time malware and social engineering detection (API v4)
 - **🔗 Grinder** - Optional malicious IP reporting to threat intelligence system (configurable)
 
 #### 📈 **Confidence System**
@@ -175,6 +176,18 @@ The system automatically calculates:
 - **Threat Level** - Aggregated classification (low/medium/high/critical)
 - **Detection Keywords** - Specific terms that triggered detection
 - **API Response Consensus** - Percentage of APIs confirming the threat
+
+#### 🎯 **Threat Level Rules**
+
+| Level      | Triggers                                                   |
+| ---------- | ---------------------------------------------------------- |
+| `critical` | Homoglyphs, PhishTank verified, GSB malware                |
+| `high`     | Typosquatting, combo-squatting, GSB social engineering     |
+| `medium`   | Suspicious TLD (forced minimum), keywords, domain <30 days |
+| `low`      | Low risk indicators                                        |
+| `clean`    | No threats detected                                        |
+
+> **Note:** Suspicious TLDs (.shop, .top, .buzz, etc.) force a minimum threat level of `medium`
 
 ### Enhanced Abuse Reporting
 
@@ -203,12 +216,39 @@ The system automatically calculates:
 
 ### Advanced Features
 
-- 🎯 **Priority-Based Processing**: High/Medium/Low priority threat handling
+- 🎯 **Priority-Based Processing**: High/Medium/Low priority threat handling, re-derived from every scan's verdict (an analyst's label always wins) so the report queue always works on what the detector knows now
 - 🔍 **Real-Time Analysis**: Immediate processing for critical keywords
 - 📊 **Confidence Scoring**: ML-based threat assessment (0-100%)
 - 🤖 **Intelligent Auto-Reporting**: Configurable confidence thresholds
 - 📈 **Comprehensive Logging**: Detailed audit trails and monitoring
 - ⚙️ **Flexible Configuration**: Environment-based settings management
+
+### Detection Core v2 (Phase 2)
+
+- 🧮 **Calibrated fusion** (`src/detection/fusion.py`): every scan signal group
+  (lexical, WHOIS, threat intel, capture, content, brand, kit, judge, browser)
+  feeds a logistic model with Platt calibration; strong evidence sets floors
+  (GSB/verified PhishTank ≥ 0.97, kit and homoglyphs ≥ 0.97, brand mismatch
+  with a credential form ≥ 0.90); probability and coverage are reported
+  separately and `clean` requires enough coverage. The model lives in a
+  versioned artifact (`src/detection/models/fusion-v*.json`) whose activation
+  gate (`python -m src.eval gate …`) is the single source of truth: a gate that
+  did not pass leaves the fusion in **shadow** (stored, never reported), and so
+  does a capture-engine mismatch between training and scanning. The deployed
+  artifact is `fusion-v2` (browser-trained; gate on the phase 2 test split:
+  5 TP / 0 FP at `auto_report`). Train it with
+  `python -m src.eval train-fusion <dataset> --split train`.
+- 🌐 **Multi-profile browser capture** (`src/capture/worker.py`): a sandboxed
+  Playwright worker (desktop/mobile `es-CO` + bot profiles) captures redirects
+  (HTTP, meta-refresh, JS, iframes), HTML, headers, TLS details, server IP
+  (HAR), screenshots, favicon, HAR and CAPTCHA/Turnstile/Cloudflare walls,
+  with the SSRF guard on **every** browser request; cloaking is detected by
+  divergences between profiles; the server IP is enriched with its ASN (RDAP).
+  Deployed as the `capture` compose service (own network, no route to
+  postgres, read-only rootfs, `cap_drop: ALL`, no secrets) and reached over a
+  shared Unix socket (`CAPTURE_WORKER_SOCKET`); without it every scan keeps
+  the plain HTTP fetch. Per-geography serving is measured only when
+  `CAPTURE_PROXIES` is set.
 
 ## 🚀 Getting Started
 
@@ -314,19 +354,19 @@ pip install -r requirements.txt
 **🔹 Using Poetry (Alternative)**
 
 ```bash
-# Install Poetry
-pip install poetry
+# Install Poetry (>= 2.2)
+pipx install poetry
 
-# Setup project
-poetry lock
-poetry install
+# Install the locked dependencies (incl. dev tools)
+poetry install --with dev
 
 # Activate environment
-poetry shell
-
-# When done
-deactivate
+eval $(poetry env activate)
 ```
+
+> 📦 `pyproject.toml` is the single source of truth for dependencies and
+> `poetry.lock` pins them. `requirements*.txt` are generated from the lock:
+> after changing dependencies run `poetry lock` and `tools/sync-requirements.sh`.
 
 </td>
 </tr>
@@ -343,6 +383,16 @@ nano .env
 ```
 
 > 💡 **Pro Tip:** The system will work with minimal configuration, but API keys significantly enhance detection capabilities.
+
+#### **Step 4: 🗃️ Apply Database Migrations**
+
+```bash
+# Creates or upgrades the schema in DATABASE_URL (run again after every update)
+alembic upgrade head
+```
+
+> ⚠️ The application never creates tables by itself: every process checks at startup that the
+> database is at the latest Alembic revision and refuses to start otherwise.
 
 ## ⚙️ Configuration
 
@@ -420,20 +470,84 @@ python anisakys.py --show-auto-status
 
 ### 🚀 **REST API Server**
 
-Start the REST API server with authentication:
+Development server (binds `API_BIND_HOST`, `127.0.0.1` by default; the Werkzeug
+debugger is never enabled):
 
 ```bash
 cd anisakys
 python anisakys.py --start-api --api-port 8080 --api-key your_secure_api_key
 ```
 
+Production: serve the WSGI app with gunicorn (as `entrypoint-backend.sh` does). This
+process only serves HTTP; background jobs run in the scheduler role.
+
+```bash
+gunicorn --bind 127.0.0.1:8091 --worker-class gthread --threads 4 'src.api.wsgi:create_app()'
+```
+
+Behind a reverse proxy set `TRUSTED_PROXY_HOPS`; with several workers set
+`RATELIMIT_STORAGE_URL=redis://...` so rate limits are shared.
+
+**API keys and scopes** (`python -m src.cli.api_keys create --help` lists them):
+`read`, `scan`, `report` (submissions wait for analyst approval), `report_send`
+(submissions are reported without approval), `write`, `email_admin` (e-mail monitor
+threads, limited to `EMAIL_MONITOR_ALLOWED_MAILBOXES`), `metrics` and `admin`.
+
 **API Endpoints:**
 
-- `POST /api/v1/report` - Submit phishing reports
+- `POST /api/v1/report` - Submit phishing reports (202 pending approval without `report_send`)
 - `POST /api/v1/multi-scan` - Perform multi-API validation
 - `GET /api/v1/status/<url>` - Check report status
-- `GET /api/v1/stats` - System statistics
-- `GET /api/v1/health` - Health check
+- `GET /api/v1/stats` - System statistics, incl. `reports_by_status` and `outbox_by_status`
+- `GET /api/v1/session` - The calling key: `key_type`, `key_name`, `key_prefix` (8 chars),
+  usable `scopes` and `rate_limit_storage` (`shared`/`per-process`); never the secret
+- `GET /api/v1/sites/sources` - `[{"source": str|null, "count": int}]`
+- `GET /api/v1/sites/<id>/capture` - Newest page capture of a site: transport, content signals and
+  the brand identified (`{"capture": null}` until a scan captures the page)
+- `GET /api/v1/brands` / `GET /api/v1/brands/<slug>` - Brand catalogue (starts empty; `search`,
+  `include_inactive`)
+- `POST /api/v1/brands`, `PATCH /api/v1/brands/<slug>`, `DELETE /api/v1/brands/<slug>` - Add, edit
+  or deactivate a brand (scope `write`)
+- `POST /api/v1/brands/<slug>/assets`, `DELETE /api/v1/brands/<slug>/assets/<id>` - Reference favicon
+  or logo (image ≤ 1 MB; only its hashes are kept)
+- `GET /api/v1/reports/tasks` - Open analyst tasks (web-form providers, sites without a contact)
+- `POST /api/v1/reports/tasks/<id>/complete` - Close one: `{"outcome": "submitted"|"not_applicable", "note"?}`
+- `POST /api/v2/stix/bundle` - Build a STIX 2.1 indicator bundle (TLP 2.0, AMBER by default)
+- `GET /api/v1/health` - Health check with a database ping (503 when unhealthy)
+- `GET /metrics` - Prometheus metrics (`METRICS_TOKEN` or a `metrics`/`read` API key)
+
+**Response conventions** (console endpoints):
+
+- Unknown is `null`, never a default: no invented severities, confidences, statuses,
+  sources, priorities, `gsb_safe`/`is_cloudflare` flags or "now" timestamps.
+- Timestamps are ISO-8601 with an explicit offset (`2026-01-02T03:04:05+00:00`).
+  Database columns without time zone are read as UTC (the images and CI run the
+  database and the application in UTC); see `src/api/serializers.py`.
+- Every response carries `X-RateLimit-Limit`, `X-RateLimit-Remaining`,
+  `X-RateLimit-Reset` and `Retry-After`; a 429 is
+  `{"error": "...", "retry_after": <seconds>}` with the same `Retry-After`.
+  `/threads/<id>/results` is limited per API key _and_ thread (30/min, 120/min per key).
+- Lists report the real `total` across pages (`/sites`, `/intelligence/iocs`,
+  `/campaigns`, `/reports/tasks`); `/graph` reports `meta.total_rows`, `meta.limit`
+  and `meta.limited`.
+
+**Compatibility notes** (fields that were lying now say so; names are unchanged):
+
+- `/graph`: node `severity` is null except for domains (severest stored threat level);
+  edge `confidence` is null except `detected_as` (stored kit confidence / 100);
+  `meta` counts count the returned nodes.
+- `/intelligence/iocs`: new `search` and `threat` filters; IP `threat` is the severest
+  level of its sites; IP `tags` is empty when the Cloudflare flag is unknown.
+- `/sites`: new `takedown_date`; `source`, `priority`, `is_cloudflare` and `gsb_safe`
+  (until GSB checked the site) can be null.
+- `/threads`: `results_count` = results shown (same as `/threads/<id>/results` total),
+  `total_results` = all recorded results incl. discarded, new `last_execution_results`.
+- `/integrations`: `status` is `unknown` without breaker data; `circuit_breaker` and
+  `error_rate` can be null; `last_success` is null (not recorded), new `state_changed_at`.
+- `/campaigns`: `confidence` can be null; new `limit`/`offset` (default 100, max 500).
+- `/activity`: `timestamp` and `severity` can be null; undated events sort last.
+- `/reports`: `status` can be null; `?status=` accepts `queued`, `failed`, `pending_manual`.
+- `/report`: `processing` can be `scheduled` (the scheduler role reports the site).
 
 ### 🕸️ **Manual Phishing Site Reporting**
 
@@ -511,6 +625,44 @@ cd anisakys
 python anisakys.py --reset-offset
 ```
 
+### 📏 **Measuring Detection Quality**
+
+Analyst labels (`POST /api/v1/sites/<id>/labels`: `confirm`, `dismiss`, `report`) are the
+ground truth. The evaluation harness builds a versioned dataset and measures the detector:
+
+```bash
+# Dataset: analyst labels + live-verified OpenPhish feed + hard negatives
+# (official brand logins, homonyms, benign SaaS pages, Tranco top sites)
+python -m src.eval build --name baseline --version 2026-10-04
+python -m src.eval verify eval/datasets/baseline/2026-10-04
+
+# Precision, recall, PR-AUC, TPR@FPR, precision@k, per-brand confusion,
+# calibration and latency/cost per stage -> eval/runs/<run>/report.{json,html}
+python -m src.eval run eval/datasets/baseline/2026-10-04 --predictor live
+python -m src.eval run eval/datasets/baseline/2026-10-04 --predictor heuristic
+
+# Time to detect / report / take down, queues and outcomes from the database
+python -m src.eval ops --days 30
+```
+
+Dataset manifests (with the samples' SHA-256) and the seed lists in `eval/seeds/` are
+versioned; samples built from third-party feeds and the run reports stay local. The same
+operational metrics are served at `GET /api/v1/metrics/operational` and on `/metrics`.
+
+Every `run` and `ops` checks the agreed targets in `eval/targets.json` (precision, recall and
+FPR at the auto-report operating point, overall and per brand; pipeline medians) and reports
+each one as met, missed or not resolvable. `run --reuse-cache <file>` re-scores the scans of an
+earlier run without new network calls.
+
+```bash
+# Per-TLD phishing log-odds from a dataset's train split -> src/data/tld_abuse.json
+python -m src.eval tld-stats eval/datasets/phase2/2026-10-05 --split train
+
+# Also measure the optional LLM judge as a separate verdict (needs LLM_JUDGE_API_KEY;
+# billed within LLM_JUDGE_DAILY_BUDGET_USD)
+python -m src.eval run eval/datasets/phase2/2026-10-05 --predictor live --judge
+```
+
 ## 🤝 Contributing
 
 **Contributions are welcome! To contribute to this repository, please follow these steps**:
@@ -555,6 +707,6 @@ For any inquiries or support, please open an issue or contact [r6ty5r296it6tl4eg
 
 <div align="center">
 
-2025 — This project is licensed under the [GNU General Public License v3.0](https://www.gnu.org/licenses/gpl-3.0.en.html). You are free to use, modify, and distribute this software under the terms of the GPL-3.0 license. For more details, please refer to the [LICENSE](LICENSE) file included in this repository.
+2026 — This project is licensed under the [GNU General Public License v3.0](https://www.gnu.org/licenses/gpl-3.0.en.html). You are free to use, modify, and distribute this software under the terms of the GPL-3.0 license. For more details, please refer to the [LICENSE](LICENSE) file included in this repository.
 
 </div>

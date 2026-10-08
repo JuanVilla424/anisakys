@@ -8,6 +8,12 @@ import os
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import pytest
+
+# Live network: resolves real MX records and sends through the configured SMTP server.
+# Excluded by default; run with `pytest -m network`.
+pytestmark = pytest.mark.network
+
 from src.main import Engine, set_testing_mode
 import argparse
 
@@ -41,7 +47,7 @@ def test_icann_integration():
         domains=None,
         allowed_sites=None,
         start_api=False,
-        api_port=8080,
+        api_port=8091,
         api_key=None,
         force_auto_analysis=False,
         auto_report_now=False,
@@ -59,7 +65,7 @@ def test_icann_integration():
         print(f"📋 Report tracker: {type(engine.report_tracker).__name__}")
 
         # Test email validation
-        print(f"\n📧 Testing test email validation...")
+        print("\n📧 Testing test email validation...")
         validation_result = engine.abuse_contact_validator.validate_registrar_abuse_contact(
             TEST_USER_EMAIL
         )
@@ -69,12 +75,12 @@ def test_icann_integration():
             print(f"   - Warnings: {len(validation_result['warnings'])}")
 
         # Test screenshot service
-        print(f"\n📸 Testing screenshot service...")
+        print("\n📸 Testing screenshot service...")
         print(f"   - Available engine: {engine.screenshot_service.preferred_engine or 'None'}")
         print(f"   - Directory: {engine.screenshot_service.screenshots_dir}")
 
         # Test report creation
-        print(f"\n📋 Testing report tracking...")
+        print("\n📋 Testing report tracking...")
         report_id = engine.report_tracker.generate_report_id()
         print(f"   - Generated ID: {report_id}")
 
@@ -82,11 +88,11 @@ def test_icann_integration():
         stats = engine.report_tracker.get_statistics()
         print(f"   - Total reports: {stats.get('total_reports', 0)}")
 
-        print(f"\n🎉 SUCCESSFUL INTEGRATION")
-        print(f"=" * 30)
-        print(f"✅ All ICANN services are working")
+        print("\n🎉 SUCCESSFUL INTEGRATION")
+        print("=" * 30)
+        print("✅ All ICANN services are working")
         print(f"✅ Email {TEST_USER_EMAIL} ready for testing")
-        print(f"✅ System meets ICANN guidelines")
+        print("✅ System meets ICANN guidelines")
 
         return True
 
@@ -101,7 +107,7 @@ def test_icann_integration():
 def test_mock_abuse_report():
     """Test report sending with mocks to avoid real sending"""
     set_testing_mode(True)  # Block CCs for security
-    print(f"\n🧪 REPORT SENDING TEST (MOCK)")
+    print("\n🧪 REPORT SENDING TEST (MOCK)")
     print("=" * 40)
 
     # Mock settings to avoid real sending
@@ -176,21 +182,21 @@ def main():
     report_ok = test_mock_abuse_report()
 
     # Final summary
-    print(f"\n🏁 FINAL SUMMARY")
+    print("\n🏁 FINAL SUMMARY")
     print("=" * 20)
     print(f"✅ ICANN Integration: {'✅ OK' if integration_ok else '❌ FAILED'}")
     print(f"✅ Report sending: {'✅ OK' if report_ok else '❌ FAILED'}")
 
     if integration_ok and report_ok:
-        print(f"\n🎉 ALL TESTS SUCCESSFUL!")
-        print(f"🔒 System fully compliant with ICANN guidelines")
+        print("\n🎉 ALL TESTS SUCCESSFUL!")
+        print("🔒 System fully compliant with ICANN guidelines")
         print(f"📧 Email {TEST_USER_EMAIL} working correctly")
-        print(f"📸 Automatic screenshots active")
-        print(f"📋 Report tracking active")
-        print(f"⏰ 2 business days SLA documented")
-        print(f"✅ System ready for production")
+        print("📸 Automatic screenshots active")
+        print("📋 Report tracking active")
+        print("⏰ 2 business days SLA documented")
+        print("✅ System ready for production")
     else:
-        print(f"\n⚠️  Some tests failed. Check logs above.")
+        print("\n⚠️  Some tests failed. Check logs above.")
 
     return integration_ok and report_ok
 

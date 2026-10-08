@@ -10,11 +10,18 @@ repos:
       - id: check-yaml
         types: [yaml]
         files: \.(yaml)$
-  - repo: https://github.com/psf/black
-    rev: 24.10.0
+  # Keep ruff and black revs equal to the versions pinned in pyproject.toml
+  # (dependency-groups.dev), so hooks, local runs and CI agree.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.10
+    hooks:
+      - id: ruff-check
+        args: [--no-fix]
+  - repo: https://github.com/psf/black-pre-commit-mirror
+    rev: 26.5.1
     hooks:
       - id: black
-        language_version: python3
+        language_version: python3.12
   - repo: https://github.com/PyCQA/pylint
     rev: v3.3.1
     hooks:
@@ -25,7 +32,7 @@ repos:
         types: [python]
         args: [--rcfile=.pylintrc, .]
   - repo: https://github.com/hadolint/hadolint
-    rev: v2.13.1-beta
+    rev: v2.15.1
     hooks:
       - id: hadolint
         name: hadolint

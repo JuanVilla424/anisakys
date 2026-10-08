@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1
+# Anisakys capture worker image: the sandboxed multi-profile Playwright worker
+# (src/capture/worker.py) that scans pages in a real browser.
+#
+#   docker build -f Dockerfile.capture -t anisakys-capture .
+#
+# The base image is pinned to the exact Playwright version of the lock
+# (requirements.txt: playwright==1.63.0) so the browsers inside match the
+# Python API driving them. This container holds NO secrets: no env_file, only
+# its own socket path and limits -- configuration is compose's job.
+#
+# Chromium runs with --no-sandbox: the image's user is unprivileged and the
+# container replaces the setuid sandbox (read-only rootfs, cap_drop ALL,
+# no-new-privileges, memory/CPU limits, network without a route to postgres).
+
+FROM mcr.microsoft.com/playwright/python:v1.63.0-noble
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+
+WORKDIR /app
+COPY . .
+
+# The socket volume mounts here: pre-create it with the service user's
+# ownership so a fresh named volume inherits it on first use (Docker's
+# copy-on-first-use) and uid 10001 can create the socket.
+RUN mkdir -p /run/anisakys-capture && chown 10001:10001 /run/anisakys-capture
+
+# Same uid/gid as the backend image's service user, so the shared socket
+# volume is group-accessible to the API and scheduler (the worker creates the
+# socket with umask 007). Chromium's scratch goes to /tmp (tmpfs in compose).
+ENV HOME=/tmp \
+    XDG_CACHE_HOME=/tmp \
+    XDG_CONFIG_HOME=/tmp
+USER 10001:10001
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=25s --retries=3 \
+    CMD ["python", "-m", "src.capture.worker_healthcheck"]
+
+CMD ["python", "-m", "src.capture.worker"]

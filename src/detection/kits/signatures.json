@@ -1,0 +1,37 @@
+{
+  "_comment": "Phishing-kit traits matched on captured HTML (src/detection/features.py: kit_traits). Each trait is a generic, documented behaviour of credential-phishing kits, not a family attribution. Families are added only with a public source per signature (field 'source'). Bump 'version' on every change; the version is recorded with each capture's features.",
+  "version": "2026.10.1",
+  "traits": [
+    {
+      "id": "telegram_bot_api",
+      "description": "Page code talks to the Telegram Bot API, a common way kits send stolen credentials to the operator.",
+      "pattern": "api\\.telegram\\.org/bot[0-9]{6,12}:[A-Za-z0-9_-]{30,40}",
+      "weight": "strong"
+    },
+    {
+      "id": "discord_webhook",
+      "description": "Page code posts to a Discord webhook.",
+      "pattern": "discord(?:app)?\\.com/api/webhooks/[0-9]{10,25}/",
+      "weight": "strong"
+    },
+    {
+      "id": "form_backend_service",
+      "description": "A form is handled by a third-party form backend instead of the site itself.",
+      "pattern": "(?:formspree\\.io|formsubmit\\.co|getform\\.io|webhook\\.site|submit-form\\.com)",
+      "weight": "medium"
+    },
+    {
+      "id": "obfuscated_document",
+      "description": "The page writes itself from an encoded string (atob/unescape into document.write).",
+      "pattern": "document\\.write\\s*\\(\\s*(?:atob|unescape|decodeURIComponent)\\s*\\(",
+      "weight": "medium"
+    },
+    {
+      "id": "evilginx_header_leak",
+      "description": "Reverse-proxy toolkit header leaked in the page (see kit_fingerprint.py).",
+      "pattern": "x-evilginx",
+      "weight": "strong"
+    }
+  ],
+  "families": []
+}

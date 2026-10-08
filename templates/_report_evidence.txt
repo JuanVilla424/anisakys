@@ -1,0 +1,29 @@
+Report ID:          {{ report_id }}
+Reported URL:       {{ defanged_url }}
+{% if brand_name %}Impersonated brand: {{ brand_name }}
+{% endif %}{% if first_seen_utc %}First detected:     {{ first_seen_utc }}
+{% endif %}{% if threat_level %}Threat level:       {{ threat_level | upper }}
+{% endif %}{% if confidence_score is not none %}Confidence:         {{ confidence_score }}%
+{% endif %}{% if resolved_ip %}Resolved IP:        {{ defanged_ip }}
+{% endif %}{% if asn %}ASN:                {{ asn }}
+{% endif %}{% if hosting_provider %}Hosting provider:   {{ hosting_provider }}
+{% endif %}{% if registrar %}Registrar:          {{ registrar }}
+{% endif %}
+The URL is defanged so it cannot be opened by accident: replace "hxxp" with
+"http" and "[.]" with ".", and open it only in an isolated environment.
+{% if evidence %}
+KEY EVIDENCE
+{% for item in evidence %}- {{ item }}
+{% endfor %}{% endif %}
+HOW TO REPRODUCE
+{% if reproduction_note %}{{ reproduction_note }}{% else %}Open the URL above from a clean browser profile. Phishing kits often hide their
+content from some networks, countries or desktop browsers; if you see a blank
+or benign page, retry from a residential connection or a mobile user agent
+before closing the case.{% endif %}
+{% if attachments %}
+ATTACHMENTS
+{% for name in attachments %}- {{ name }}
+{% endfor %}{% endif %}{% if whois_excerpt %}
+REGISTRATION DATA (EXCERPT)
+{{ whois_excerpt }}
+{% endif %}

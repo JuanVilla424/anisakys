@@ -1,14 +1,103 @@
+import errno
+import ipaddress
+import socket
 import sys
 import os
 import pytest
 import uuid
-from pathlib import Path
+from typing import Any, Optional, Union
 from urllib.parse import urlparse
 import psycopg2
+from alembic import command
 from sqlalchemy import create_engine, text
 from contextlib import contextmanager
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+# Preload detection.analyzer first to resolve a src.intelligence <-> src.detection
+# import cycle that otherwise breaks test collection. Safe at runtime (the app
+# boots via src.main which imports these in a working order).
+import src.detection.analyzer  # noqa: F401,E402
+
+# ---------------------------------------------------------------------------
+# Network guard: tests not marked `network` may only talk to this machine.
+# ---------------------------------------------------------------------------
+# Several code paths resolve hostnames or query WHOIS without being mocked;
+# outside the `network` marker they must behave as if offline instead of
+# silently depending on (and hammering) real services. PostgreSQL goes
+# through libpq's own sockets and is not affected.
+
+_REAL_CONNECT = socket.socket.connect
+_REAL_CONNECT_EX = socket.socket.connect_ex
+_REAL_SENDTO = socket.socket.sendto
+_REAL_GETADDRINFO = socket.getaddrinfo
+
+
+class NetworkAccessBlocked(OSError):
+    """A test without the ``network`` marker tried to reach a remote host."""
+
+
+def _host_is_local(host: Union[str, bytes, None]) -> bool:
+    """Tell whether ``host`` designates this machine.
+
+    Args:
+        host: Host name or address as passed to the socket API.
+
+    Returns:
+        True for ``None`` (passive lookups), ``localhost`` and loopback IPs.
+    """
+    if host is None:
+        return True
+    name = host.decode() if isinstance(host, bytes) else str(host)
+    if name in ("", "localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(name.split("%")[0]).is_loopback
+    except ValueError:
+        return False
+
+
+def _blocked(target: Any) -> NetworkAccessBlocked:
+    return NetworkAccessBlocked(
+        errno.ENETUNREACH,
+        f"test attempted network access to {target!r}; mark it @pytest.mark.network",
+    )
+
+
+def _guarded_connect(self: socket.socket, address: Any) -> None:
+    if self.family in (socket.AF_INET, socket.AF_INET6) and not _host_is_local(address[0]):
+        raise _blocked(address)
+    return _REAL_CONNECT(self, address)
+
+
+def _guarded_connect_ex(self: socket.socket, address: Any) -> int:
+    if self.family in (socket.AF_INET, socket.AF_INET6) and not _host_is_local(address[0]):
+        return errno.ENETUNREACH
+    return _REAL_CONNECT_EX(self, address)
+
+
+def _guarded_sendto(self: socket.socket, data: bytes, *args: Any) -> int:
+    address = args[-1]
+    if self.family in (socket.AF_INET, socket.AF_INET6) and not _host_is_local(address[0]):
+        raise _blocked(address)
+    return _REAL_SENDTO(self, data, *args)
+
+
+def _guarded_getaddrinfo(host: Optional[Union[str, bytes]], *args: Any, **kwargs: Any) -> Any:
+    if not _host_is_local(host):
+        raise socket.gaierror(socket.EAI_NONAME, f"DNS lookup of {host!r} blocked in tests")
+    return _REAL_GETADDRINFO(host, *args, **kwargs)
+
+
+@pytest.fixture(autouse=True)
+def _block_network_unless_marked(request, monkeypatch):
+    """Keep every test that is not marked ``network`` off the internet."""
+    if request.node.get_closest_marker("network") is None:
+        monkeypatch.setattr(socket.socket, "connect", _guarded_connect)
+        monkeypatch.setattr(socket.socket, "connect_ex", _guarded_connect_ex)
+        monkeypatch.setattr(socket.socket, "sendto", _guarded_sendto)
+        monkeypatch.setattr(socket, "getaddrinfo", _guarded_getaddrinfo)
+    yield
 
 
 @pytest.fixture(scope="session")
@@ -19,33 +108,172 @@ def main_module():
     return main
 
 
+def maintenance_database_url(db_url: str) -> str:
+    """Return the URL of the ``postgres`` maintenance database on the same server.
+
+    Args:
+        db_url: URL of any database on the server.
+
+    Returns:
+        The same URL pointing at the ``postgres`` database.
+    """
+    parsed = urlparse(db_url)
+    return parsed._replace(path="/postgres").geturl()
+
+
+def upgrade_database_to_head(db_url: str) -> None:
+    """Build or update a database schema exactly like production: ``alembic upgrade head``.
+
+    Args:
+        db_url: URL of the database to migrate.
+    """
+    from src.database.schema import get_alembic_config
+
+    command.upgrade(get_alembic_config(db_url), "head")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def create_test_database(main_module):
-    """
-    Creates the test database if it does not exist.
+    """Create the test database if needed and migrate it to the Alembic head.
+
+    The schema comes only from the migrations (the application has no runtime
+    DDL any more), so the suite exercises the same schema as production.
     """
     db_url = main_module.DATABASE_URL
-    parsed = urlparse(db_url)
-    test_db = parsed.path.lstrip("/")
+    test_db = urlparse(db_url).path.lstrip("/")
 
-    # Build a connection URL to the default database
-    default_db = "postgres"
-    default_db_url = db_url.replace(f"/{test_db}", f"/{default_db}")
-
-    conn = psycopg2.connect(default_db_url)
+    conn = psycopg2.connect(maintenance_database_url(db_url))
     conn.autocommit = True
     cur = conn.cursor()
     cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (test_db,))
-    exists = cur.fetchone()
-    if not exists:
-        cur.execute(f"CREATE DATABASE {test_db}")
-        print(f"Created test database '{test_db}'.")
-    else:
-        print(f"Test database '{test_db}' already exists.")
+    if not cur.fetchone():
+        cur.execute(f'CREATE DATABASE "{test_db}"')
     cur.close()
     conn.close()
 
+    upgrade_database_to_head(db_url)
+
     yield db_url
+
+
+def _load_migration(filename: str):
+    """Import an Alembic revision module by file name (they start with digits).
+
+    Args:
+        filename: File name under ``alembic/versions``.
+
+    Returns:
+        The executed module object.
+    """
+    import importlib.util
+
+    path = os.path.join(os.path.dirname(__file__), "..", "alembic", "versions", filename)
+    spec = importlib.util.spec_from_file_location(f"_migration_{filename[:3]}", path)
+    assert spec is not None and spec.loader is not None, f"cannot load migration {filename}"
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def apply_reporting_schema(engine) -> None:
+    """Create the tables the reporting pipeline needs, exactly as Alembic would.
+
+    Runs the baseline revision (001) through a minimal ``op`` stand-in and then
+    the SQL constants of the reporting revision (004), of the analyst labels
+    revision (006), whose ``label_verdict`` the claim queries read, and of the
+    detection-core revision (007: brands, captures, judge audit, fusion columns).
+    Every statement is idempotent, so this is safe on a test database that
+    already has some of the tables.
+
+    Args:
+        engine: SQLAlchemy engine bound to the test database.
+    """
+    baseline = _load_migration("001_baseline_schema.py")
+    reporting = _load_migration("004_reporting_outbox.py")
+    labels = _load_migration("006_analyst_labels.py")
+    detection = _load_migration("007_detection_core.py")
+    with engine.begin() as conn:
+
+        class _Op:
+            @staticmethod
+            def execute(sql: str) -> None:
+                conn.execute(text(sql))
+
+        setattr(baseline, "op", _Op())
+        baseline.upgrade()
+        for statement in (
+            *reporting.UPGRADE_STATEMENTS,
+            *labels.UPGRADE_STATEMENTS,
+            *detection.UPGRADE_STATEMENTS,
+        ):
+            conn.execute(text(statement))
+
+
+@pytest.fixture(scope="session", autouse=True)
+def reporting_schema(create_test_database):
+    """Apply migrations 001 + 004 + 006 + 007 to the test database once per session."""
+    engine = create_engine(create_test_database)
+    try:
+        apply_reporting_schema(engine)
+    finally:
+        engine.dispose()
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _restore_reporting_schema(reporting_schema, db_engine):
+    """Re-apply the reporting schema after tests that drop ``phishing_sites``.
+
+    Some legacy tests drop and recreate ``phishing_sites`` through the runtime
+    DDL, which knows nothing about the claim columns of revision 004 or the
+    label columns of revision 006. One cheap catalogue query per test detects
+    that and restores the columns.
+    """
+    yield
+    with db_engine.connect() as conn:
+        present = conn.execute(
+            text(
+                "SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE table_name = 'phishing_sites' "
+                "AND column_name IN ('report_lease_until', 'label_verdict', 'fusion_probability')"
+            )
+        ).scalar()
+    if present != 3:
+        apply_reporting_schema(db_engine)
+
+
+@pytest.fixture
+def scratch_database(create_test_database):
+    """Factory for throw-away databases on the test server (migration tests).
+
+    Each call creates an empty database named ``<test db>_mig_<random>`` and
+    returns its URL; every database created this way is dropped at teardown.
+    """
+    test_db = urlparse(create_test_database).path.lstrip("/")
+    created = []
+
+    def _create() -> str:
+        name = f"{test_db}_mig_{uuid.uuid4().hex[:8]}"
+        conn = psycopg2.connect(maintenance_database_url(create_test_database))
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f'CREATE DATABASE "{name}"')
+        finally:
+            conn.close()
+        created.append(name)
+        return urlparse(create_test_database)._replace(path=f"/{name}").geturl()
+
+    yield _create
+
+    conn = psycopg2.connect(maintenance_database_url(create_test_database))
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            for name in created:
+                cur.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+    finally:
+        conn.close()
 
 
 @pytest.fixture
@@ -96,7 +324,7 @@ def cleanup_specific_records(engine, records):
         # Clean registrar_abuse
         for registrar in records.get("registrar_abuse", []):
             conn.execute(
-                text("DELETE FROM registrar_abuse WHERE registrar = :registrar"),
+                text("DELETE FROM registrar_abuse WHERE registrar_name = :registrar"),
                 {"registrar": registrar},
             )
 
@@ -127,6 +355,23 @@ def test_urls(unique_test_id):
 
 
 @pytest.fixture(autouse=True)
+def _fresh_provider_runtime():
+    """Every test starts with an empty provider cache and full rate-limit buckets.
+
+    The cache is process-wide (src/intelligence/provider_runtime.py): without this, a
+    mocked provider answer of one test would be served to the next.
+    """
+    from src.brands import catalog
+    from src.intelligence import provider_runtime
+
+    provider_runtime.reset()
+    catalog.invalidate()
+    yield
+    provider_runtime.reset()
+    catalog.invalidate()
+
+
+@pytest.fixture(autouse=True)
 def auto_cleanup(request, db_engine, test_record_tracker):
     """Automatically clean up test records after each test"""
     yield
@@ -148,12 +393,10 @@ def temporary_test_data(engine, unique_id, data_type="phishing_site"):
         with engine.begin() as conn:
             if data_type == "phishing_site":
                 conn.execute(
-                    text(
-                        """
+                    text("""
                         INSERT INTO phishing_sites (url, manual_flag, first_seen, description)
                         VALUES (:url, 1, CURRENT_TIMESTAMP, :desc)
-                    """
-                    ),
+                    """),
                     {"url": url, "desc": f"Test record {unique_id}"},
                 )
 
@@ -179,12 +422,10 @@ class TestDataManager:
 
         with self.engine.begin() as conn:
             conn.execute(
-                text(
-                    """
+                text("""
                     INSERT INTO phishing_sites (url, manual_flag, first_seen)
                     VALUES (:url, 1, CURRENT_TIMESTAMP)
-                """
-                ),
+                """),
                 {"url": url},
             )
 
@@ -197,12 +438,10 @@ class TestDataManager:
 
         with self.engine.begin() as conn:
             conn.execute(
-                text(
-                    """
+                text("""
                     INSERT INTO scan_results (url, first_seen, response_code)
                     VALUES (:url, CURRENT_TIMESTAMP, 200)
-                """
-                ),
+                """),
                 {"url": url},
             )
 
